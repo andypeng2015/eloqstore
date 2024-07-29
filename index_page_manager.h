@@ -1,0 +1,151 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "async_io_manager.h"
+#include "circular_queue.h"
+#include "comparator.h"
+#include "kv_options.h"
+#include "mem_index_page.h"
+#include "table_ident.h"
+
+namespace kvstore
+{
+class KvTask;
+class PageMapper;
+
+struct CowRootMeta
+{
+    MemIndexPage *root_;
+    std::unique_ptr<PageMapper> new_mapper_;
+    std::shared_ptr<MappingSnapshot> old_mapping_;
+};
+
+class IndexPageManager
+{
+public:
+    IndexPageManager(const KvOptions *opt, AsyncIoManager *io_manager);
+    ~IndexPageManager();
+
+    const Comparator *GetComparator() const;
+
+    /**
+     * @brief Allocates an index page from buffer pool. The returned page is not
+     * traced in the cache replacement list, so it cannot be evicted. Whoever
+     * getting a new page should enqueue it later for cache replacement.
+     *
+     * @return MemIndexPage*
+     */
+    MemIndexPage *AllocIndexPage();
+
+    /**
+     * @brief Enqueues the index page into the cache replacement list.
+     *
+     * @param page
+     */
+    void EnqueuIndexPage(MemIndexPage *page);
+
+    std::pair<MemIndexPage *, PageMapper *> FindRoot(
+        const TableIdent &tbl_ident);
+
+    CowRootMeta MakeCowRoot(const TableIdent &tbl_ident);
+
+    void UpdateRoot(const TableIdent &tbl_ident,
+                    MemIndexPage *new_root,
+                    std::unique_ptr<PageMapper> new_mapper);
+
+    MemIndexPage *FindPage(MappingSnapshot *mapping, uint32_t page_id);
+
+    void FreeMappingSnapshot(MappingSnapshot *mapping);
+
+    void Unswizzling(MemIndexPage *page);
+
+    void FinishIo(MappingSnapshot *mapping,
+                  MemIndexPage *idx_page,
+                  uint32_t page_id,
+                  uint32_t file_page_id);
+
+private:
+    struct RootMeta
+    {
+        MemIndexPage *root_page_;
+        std::unique_ptr<PageMapper> mapper_;
+        std::unordered_set<MappingSnapshot *> mapping_snapshots_;
+        uint32_t ref_cnt_{0};
+    };
+
+    /**
+     * @brief Returns if memory is full. TODO: Replaces with a reasonable
+     * implementation.
+     *
+     * @return true
+     * @return false
+     */
+    bool IsFull() const;
+
+    bool Evict();
+
+    /**
+     * @brief Evicts the root entry from the root table, if (1) the current root
+     * page has been evicted, (2) no mapping snapshot of the table is active,
+     * and (3) all pages belonging to the tree have been evicted.
+     *
+     * @param root_it
+     */
+    void EvictRootIfEmpty(
+        std::unordered_map<TableIdent, RootMeta>::iterator root_it);
+
+    bool RecyclePage(MemIndexPage *page);
+
+    const KvOptions *const options_;
+
+    /**
+     * @brief Reserved head and tail for the active list. The head points to the
+     * most-recently accessed, and the tail points to the least-recently
+     * accessed.
+     *
+     */
+    MemIndexPage active_head_{0};
+    MemIndexPage active_tail_{0};
+    MemIndexPage free_head_{0};
+
+    /**
+     * @brief A pool of index pages.
+     *
+     */
+    std::vector<std::unique_ptr<MemIndexPage>> index_pages_;
+
+    /**
+     * @brief Cached roots, which maps a table identity to an in-memory
+     * page.
+     *
+     */
+    std::unordered_map<TableIdent, RootMeta> tbl_roots_;
+
+    struct ReadReq
+    {
+        std::vector<KvTask *> pending_tasks_;
+        ReadReq *next_{nullptr};
+    };
+
+    void RecycleReadReq(ReadReq *entry);
+
+    ReadReq *GetFreeReadReq();
+
+    std::vector<ReadReq> read_reqs_;
+    ReadReq free_read_head_;
+
+    /**
+     * @brief A collection of tasks requesting to load pages.
+     *
+     */
+    std::unordered_map<uint32_t, ReadReq *> loading_zone_;
+    CircularQueue<KvTask *> waiting_zone_;
+
+    AsyncIoManager *io_manager_;
+};
+}  // namespace kvstore

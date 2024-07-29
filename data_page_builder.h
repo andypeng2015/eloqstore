@@ -1,0 +1,55 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "kv_options.h"
+
+namespace kvstore
+{
+
+class DataPageBuilder
+{
+public:
+    explicit DataPageBuilder(const KvOptions *opt);
+
+    DataPageBuilder(const DataPageBuilder &) = delete;
+    DataPageBuilder &operator=(const DataPageBuilder &) = delete;
+
+    // Reset the contents as if the DataPageBuilder was just constructed.
+    void Reset();
+
+    // REQUIRES: Finish() has not been called since the last call to Reset().
+    // REQUIRES: key is larger than any previously added key
+    bool Add(std::string_view key, std::string_view value, uint64_t ts = 0);
+
+    // Finish building the block and return a view that refers to the page
+    // contents. The returned view will remain valid for the lifetime of this
+    // builder or until Reset() is called.
+    std::string_view Finish();
+
+    // Returns an estimate of the current (uncompressed) size of the block
+    // we are building.
+    size_t CurrentSizeEstimate() const;
+
+    // Return true iff no entries have been added since the last Reset()
+    bool IsEmpty() const
+    {
+        return cnt_ == 0;
+    }
+
+    static size_t HeaderSize();
+
+private:
+    const KvOptions *const options_;
+    std::string buffer_;              // Destination buffer
+    std::vector<uint32_t> restarts_;  // Restart points
+    int counter_;                     // Number of entries emitted since restart
+    uint16_t cnt_{0};
+    bool finished_;  // Has Finish() been called?
+    std::string last_key_;
+    int64_t last_timestamp_{0};
+};
+}  // namespace kvstore

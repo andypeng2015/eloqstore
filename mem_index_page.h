@@ -1,0 +1,217 @@
+#pragma once
+
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <string_view>
+
+#include "coding.h"
+#include "comparator.h"
+#include "global_variables.h"
+
+namespace kvstore
+{
+class IndexPageManager;
+class MappingSnapshot;
+class TableIdent;
+
+class MemIndexPage
+{
+public:
+    static size_t const max_page_size = 1 << 16;
+    static uint16_t const page_size_offset = sizeof(uint8_t);
+    static uint16_t const leftmost_ptr_offset =
+        page_size_offset + sizeof(uint16_t);
+
+    /**
+     * @brief Constructs an in-memory index page.
+     *
+     * @param page_size The maximal allowed page size is 64KB
+     */
+    explicit MemIndexPage(uint16_t page_size = kv_options.index_page_size);
+
+    uint16_t ContentLength() const;
+    uint16_t RestartNum() const;
+
+    std::string_view Page() const
+    {
+        return {page_.get(), kv_options.index_page_size};
+    }
+
+    char *PagePtr() const
+    {
+        return page_.get();
+    }
+
+    void Deque();
+    MemIndexPage *DequeNext();
+    MemIndexPage *DequePrev();
+    void EnqueNext(MemIndexPage *new_page);
+
+    bool IsPointingToLeaf() const;
+
+    void Pin()
+    {
+        ++ref_cnt_;
+    }
+
+    void Unpin()
+    {
+        assert(ref_cnt_ > 0);
+        --ref_cnt_;
+    }
+
+    bool IsPinned() const
+    {
+        return ref_cnt_ > 0;
+    }
+
+    bool IsDetached() const
+    {
+        return prev_ == nullptr && next_ == nullptr;
+    }
+
+    uint32_t PageId() const
+    {
+        return page_id_;
+    }
+
+    uint32_t FilePageId() const
+    {
+        return file_page_id_;
+    }
+
+    bool IsPageIdValid() const
+    {
+        return page_id_ < UINT32_MAX;
+    }
+
+private:
+    /**
+     * @brief The page ID is 0, if the page is newly created in memory and has
+     * not been flushed to storage.
+     *
+     */
+    uint32_t page_id_{UINT32_MAX};
+
+    uint32_t file_page_id_{UINT32_MAX};
+
+    /**
+     * @brief Number of concurrent tasks that have pinned the page. A page is
+     * pinned when a read/write task is traversing down the tree. A pinned page
+     * cannot be evicted.
+     *
+     */
+    uint32_t ref_cnt_{0};
+
+    std::unique_ptr<char[]> page_{nullptr};
+
+    /**
+     * @brief A doubly-linked list of in-memory pages for cache replacement. An
+     * in-memory page is either in the active list or in the free list.
+     *
+     */
+    MemIndexPage *next_{nullptr};
+    MemIndexPage *prev_{nullptr};
+
+    /**
+     * @brief The map for swizzling pointers: maps a child page pointer to the
+     * memory address, if the pointed page is cached in memory. TODO: replaces
+     * std::unordered_map with a memory-efficient alternative.
+     *
+     */
+    // std::unordered_map<uint32_t, MemIndexPage *> swizzling_map_;
+
+    /**
+     * @brief When a page is evicted, it needs to notify its owning mapper to
+     * disable its swizzling pointer. A page can be referenced by at most two
+     * mappers, one in the read copy of the tree and the other in the
+     * copy-on-write copy of the tree.
+     *
+     */
+    // MappingSnapshot *mapping_0_{nullptr};
+    // MappingSnapshot *mapping_1_{nullptr};
+    const TableIdent *tbl_ident_{nullptr};
+
+    friend class IndexPageManager;
+};
+
+class IndexPageIter
+{
+public:
+    using uptr = std::unique_ptr<IndexPageIter>;
+
+    IndexPageIter() = delete;
+    IndexPageIter(const MemIndexPage *index_page, const Comparator *comparator);
+
+    bool HasNext() const
+    {
+        return curr_offset_ < restart_offset_;
+    }
+
+    bool Next()
+    {
+        return ParseNextKey();
+    }
+
+    void Seek(std::string_view key);
+
+    std::string PeekNextKey() const;
+
+    std::string_view Key() const
+    {
+        return {key_.data(), key_.size()};
+    }
+
+    uint32_t PageId() const
+    {
+        return page_id_;
+    }
+
+    void Reset();
+
+    void Advance(std::string_view &key, uint32_t &page_id);
+
+private:
+    uint16_t RestartOffset(uint16_t restart_idx) const
+    {
+        assert(restart_idx < restart_num_);
+        return DecodeFixed16(page_.data() + restart_offset_ +
+                             restart_idx * sizeof(uint16_t));
+    }
+
+    void SeekToRestart(uint16_t restart_idx)
+    {
+        curr_restart_idx_ = restart_idx;
+        curr_offset_ = RestartOffset(restart_idx);
+        key_.clear();
+        page_id_ = UINT32_MAX;
+    }
+
+    bool ParseNextKey();
+    void Invalidate();
+
+    static const char *DecodeEntry(const char *ptr,
+                                   const char *limit,
+                                   uint32_t *shared,
+                                   uint32_t *non_shared);
+
+    const Comparator *const comparator_;
+    std::string_view const page_;
+
+public:
+    uint16_t const restart_num_;
+
+private:
+    uint16_t const restart_offset_;
+
+    uint16_t curr_offset_{MemIndexPage::leftmost_ptr_offset};
+    uint16_t curr_restart_idx_{0};
+
+    std::string key_;
+    uint32_t page_id_{UINT32_MAX};
+};
+}  // namespace kvstore
