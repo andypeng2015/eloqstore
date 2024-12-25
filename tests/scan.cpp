@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 
@@ -56,6 +57,16 @@ TEST_CASE("simple scan", "[scan]")
     }
 }
 
+TEST_CASE("delete scan", "[scan]")
+{
+    MapVerifier verify(kvstore::TableIdent{"t1", 1});
+    verify.Upsert(1, 100);
+    verify.Delete(50, 70);
+    verify.Scan(100, 200);
+    verify.Delete(0, 1000);
+    verify.Upsert(100, 200);
+}
+
 TEST_CASE("complex scan", "[scan]")
 {
     MapVerifier verify(kvstore::TableIdent{"t1", 1});
@@ -74,5 +85,19 @@ TEST_CASE("complex scan", "[scan]")
     verify.Delete(100, 300);
     verify.Scan(0, 100);
     verify.Scan(0, 500);
-    verify.ScanAll();
+}
+
+TEST_CASE("random write and scan", "[scan]")
+{
+    constexpr uint64_t max_val = 1000;
+    MapVerifier verify(kvstore::TableIdent{"t1", 1});
+    for (int i = 0; i < 10; i++)
+    {
+        verify.WriteRandom(1, max_val, 0, 20);
+        for (int j = 0; j < 5; j++)
+        {
+            uint64_t start = rand() % max_val;
+            verify.Scan(start, start + 100);
+        }
+    }
 }

@@ -2,6 +2,7 @@
 
 #include <cassert>
 
+#include "data_page.h"
 #include "global_variables.h"
 #include "read_task.h"
 #include "write_task.h"
@@ -160,8 +161,8 @@ void AsyncIoManager::FakeWrite(WriteReq *write_req)
     }
     else
     {
-        DataPage *data_page = std::get<1>(write_req->page_);
-        ptr = data_page->PagePtr();
+        DataPage &page = std::get<1>(write_req->page_);
+        ptr = page.PagePtr();
         size = kv_options.data_page_size;
     }
 

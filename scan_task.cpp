@@ -45,29 +45,26 @@ KvError ScanTask::ScanVec(const TableIdent &tbl_ident,
     uint32_t page_id =
         SeekIndex(page_mgr_, mapping_.get(), tbl_ident, root, begin_key);
     uint32_t file_page = mapping_->ToFilePage(page_id);
+    data_page_.Init(page_id);
     storage_manager->Read(
         data_page_.PagePtr(), kv_options.data_page_size, tbl_ident, file_page);
     if (kv_error_ != KvError::NoError)
     {
         return kv_error_;
     }
-    data_page_.SetPageId(page_id);
 
     iter_.Reset(&data_page_);
     iter_.Seek(begin_key);
-    if (iter_.Key().empty())
+    if (iter_.Key().empty() && Next() != KvError::NoError)
     {
-        if (Next() != KvError::NoError)
-        {
-            return kv_error_;
-        }
+        return kv_error_;
     }
     while (end_key.empty() || iter_.Key() < end_key)
     {
         tuples.emplace_back(iter_.Key(), iter_.Value(), iter_.Timestamp());
         if (Next() != KvError::NoError)
         {
-            return kv_error_;
+            break;
         }
     }
     return kv_error_;
@@ -82,20 +79,21 @@ KvError ScanTask::NextPage()
         return KvError::EndOfFile;
     }
     uint32_t file_page = mapping_->ToFilePage(page_id);
+    data_page_.Init(page_id);
     storage_manager->Read(
         data_page_.PagePtr(), kv_options.data_page_size, tbl_ident_, file_page);
-    data_page_.SetPageId(page_id);
     if (kv_error_ != KvError::NoError)
     {
         return kv_error_;
     }
+
     iter_.Reset(&data_page_);
     return KvError::NoError;
 }
 
 KvError ScanTask::Next()
 {
-    while (!iter_.HasNext())
+    if (!iter_.HasNext())
     {
         KvError err = NextPage();
         if (err != KvError::NoError)
@@ -103,8 +101,8 @@ KvError ScanTask::Next()
             return err;
         }
     }
-    iter_.Next();
-    assert(!iter_.Key().empty());
+    bool ok = iter_.Next();
+    assert(ok && !iter_.Key().empty());
     return KvError::NoError;
 }
 
@@ -124,13 +122,13 @@ KvError ScanTask::Scan(const TableIdent &tbl_ident,
     uint32_t page_id =
         SeekIndex(page_mgr_, mapping_.get(), tbl_ident, root, begin_key);
     uint32_t file_page = mapping_->ToFilePage(page_id);
+    data_page_.Init(page_id);
     storage_manager->Read(
         data_page_.PagePtr(), kv_options.data_page_size, tbl_ident, file_page);
     if (kv_error_ != KvError::NoError)
     {
         return kv_error_;
     }
-    data_page_.SetPageId(page_id);
 
     iter_.Reset(&data_page_);
     iter_.Seek(begin_key);

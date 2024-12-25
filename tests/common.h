@@ -31,15 +31,24 @@ class MapVerifier
 {
 public:
     MapVerifier(kvstore::TableIdent tid);
+    ~MapVerifier();
     void Upsert(uint64_t begin, uint64_t end);
     void Delete(uint64_t begin, uint64_t end);
+    void WriteRandom(uint64_t begin,
+                     uint64_t end,
+                     uint8_t del = 10,
+                     uint8_t density = 50);
+    void Clean();
     void Read(uint64_t k);
     void Scan(uint64_t begin, uint64_t end);
-    void ScanAll();
+    void Validate();
+    void SetAutoValidate(bool v);
 
 private:
-    std::string key(uint64_t k);
+    std::string Key(uint64_t k);
+
     const kvstore::TableIdent tid_;
-    uint64_t ts_;
+    uint64_t ts_{0};
     std::map<std::string, kvstore::Tuple> answer_;
+    bool auto_validate_{true};
 };

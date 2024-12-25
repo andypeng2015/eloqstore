@@ -11,10 +11,12 @@ namespace kvstore
 class DataPage
 {
 public:
-    DataPage();
-    ~DataPage() = default;
+    DataPage() : page_id_(UINT32_MAX){};
+    DataPage(uint32_t page_id);
     DataPage(const DataPage &) = delete;
     DataPage(DataPage &&rhs);
+    DataPage &operator=(DataPage &&) = default;
+    ~DataPage() = default;
 
     static uint16_t const page_size_offset = sizeof(uint8_t);
     static uint16_t const prev_page_offset =
@@ -23,6 +25,7 @@ public:
         prev_page_offset + sizeof(uint32_t);
     static uint16_t const content_offset = next_page_offset + sizeof(uint32_t);
 
+    void Init(uint32_t id);
     std::string_view Page() const;
     uint16_t ContentLength() const;
     uint16_t RestartNum() const;
@@ -30,15 +33,16 @@ public:
     uint32_t NextPageId() const;
     void SetPrevPageId(uint32_t page_id);
     void SetNextPageId(uint32_t page_id);
-    void Reset();
     void SetPageId(uint32_t page_id);
     uint32_t PageId() const;
-    char *PagePtr();
+    char *PagePtr() const;
 
 private:
     uint32_t page_id_;
     std::unique_ptr<char[]> page_{nullptr};
 };
+
+std::ostream &operator<<(std::ostream &out, DataPage const &page);
 
 class DataPageIter
 {

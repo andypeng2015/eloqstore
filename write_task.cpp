@@ -3,11 +3,20 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
+#include <string>
+#include <string_view>
+#include <utility>
 
+#include "data_page.h"
+#include "error.h"
 #include "global_variables.h"
 #include "index_page_manager.h"
+#include "mem_index_page.h"
 #include "page_mapper.h"
+#include "page_type.h"
 #include "storage_manager.h"
+#include "write_op.h"
 
 namespace kvstore
 {
@@ -49,6 +58,7 @@ void WriteTask::AddData(std::string key,
                         uint64_t ts,
                         WriteOp op)
 {
+    assert(data_.empty() || data_.back().key_ < key);
     data_.emplace_back(std::move(key), std::move(val), ts, op);
 }
 
@@ -64,7 +74,10 @@ MemIndexPage *WriteTask::Pop()
     if (stack_entry->changes_.empty())
     {
         MemIndexPage *page = stack_entry->idx_page_;
-        page->Unpin();
+        if (page != nullptr)
+        {
+            page->Unpin();
+        }
         stack_.pop_back();
         return page;
     }
@@ -90,16 +103,12 @@ MemIndexPage *WriteTask::Pop()
     // storage. This is to redistribute between last two pages in case the last
     // page is sparse.
     MemIndexPage *prev_page = nullptr;
-    MemIndexPage *curr_page = idx_page_manager_->AllocIndexPage();
-    if (curr_page == nullptr)
-    {
-        // Rollback the task.
-        thd_task->Rollback();
-        assert("A rollback task should not continue.");
-    }
+    MemIndexPage *curr_page = nullptr;
     std::string prev_page_key{};
-    std::string_view page_start = LeftBound(false);
-    std::string curr_page_key{page_start};
+    std::string_view page_key =
+        stack_.size() == 1 ? std::string_view{}
+                           : stack_[stack_.size() - 2]->idx_page_iter_.Key();
+    std::string curr_page_key{page_key};
 
     uint32_t page_id = UINT32_MAX;
     uint32_t file_page_id = UINT32_MAX;
@@ -115,6 +124,13 @@ MemIndexPage *WriteTask::Pop()
             idx_page_builder_.Add(new_key, new_page_id, is_leaf_index);
         if (!success)
         {
+            curr_page = idx_page_manager_->AllocIndexPage();
+            if (curr_page == nullptr)
+            {
+                // Rollback the task.
+                thd_task->Rollback();
+                assert("A rollback task should not continue.");
+            }
             // The page is full.
             std::string_view page_view = idx_page_builder_.Finish();
             memcpy(curr_page->PagePtr(), page_view.data(), page_view.size());
@@ -144,12 +160,6 @@ MemIndexPage *WriteTask::Pop()
             // The first index entry is the leftmost pointer w/o the key.
             idx_page_builder_.Add(
                 std::string_view{}, new_page_id, is_leaf_index);
-
-            curr_page = idx_page_manager_->AllocIndexPage();
-            if (curr_page == nullptr)
-            {
-                Rollback();
-            }
         }
     };
 
@@ -184,7 +194,7 @@ MemIndexPage *WriteTask::Pop()
             if (cit->op_ == WriteOp::Delete)
             {
                 new_key = std::string_view{};
-                new_page_id = 0;
+                new_page_id = UINT32_MAX;
             }
             else
             {
@@ -195,13 +205,17 @@ MemIndexPage *WriteTask::Pop()
         else
         {
             // base_key > change_key
+            assert(cit->op_ == WriteOp::Upsert);
             adv_type = AdvanceType::Changes;
             new_key = change_key;
             new_page_id = change_page;
         }
 
         // The first inserted entry is the leftmost pointer whose key is empty.
-        add_to_page(new_key, new_page_id);
+        if (!new_key.empty() || new_page_id != UINT32_MAX)
+        {
+            add_to_page(new_key, new_page_id);
+        }
 
         switch (adv_type)
         {
@@ -256,11 +270,34 @@ MemIndexPage *WriteTask::Pop()
         elevate = false;
     }
 
-    assert(!idx_page_builder_.IsEmpty());
-    std::string_view page_view = idx_page_builder_.Finish();
-    memcpy(curr_page->PagePtr(), page_view.data(), page_view.size());
-    FinishIndexPage(
-        curr_page, std::move(curr_page_key), page_id, file_page_id, elevate);
+    if (idx_page_builder_.IsEmpty())
+    {
+        FreePage(stack_.back()->idx_page_->PageId());
+        if (stack_.size() > 1)
+        {
+            IndexStackEntry *parent = stack_[stack_.size() - 2].get();
+            std::string_view page_key = parent->idx_page_iter_.Key();
+            parent->changes_.emplace_back(
+                std::string(page_key), page_id, WriteOp::Delete);
+        }
+    }
+    else
+    {
+        curr_page = idx_page_manager_->AllocIndexPage();
+        if (curr_page == nullptr)
+        {
+            // Rollback the task.
+            thd_task->Rollback();
+            assert("A rollback task should not continue.");
+        }
+        std::string_view page_view = idx_page_builder_.Finish();
+        memcpy(curr_page->PagePtr(), page_view.data(), page_view.size());
+        FinishIndexPage(curr_page,
+                        std::move(curr_page_key),
+                        page_id,
+                        file_page_id,
+                        elevate);
+    }
 
     if (stack_page != nullptr)
     {
@@ -278,9 +315,7 @@ void WriteTask::FinishIndexPage(MemIndexPage *idx_page,
 {
     // Flushes the built index page.
     WriteReq *io_req = GetWriteReq();
-    io_req->tbl_ident_ = &tbl_ident_;
     io_req->page_.emplace<0>(idx_page);
-    io_req->task_ = this;
     AllocatePage(io_req, page_id, file_page_id);
 
     storage_manager->Write(io_req);
@@ -307,41 +342,27 @@ void WriteTask::FinishDataPage(std::string_view page_view,
                                uint32_t page_id,
                                uint32_t file_page_id)
 {
-    DataPage &new_page = pending_pages_.emplace_back();
+    uint32_t new_page_id = page_id == UINT32_MAX ? mapper_->GetPage() : page_id;
+    DataPage new_page = AllocDataPage(new_page_id);
     memcpy(new_page.PagePtr(), page_view.data(), page_view.size());
-
-    WriteReq *io_req = GetWriteReq();
-    io_req->tbl_ident_ = &tbl_ident_;
-    io_req->page_.emplace<1>(&new_page);
-    io_req->task_ = this;
-    AllocatePage(io_req, page_id, file_page_id);
-    new_page.SetPageId(io_req->page_id_);
-
-    if (prev_req_ == nullptr)
-    {
-        uint32_t next =
-            stack_[stack_.size() - 1]->idx_page_iter_.PageId() == UINT32_MAX
-                ? UINT32_MAX
-                : data_page_.NextPageId();
-        new_page.SetNextPageId(next);
-        prev_req_ = io_req;
-    }
-    else
-    {
-        DataPage &prev_page = pending_pages_[pending_pages_.size() - 2];
-        assert(std::get<1>(prev_req_->page_) == &prev_page);
-        new_page.SetNextPageId(prev_page.NextPageId());
-        prev_page.SetNextPageId(io_req->page_id_);
-        storage_manager->Write(prev_req_);
-        prev_req_ = io_req;
-    }
 
     if (page_id == UINT32_MAX)
     {
+        // This is a new data page that does not exist in the tree and has a new
+        // page Id.
+        LeafLinkInsert(std::move(new_page));
+
         // This is a new page that does not exist in the parent index page.
         // Elevates to the parent index page.
+        assert(stack_.back()->changes_.empty() ||
+               stack_.back()->changes_.back().key_ < page_key);
         stack_.back()->changes_.emplace_back(
-            std::move(page_key), io_req->page_id_, WriteOp::Upsert);
+            std::move(page_key), new_page_id, WriteOp::Upsert);
+    }
+    else
+    {
+        // This is an existing data page with updated content.
+        LeafLinkUpdate(std::move(new_page), file_page_id);
     }
 }
 
@@ -392,10 +413,9 @@ void WriteTask::ApplyOnePage(size_t &cidx)
     std::string page_right_key;
     std::string_view page_right_bound{};
 
-    if (stack_[stack_.size() - 1]->idx_page_iter_.PageId() != UINT32_MAX)
+    if (stack_.back()->idx_page_iter_.PageId() != UINT32_MAX)
     {
-        assert(stack_[stack_.size() - 1]->idx_page_iter_.PageId() ==
-               data_page_.PageId());
+        assert(stack_.back()->idx_page_iter_.PageId() == data_page_.PageId());
         base_page = &data_page_;
         page_left_bound = LeftBound(true);
         page_right_key = RightBound(true);
@@ -435,7 +455,7 @@ void WriteTask::ApplyOnePage(size_t &cidx)
         });
 
     std::string prev_key;
-    std::string_view page_key = stack_[stack_.size() - 1]->idx_page_iter_.Key();
+    std::string_view page_key = stack_.back()->idx_page_iter_.Key();
     std::string curr_page_key{page_key.data(), page_key.size()};
 
     uint32_t page_id = UINT32_MAX;
@@ -444,6 +464,7 @@ void WriteTask::ApplyOnePage(size_t &cidx)
     {
         page_id = base_page->PageId();
         file_page_id = ToFilePage(page_id);
+        assert(page_key <= base_page_iter.Key());
     }
 
     auto add_to_page =
@@ -456,10 +477,10 @@ void WriteTask::ApplyOnePage(size_t &cidx)
             std::string_view page_view = data_page_builder_.Finish();
             FinishDataPage(
                 page_view, std::move(curr_page_key), page_id, file_page_id);
-
             // Starts a new page.
             curr_page_key = cmp->FindShortestSeparator(
                 {prev_key.data(), prev_key.size()}, key);
+            assert(!prev_key.empty() && prev_key < curr_page_key);
             data_page_builder_.Reset();
             success = data_page_builder_.Add(key, val, ts);
             // Doesn't support a single key-value pair spanning more than one
@@ -468,6 +489,7 @@ void WriteTask::ApplyOnePage(size_t &cidx)
             page_id = UINT32_MAX;
             file_page_id = UINT32_MAX;
         }
+        assert(curr_page_key <= key);
         prev_key = key;
     };
 
@@ -583,10 +605,26 @@ void WriteTask::ApplyOnePage(size_t &cidx)
         ++change_it;
     }
 
-    std::string_view page_view = data_page_builder_.Finish();
-    FinishDataPage(page_view, std::move(curr_page_key), page_id, file_page_id);
-    storage_manager->Write(prev_req_);
-    prev_req_ = nullptr;
+    if (data_page_builder_.IsEmpty())
+    {
+        if (base_page)
+        {
+            LeafLinkDelete();
+            FreePage(data_page_.PageId());
+            assert(stack_.back()->changes_.empty() ||
+                   stack_.back()->changes_.back().key_ < curr_page_key);
+            stack_.back()->changes_.emplace_back(
+                std::move(curr_page_key), page_id, WriteOp::Delete);
+        }
+    }
+    else
+    {
+        std::string_view page_view = data_page_builder_.Finish();
+        FinishDataPage(
+            page_view, std::move(curr_page_key), page_id, file_page_id);
+    }
+    assert(!TripleElement(1));
+    leaf_triple_[1] = std::move(leaf_triple_[2]);
 
     cidx = cidx + std::distance(data_.begin() + cidx, change_end_it);
 }
@@ -622,6 +660,8 @@ WriteReq *WriteTask::GetWriteReq()
 
     free_req_head_.next_ = first->next_;
     first->next_ = nullptr;
+    first->task_ = this;
+    first->tbl_ident_ = &tbl_ident_;
     --free_req_cnt_;
     return first;
 }
@@ -636,8 +676,7 @@ void WriteTask::FinishIo(WriteReq *req)
     }
     else
     {
-        DataPage *page = std::get<1>(req->page_);
-        page->SetPageId(req->page_id_);
+        FreeDataPage(std::move(std::get<1>(req->page_)));
     }
 
     RecycleWriteReq(req);
@@ -671,6 +710,10 @@ void WriteTask::Apply()
         Seek(batch_start_key);
         ApplyOnePage(cidx);
     }
+    // Flush all dirty leaf data pages in leaf_triple_ .
+    assert(TripleElement(2) == nullptr);
+    ShiftLeafLink();
+    ShiftLeafLink();
 
     assert(!stack_.empty());
     MemIndexPage *new_root = nullptr;
@@ -732,41 +775,53 @@ void WriteTask::Seek(std::string_view key)
         return;
     }
 
-    MemIndexPage *node = nullptr;
-    do
+    while (true)
     {
         IndexStackEntry *idx_entry = stack_.back().get();
-        node = idx_entry->idx_page_;
         IndexPageIter &idx_iter = idx_entry->idx_page_iter_;
         idx_iter.Seek(key);
-
         uint32_t page_id = idx_iter.PageId();
-        if (page_id != UINT32_MAX && !node->IsPointingToLeaf())
+        assert(page_id != UINT32_MAX);
+
+        MemIndexPage *node = idx_entry->idx_page_;
+        if (node->IsPointingToLeaf())
         {
-            node = idx_page_manager_->FindPage(new_mapping_, page_id);
-            if (node != nullptr)
-            {
-                node->Pin();
-                stack_.emplace_back(std::make_unique<IndexStackEntry>(
-                    node, idx_page_manager_->GetComparator()));
-            }
+            break;
         }
-        else
-        {
-            node = nullptr;
-        }
-    } while (node != nullptr);
+        assert(!stack_.back()->is_leaf_index_);
+        node = idx_page_manager_->FindPage(new_mapping_, page_id);
+        assert(node);
+        node->Pin();
+        stack_.emplace_back(std::make_unique<IndexStackEntry>(
+            node, idx_page_manager_->GetComparator()));
+    }
 
     assert(!stack_.empty());
     uint32_t page_id = stack_.back()->idx_page_iter_.PageId();
-    if (page_id != UINT32_MAX)
+    assert(page_id != UINT32_MAX);
+    // Now we are going to fetch a data page before execute ApplyOnePage.
+    // But this page may already exists at leaf_triple_[1], because it may be
+    // loaded by previous ApplyOnePage for linking purpose.
+    if (TripleElement(1) && TripleElement(1)->PageId() == page_id)
     {
+        // Fast path: leaf_triple_[1] is exactly the page we want. Just move it
+        // to avoid a disk access.
+        if (data_page_.PagePtr() != nullptr)
+        {
+            FreeDataPage(std::move(data_page_));
+        }
+        DataPage *pg = TripleElement(1);
+        data_page_ = std::move(*pg);
+    }
+    else
+    {
+        data_page_.SetPageId(page_id);
         storage_manager->Read(data_page_.PagePtr(),
                               kv_options.data_page_size,
                               tbl_ident_,
                               ToFilePage(page_id));
-        data_page_.SetPageId(page_id);
     }
+    assert(PageType(data_page_.PagePtr()[0]) == PageType::Data);
 
     stack_.back()->is_leaf_index_ = true;
 }
@@ -794,9 +849,166 @@ void WriteTask::AllocatePage(WriteReq *req,
     new_mapping_->UpdateMapping(req->page_id_, req->file_page_id_);
 }
 
+void WriteTask::FreePage(uint32_t page_id)
+{
+    assert(page_id != UINT32_MAX);
+    MemIndexPage *ptr = new_mapping_->GetSwizzlingPointer(page_id);
+    uint32_t file_page = ptr ? ptr->FilePageId() : ToFilePage(page_id);
+    mapper_->FreePage(page_id);
+    old_mapping_->AddFreeFilePage(file_page);
+}
+
 uint32_t WriteTask::ToFilePage(uint32_t page_id)
 {
     assert(mapper_ != nullptr);
     return mapper_->GetMappingSnapshot()->ToFilePage(page_id);
+}
+
+DataPage WriteTask::AllocDataPage(uint32_t page_id)
+{
+    if (data_pages_pool_.empty())
+    {
+        return DataPage(page_id);
+    }
+    else
+    {
+        DataPage page = std::move(data_pages_pool_.back());
+        data_pages_pool_.pop_back();
+        page.SetPageId(page_id);
+        return page;
+    }
+}
+
+void WriteTask::FreeDataPage(DataPage &&page)
+{
+    data_pages_pool_.push_back(std::move(page));
+}
+
+inline DataPage *WriteTask::TripleElement(uint8_t idx)
+{
+    return leaf_triple_[idx].page.PagePtr() ? &leaf_triple_[idx].page : nullptr;
+}
+
+void WriteTask::LoadTripleElement(uint8_t idx, uint32_t page_id)
+{
+    if (TripleElement(idx))
+    {
+        return;
+    }
+    assert(page_id != UINT32_MAX);
+    uint32_t file_page = ToFilePage(page_id);
+    leaf_triple_[idx].old_file_page = file_page;
+    leaf_triple_[idx].page = AllocDataPage(page_id);
+    storage_manager->Read(TripleElement(idx)->PagePtr(),
+                          kv_options.data_page_size,
+                          tbl_ident_,
+                          file_page);
+    assert(kv_error_ == KvError::NoError);
+}
+
+void WriteTask::ShiftLeafLink()
+{
+    if (TripleElement(0))
+    {
+        uint32_t old_file_page = leaf_triple_[0].old_file_page;
+        WriteReq *req = GetWriteReq();
+        req->page_id_ = leaf_triple_[0].page.PageId();
+        req->page_.emplace<1>(std::move(leaf_triple_[0].page));
+        if (old_file_page == UINT32_MAX)
+        {
+            // insert page
+            req->file_page_id_ = mapper_->GetFilePage();
+            new_mapping_->UpdateMapping(req->page_id_, req->file_page_id_);
+        }
+        else
+        {
+            // update page
+            AllocatePage(req, req->page_id_, old_file_page);
+        }
+        storage_manager->Write(req);
+    }
+    leaf_triple_[0] = std::move(leaf_triple_[1]);
+}
+
+void WriteTask::LeafLinkUpdate(DataPage &&page, uint32_t old_fp)
+{
+    if (TripleElement(1))
+    {
+        assert(TripleElement(1)->PageId() != data_page_.PageId());
+        ShiftLeafLink();
+    }
+    if (TripleElement(0) &&
+        TripleElement(0)->PageId() != data_page_.PrevPageId())
+    {
+        // leaf_triple_[0] is not the previously adjacent page of the
+        // applying page.
+        ShiftLeafLink();
+    }
+
+    leaf_triple_[1].page = std::move(page);
+    leaf_triple_[1].old_file_page = old_fp;
+
+    DataPage &new_elem = leaf_triple_[1].page;
+    new_elem.SetNextPageId(data_page_.NextPageId());
+    new_elem.SetPrevPageId(data_page_.PrevPageId());
+    ShiftLeafLink();
+}
+
+void WriteTask::LeafLinkInsert(DataPage &&page)
+{
+    assert(!TripleElement(1));
+    leaf_triple_[1].page = std::move(page);
+    leaf_triple_[1].old_file_page = UINT32_MAX;
+
+    DataPage &new_elem = leaf_triple_[1].page;
+    if (TripleElement(0) == nullptr)
+    {
+        // Add first element into empty link list
+        assert(stack_.back()->idx_page_iter_.PageId() == UINT32_MAX);
+        new_elem.SetNextPageId(UINT32_MAX);
+        new_elem.SetPrevPageId(UINT32_MAX);
+        ShiftLeafLink();
+        return;
+    }
+    DataPage *prev_page = TripleElement(0);
+    assert(stack_.back()->idx_page_iter_.PageId() == UINT32_MAX ||
+           prev_page->NextPageId() == data_page_.NextPageId());
+    if (prev_page->NextPageId() != UINT32_MAX)
+    {
+        LoadTripleElement(2, prev_page->NextPageId());
+        TripleElement(2)->SetPrevPageId(new_elem.PageId());
+    }
+    new_elem.SetPrevPageId(prev_page->PageId());
+    new_elem.SetNextPageId(prev_page->NextPageId());
+    prev_page->SetNextPageId(new_elem.PageId());
+    ShiftLeafLink();
+}
+
+void WriteTask::LeafLinkDelete()
+{
+    if (TripleElement(1))
+    {
+        assert(TripleElement(1)->PageId() != data_page_.PageId());
+        ShiftLeafLink();
+    }
+    if (TripleElement(0) &&
+        TripleElement(0)->PageId() != data_page_.PrevPageId())
+    {
+        // leaf_triple_[0] is not the previously adjacent page of the
+        // applying page.
+        ShiftLeafLink();
+    }
+
+    if (data_page_.PrevPageId() != UINT32_MAX)
+    {
+        LoadTripleElement(0, data_page_.PrevPageId());
+        TripleElement(0)->SetNextPageId(data_page_.NextPageId());
+    }
+    if (data_page_.NextPageId() != UINT32_MAX)
+    {
+        assert(!TripleElement(2));
+        LoadTripleElement(2, data_page_.NextPageId());
+        TripleElement(2)->SetPrevPageId(data_page_.PrevPageId());
+    }
 }
 }  // namespace kvstore

@@ -1,11 +1,15 @@
 #include "data_page.h"
 
+#include <cstring>
+#include <memory>
+#include <utility>
+
 #include "coding.h"
 #include "global_variables.h"
 
 namespace kvstore
 {
-DataPage::DataPage() : page_id_(0)
+DataPage::DataPage(uint32_t page_id) : page_id_(page_id)
 {
     page_ = std::make_unique<char[]>(kv_options.data_page_size);
 }
@@ -50,9 +54,13 @@ void DataPage::SetNextPageId(uint32_t page_id)
     EncodeFixed32(page_.get() + next_page_offset, page_id);
 }
 
-void DataPage::Reset()
+void DataPage::Init(uint32_t id)
 {
-    page_id_ = 0;
+    page_id_ = id;
+    if (page_ == nullptr)
+    {
+        page_ = std::make_unique<char[]>(kv_options.data_page_size);
+    }
 }
 
 void DataPage::SetPageId(uint32_t page_id)
@@ -65,9 +73,16 @@ uint32_t DataPage::PageId() const
     return page_id_;
 }
 
-char *DataPage::PagePtr()
+char *DataPage::PagePtr() const
 {
     return page_.get();
+}
+
+std::ostream &operator<<(std::ostream &out, DataPage const &page)
+{
+    out << "{D" << page.PageId() << '|';
+    out << page.PrevPageId() << ',' << page.NextPageId() << '}';
+    return out;
 }
 
 DataPageIter::DataPageIter(const DataPage *data_page,

@@ -74,7 +74,7 @@ bool IndexPageBuilder::Add(std::string_view key,
                            uint32_t page_id,
                            bool is_leaf_index)
 {
-    if (key.size() == 0 || IsEmpty())
+    if (IsEmpty())
     {
         assert(buffer_.size() >= HeaderSize());
         // Sets the page type.
@@ -92,6 +92,7 @@ bool IndexPageBuilder::Add(std::string_view key,
         ++cnt_;
         return true;
     }
+    assert(!key.empty());
 
 #ifndef NDEBUG
     size_t buf_prev_size = buffer_.size();

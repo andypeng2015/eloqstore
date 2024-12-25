@@ -43,9 +43,9 @@ KvError ReadTask::Read(const TableIdent &tbl_ident,
 
     uint32_t data_page_id = SeekIndex(tbl_ident, root, search_key);
     uint32_t file_page = page_mapping_->ToFilePage(data_page_id);
+    data_page_.Init(data_page_id);
     storage_manager->Read(
         data_page_.PagePtr(), kv_options.data_page_size, tbl_ident, file_page);
-    data_page_.SetPageId(data_page_id);
 
     if (kv_error_ != KvError::NoError)
     {

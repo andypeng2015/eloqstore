@@ -5,10 +5,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include "coding.h"
 #include "page_mapper.h"
+#include "page_type.h"
 
 namespace kvstore
 {
@@ -94,8 +96,34 @@ void MemIndexPage::EnqueNext(MemIndexPage *new_page)
 
 bool MemIndexPage::IsPointingToLeaf() const
 {
-    uint8_t flag = static_cast<uint8_t>(page_[0]);
-    return flag == 1;
+    return static_cast<PageType>(page_[0]) == PageType::LeafIndex;
+}
+
+std::string MemIndexPage::String(const Comparator *cmp) const
+{
+    std::string str = "{";
+    if (IsPointingToLeaf())
+    {
+        str.push_back('L');
+    }
+    else
+    {
+        str.push_back('I');
+    }
+    str.append(std::to_string(PageId()));
+    str.push_back('|');
+    IndexPageIter iter(this, cmp);
+    while (iter.HasNext())
+    {
+        iter.Next();
+        str.push_back('[');
+        str.append(iter.Key());
+        str.push_back(':');
+        str.append(std::to_string(iter.PageId()));
+        str.push_back(']');
+    }
+    str.push_back('}');
+    return str;
 }
 
 IndexPageIter::IndexPageIter(const MemIndexPage *index_page,
@@ -118,8 +146,7 @@ bool IndexPageIter::ParseNextKey()
 
     if (pt >= limit)
     {
-        curr_offset_ = restart_offset_;
-        curr_restart_idx_ = restart_num_;
+        Invalidate();
         return false;
     }
     else if (curr_offset_ <
@@ -177,7 +204,7 @@ void IndexPageIter::Invalidate()
     curr_offset_ = restart_offset_;
     curr_restart_idx_ = restart_num_;
     key_.clear();
-    page_id_ = 0;
+    page_id_ = UINT32_MAX;
 }
 
 const char *IndexPageIter::DecodeEntry(const char *ptr,

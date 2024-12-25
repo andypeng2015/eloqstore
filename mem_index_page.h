@@ -89,6 +89,11 @@ public:
         return page_id_ < UINT32_MAX;
     }
 
+    /**
+     * @brief Encode the page to a human readable string , used for debugging.
+     */
+    std::string String(const Comparator *cmp) const;
+
 private:
     /**
      * @brief The page ID is 0, if the page is newly created in memory and has

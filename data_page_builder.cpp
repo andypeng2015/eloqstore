@@ -7,6 +7,7 @@
 
 #include "coding.h"
 #include "data_page.h"
+#include "page_type.h"
 
 namespace kvstore
 {
@@ -22,6 +23,7 @@ void DataPageBuilder::Reset()
 {
     buffer_.clear();
     buffer_.resize(HeaderSize(), 0x0);
+    buffer_[0] = static_cast<char>(PageType::Data);
     restarts_.clear();
     restarts_.emplace_back(buffer_.size());
     counter_ = 0;
