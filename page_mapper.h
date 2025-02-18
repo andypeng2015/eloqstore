@@ -3,22 +3,30 @@
 #include <cstdint>
 #include <memory>
 #include <set>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "table_ident.h"
 
+#define MAPPING_BITS 2
+#define MAPPING_MASK ((1 << MAPPING_BITS) - 1)
+#define MAPPING_PHY_ID 1
+#define MAPPING_FREE (1 << 1)
+
 namespace kvstore
 {
+class IndexPageManager;
 class MemIndexPage;
 
 struct MappingSnapshot
 {
-    MappingSnapshot(const TableIdent *tbl);
+    MappingSnapshot(IndexPageManager *idx_mgr, const TableIdent *tbl);
     ~MappingSnapshot();
 
-    uint32_t ToFilePage(uint32_t page_id);
-
-    void UpdateMapping(uint32_t page_id, uint32_t file_page_id);
+    uint32_t ToFilePage(uint32_t page_id) const;
+    uint32_t GetFilePage(uint32_t page_id) const;
+    uint32_t GetNextFree(uint32_t page_id) const;
 
     void AddFreeFilePage(uint32_t file_page);
 
@@ -29,10 +37,13 @@ struct MappingSnapshot
      */
     void Unswizzling(MemIndexPage *page);
 
-    MemIndexPage *GetSwizzlingPointer(uint32_t page_id);
+    MemIndexPage *GetSwizzlingPointer(uint32_t page_id) const;
 
     void AddSwizzling(uint32_t page_id, MemIndexPage *idx_page);
 
+    void Serialize(std::string &dst) const;
+
+    IndexPageManager *idx_mgr_;
     const TableIdent *tbl_ident_;
 
     std::vector<uint64_t> mapping_tbl_;
@@ -48,25 +59,38 @@ struct MappingSnapshot
 class PageMapper
 {
 public:
-    PageMapper(const TableIdent *tbl_ident);
+    PageMapper();
+    PageMapper(IndexPageManager *idx_mgr, const TableIdent *tbl_ident);
     PageMapper(const PageMapper &rhs);
 
     uint32_t GetPage();
     uint32_t GetFilePage();
+    void InitPages(uint32_t page_count);
     void FreePage(uint32_t page_id);
     void FreeFilePages(std::vector<uint32_t> file_pages);
+    void FreeFilePage(uint32_t file_page);
 
     std::shared_ptr<MappingSnapshot> GetMappingSnapshot();
     MappingSnapshot *GetMapping();
-
+    void UpdateMapping(uint32_t page_id, uint32_t file_page_id);
+    uint32_t UseCount();
     void FreeMappingSnapshot();
 
     static uint64_t EncodeFilePage(uint32_t file_page_id);
     static uint32_t DecodeFilePage(uint64_t val);
     static bool IsSwizzlingPointer(uint64_t val);
 
+    void Serialize(std::string &dst) const;
+    std::string_view Deserialize(std::string_view src);
+    bool EqualTo(const PageMapper &rhs) const;
+
 private:
     std::vector<uint64_t> &Mapping();
+
+    uint32_t ExpFilePage();
+    bool DequeFree(uint32_t page_id);
+    uint32_t PeekFree();
+    bool GetFreeFilePage(uint32_t fp_id);
 
     /**
      * @brief Gets a free file page. The implementation now returns the smaller
@@ -83,9 +107,10 @@ private:
     uint32_t free_page_head_{UINT32_MAX};
 
     std::set<uint32_t> free_file_pages_;
-
     uint32_t min_file_page_id_{1};
     uint32_t max_file_page_id_{0};
+
+    friend class Replayer;
 };
 
 }  // namespace kvstore

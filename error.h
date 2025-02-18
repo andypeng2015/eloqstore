@@ -2,6 +2,12 @@
 
 #include <cstdint>
 
+#define CHECK_KV_ERR(err)          \
+    if ((err) != KvError::NoError) \
+    {                              \
+        return err;                \
+    }
+
 namespace kvstore
 {
 enum struct KvError : uint8_t
@@ -10,6 +16,14 @@ enum struct KvError : uint8_t
     NotFound,
     Failed,
     EndOfFile,
-    OutOfSpace
+    OutOfSpace,
+    OutOfMem,
+    Corrupted,
+    BadOption,
+    BadDir,
+    WriteConflict,
+    ReachLimit,
+
+    IoFail
 };
 }  // namespace kvstore

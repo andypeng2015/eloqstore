@@ -14,23 +14,9 @@ class IndexPageManager;
 class MemIndexPage;
 class MappingSnapshot;
 
-// Given the table id, tree root and the input key, returns the logical page id
-// of the data page that might contain the key.
-uint32_t SeekIndex(IndexPageManager *idx_page_mgr,
-                   MappingSnapshot *mapping,
-                   const TableIdent &tbl_ident,
-                   MemIndexPage *node,
-                   std::string_view key);
-
 class ReadTask : public KvTask
 {
 public:
-    ReadTask(IndexPageManager *idx_manager);
-
-    void Yield() override;
-    void Resume() override;
-    void Rollback() override;
-
     void Reset(IndexPageManager *idx_page_manager);
 
     KvError Read(const TableIdent &tbl_ident,
@@ -44,13 +30,7 @@ public:
     }
 
 private:
-    uint32_t SeekIndex(const TableIdent &tbl_ident,
-                       MemIndexPage *node,
-                       std::string_view key);
-
     DataPage data_page_;
-    IndexPageManager *idx_page_manager_{nullptr};
-    std::shared_ptr<MappingSnapshot> page_mapping_;
 
 public:
     /**

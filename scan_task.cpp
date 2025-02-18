@@ -7,70 +7,52 @@
 #include "error.h"
 #include "index_page_manager.h"
 #include "page_mapper.h"
-#include "read_task.h"
-#include "storage_manager.h"
 
 namespace kvstore
 {
-ScanTask::ScanTask(IndexPageManager *idx_manager)
-    : page_mgr_(idx_manager), iter_(nullptr, idx_manager->GetComparator())
+ScanTask::ScanTask() : iter_(nullptr, Options())
 {
 }
 
-void ScanTask::Yield()
+KvError ScanTask::Scan(const TableIdent &tbl_id,
+                       std::string_view begin_key,
+                       std::string_view end_key,
+                       std::vector<KvEntry> &entries)
 {
-}
-
-void ScanTask::Resume()
-{
-}
-
-void ScanTask::Rollback()
-{
-}
-
-KvError ScanTask::ScanVec(const TableIdent &tbl_ident,
-                          std::string_view begin_key,
-                          std::string_view end_key,
-                          std::vector<Tuple> &tuples)
-{
-    tbl_ident_ = tbl_ident;
-    auto [root, mapper] = page_mgr_->FindRoot(tbl_ident);
+    auto [root, mapper, err] = index_mgr->FindRoot(tbl_id);
+    CHECK_KV_ERR(err);
     if (root == nullptr)
     {
         return KvError::NotFound;
     }
-    mapping_ = mapper->GetMappingSnapshot();
+    auto mapping = mapper->GetMappingSnapshot();
 
-    uint32_t page_id =
-        SeekIndex(page_mgr_, mapping_.get(), tbl_ident, root, begin_key);
-    uint32_t file_page = mapping_->ToFilePage(page_id);
-    data_page_.Init(page_id);
-    storage_manager->Read(
-        data_page_.PagePtr(), kv_options.data_page_size, tbl_ident, file_page);
-    if (kv_error_ != KvError::NoError)
-    {
-        return kv_error_;
-    }
+    uint32_t page_id;
+    err = index_mgr->SeekIndex(mapping.get(), tbl_id, root, begin_key, page_id);
+    CHECK_KV_ERR(err);
+    uint32_t file_page = mapping->ToFilePage(page_id);
+    data_page_.Init(page_id, Options()->data_page_size);
+    err = IoMgr()->ReadPage(tbl_id, file_page, data_page_.PagePtrPtr());
+    CHECK_KV_ERR(err);
 
-    iter_.Reset(&data_page_);
+    iter_.Reset(&data_page_, Options()->data_page_size);
     iter_.Seek(begin_key);
-    if (iter_.Key().empty() && Next() != KvError::NoError)
+    if (iter_.Key().empty() && (err = Next(mapping.get())) != KvError::NoError)
     {
-        return kv_error_;
+        return err == KvError::EndOfFile ? KvError::NoError : err;
     }
     while (end_key.empty() || iter_.Key() < end_key)
     {
-        tuples.emplace_back(iter_.Key(), iter_.Value(), iter_.Timestamp());
-        if (Next() != KvError::NoError)
+        entries.emplace_back(iter_.Key(), iter_.Value(), iter_.Timestamp());
+        if ((err = Next(mapping.get())) != KvError::NoError)
         {
             break;
         }
     }
-    return kv_error_;
+    return err == KvError::EndOfFile ? KvError::NoError : err;
 }
 
-KvError ScanTask::NextPage()
+KvError ScanTask::NextPage(MappingSnapshot *m)
 {
     uint32_t page_id = data_page_.NextPageId();
     if (page_id == UINT32_MAX)
@@ -78,65 +60,57 @@ KvError ScanTask::NextPage()
         // EndOfFile will just break the scan process
         return KvError::EndOfFile;
     }
-    uint32_t file_page = mapping_->ToFilePage(page_id);
-    data_page_.Init(page_id);
-    storage_manager->Read(
-        data_page_.PagePtr(), kv_options.data_page_size, tbl_ident_, file_page);
-    if (kv_error_ != KvError::NoError)
-    {
-        return kv_error_;
-    }
+    uint32_t file_page = m->ToFilePage(page_id);
+    data_page_.Init(page_id, Options()->data_page_size);
+    KvError err =
+        IoMgr()->ReadPage(*m->tbl_ident_, file_page, data_page_.PagePtrPtr());
+    CHECK_KV_ERR(err);
 
-    iter_.Reset(&data_page_);
+    iter_.Reset(&data_page_, Options()->data_page_size);
     return KvError::NoError;
 }
 
-KvError ScanTask::Next()
+KvError ScanTask::Next(MappingSnapshot *m)
 {
     if (!iter_.HasNext())
     {
-        KvError err = NextPage();
-        if (err != KvError::NoError)
-        {
-            return err;
-        }
+        KvError err = NextPage(m);
+        CHECK_KV_ERR(err);
     }
     bool ok = iter_.Next();
     assert(ok && !iter_.Key().empty());
     return KvError::NoError;
 }
 
-KvError ScanTask::Scan(const TableIdent &tbl_ident,
-                       std::string_view begin_key,
-                       std::string_view end_key)
+KvError ScanTask::Iterate(const TableIdent &tbl_id,
+                          std::string_view begin_key,
+                          std::string_view end_key)
 {
     end_key_ = end_key;
-    tbl_ident_ = tbl_ident;
-    auto [root, mapper] = page_mgr_->FindRoot(tbl_ident);
+    auto [root, mapper, err] = index_mgr->FindRoot(tbl_id);
+    CHECK_KV_ERR(err);
     if (root == nullptr)
     {
         return KvError::NotFound;
     }
     mapping_ = mapper->GetMappingSnapshot();
 
-    uint32_t page_id =
-        SeekIndex(page_mgr_, mapping_.get(), tbl_ident, root, begin_key);
+    uint32_t page_id;
+    err =
+        index_mgr->SeekIndex(mapping_.get(), tbl_id, root, begin_key, page_id);
+    CHECK_KV_ERR(err);
     uint32_t file_page = mapping_->ToFilePage(page_id);
-    data_page_.Init(page_id);
-    storage_manager->Read(
-        data_page_.PagePtr(), kv_options.data_page_size, tbl_ident, file_page);
-    if (kv_error_ != KvError::NoError)
-    {
-        return kv_error_;
-    }
+    data_page_.Init(page_id, Options()->data_page_size);
+    err = IoMgr()->ReadPage(tbl_id, file_page, data_page_.PagePtrPtr());
+    CHECK_KV_ERR(err);
 
-    iter_.Reset(&data_page_);
+    iter_.Reset(&data_page_, Options()->data_page_size);
     iter_.Seek(begin_key);
     if (iter_.Key().empty())
     {
-        Next();
+        err = Next(mapping_.get());
     }
-    return kv_error_;
+    return err;
 }
 
 bool ScanTask::Valid() const

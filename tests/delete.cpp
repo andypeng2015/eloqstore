@@ -4,7 +4,8 @@
 
 TEST_CASE("simple delete", "[delete]")
 {
-    MapVerifier verify(kvstore::TableIdent{"t1", 1});
+    InitMemStore();
+    MapVerifier verify(test_tbl_id, memstore.get());
     verify.Upsert(100, 300);
     verify.Delete(150, 200);
     verify.Upsert(200, 230);
@@ -16,13 +17,14 @@ TEST_CASE("simple delete", "[delete]")
 
 TEST_CASE("clean data", "[delete]")
 {
+    InitMemStore();
+    MapVerifier verify(test_tbl_id, memstore.get());
     constexpr uint64_t max_val = 1000;
-    MapVerifier verify(kvstore::TableIdent{"t1", 1});
     verify.Delete(0, 100);
     verify.SetAutoValidate(false);
     for (int i = 0; i < 10; i++)
     {
-        verify.WriteRandom(1, max_val, 0, 20);
+        verify.WriteRnd(1, max_val, 0, 20);
     }
     verify.Clean();
     verify.Validate();
@@ -30,7 +32,8 @@ TEST_CASE("clean data", "[delete]")
 
 TEST_CASE("decrease height", "[delete]")
 {
-    MapVerifier verify(kvstore::TableIdent{"t1", 1});
+    InitMemStore();
+    MapVerifier verify(test_tbl_id, memstore.get());
     verify.Upsert(1, 1000);
     for (int i = 0; i < 1000; i += 50)
     {
@@ -40,11 +43,12 @@ TEST_CASE("decrease height", "[delete]")
 
 TEST_CASE("random upsert/delete and scan", "[delete]")
 {
+    InitMemStore();
+    MapVerifier verify(test_tbl_id, memstore.get());
     constexpr uint64_t max_val = 100000;
-    MapVerifier verify(kvstore::TableIdent{"t1", 1});
     for (int i = 0; i < 10; i++)
     {
-        verify.WriteRandom(1, max_val, 20, 30);
+        verify.WriteRnd(1, max_val, 20, 30);
         for (int j = 0; j < 5; j++)
         {
             uint64_t start = rand() % max_val;

@@ -18,43 +18,39 @@ class IndexPageManager;
 class MemIndexPage;
 class MappingSnapshot;
 
-using Tuple = std::tuple<std::string, std::string, uint64_t>;
+using KvEntry = std::tuple<std::string, std::string, uint64_t>;
 
 class ScanTask : public KvTask
 {
 public:
-    ScanTask(IndexPageManager *idx_manager);
+    ScanTask();
 
-    void Yield() override;
-    void Resume() override;
-    void Rollback() override;
-
-    KvError ScanVec(const TableIdent &tbl_ident,
-                    std::string_view begin_key,
-                    std::string_view end_key,
-                    std::vector<Tuple> &tuples);
-    KvError Scan(const TableIdent &tbl_ident,
+    KvError Scan(const TableIdent &tbl_id,
                  std::string_view begin_key,
-                 std::string_view end_key);
-    bool Valid() const;
-    KvError Next();
+                 std::string_view end_key,
+                 std::vector<KvEntry> &entries);
 
+    // TODO(zhanghao): remove this unused API ?
+    KvError Iterate(const TableIdent &tbl_id,
+                    std::string_view begin_key,
+                    std::string_view end_key);
+    bool Valid() const;
     std::string_view Key() const;
     std::string_view Value() const;
     uint64_t Timestamp() const;
 
+    KvError Next(MappingSnapshot *m);
     TaskType Type() const override
     {
         return TaskType::Scan;
     }
 
 private:
-    KvError NextPage();
-    IndexPageManager *page_mgr_{nullptr};
-    std::shared_ptr<MappingSnapshot> mapping_;
+    KvError NextPage(MappingSnapshot *m);
     DataPage data_page_;
+
+    std::shared_ptr<MappingSnapshot> mapping_;
     DataPageIter iter_;
     std::string end_key_;
-    TableIdent tbl_ident_;
 };
 }  // namespace kvstore

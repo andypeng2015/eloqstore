@@ -23,7 +23,7 @@ void DataPageBuilder::Reset()
 {
     buffer_.clear();
     buffer_.resize(HeaderSize(), 0x0);
-    buffer_[0] = static_cast<char>(PageType::Data);
+    SetPageType(buffer_.data(), PageType::Data);
     restarts_.clear();
     restarts_.emplace_back(buffer_.size());
     counter_ = 0;
@@ -42,7 +42,7 @@ size_t DataPageBuilder::CurrentSizeEstimate() const
 
 size_t DataPageBuilder::HeaderSize()
 {
-    return 1 +                    // 1 byte for the page type.
+    return 4 + 1 +                // 4 bytes for crc, 1 byte for the page type.
            sizeof(uint16_t) +     // 2 bytes for content size
            sizeof(uint32_t) * 2;  // 2 * 4 bytes for IDs of prev and next pages
 }

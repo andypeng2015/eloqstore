@@ -1,65 +1,88 @@
 #include "data_page.h"
 
+#include <cassert>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
-#include <memory>
-#include <utility>
+#include <iostream>
+#include <string_view>
 
 #include "coding.h"
-#include "global_variables.h"
+#include "kv_options.h"
 
 namespace kvstore
 {
-DataPage::DataPage(uint32_t page_id) : page_id_(page_id)
+DataPage::DataPage(uint32_t page_id, uint32_t page_size) : page_id_(page_id)
 {
-    page_ = std::make_unique<char[]>(kv_options.data_page_size);
+    page_ = (char *) std::aligned_alloc(page_align, page_size);
 }
 
-DataPage::DataPage(DataPage &&rhs)
-    : page_id_(rhs.page_id_), page_(std::move(rhs.page_))
+DataPage::DataPage(DataPage &&rhs) : page_id_(rhs.page_id_), page_(rhs.page_)
 {
+    rhs.page_ = nullptr;
 }
 
-std::string_view DataPage::Page() const
+DataPage &DataPage::operator=(DataPage &&other)
 {
-    return {page_.get(), kv_options.data_page_size};
+    if (this != &other)
+    {
+        if (page_)
+        {
+            free(page_);
+        }
+        page_id_ = other.page_id_;
+        page_ = other.page_;
+        other.page_id_ = UINT32_MAX;
+        other.page_ = nullptr;
+    }
+    return *this;
+}
+
+DataPage::~DataPage()
+{
+    if (page_)
+    {
+        free(page_);
+        page_ = nullptr;
+    }
 }
 
 uint16_t DataPage::ContentLength() const
 {
-    return DecodeFixed16(page_.get() + page_size_offset);
+    return DecodeFixed16(page_ + page_size_offset);
 }
 
 uint16_t DataPage::RestartNum() const
 {
-    return DecodeFixed16(page_.get() + ContentLength() - sizeof(uint16_t));
+    return DecodeFixed16(page_ + ContentLength() - sizeof(uint16_t));
 }
 
 uint32_t DataPage::PrevPageId() const
 {
-    return DecodeFixed32(page_.get() + prev_page_offset);
+    return DecodeFixed32(page_ + prev_page_offset);
 }
 
 uint32_t DataPage::NextPageId() const
 {
-    return DecodeFixed32(page_.get() + next_page_offset);
+    return DecodeFixed32(page_ + next_page_offset);
 }
 
 void DataPage::SetPrevPageId(uint32_t page_id)
 {
-    EncodeFixed32(page_.get() + prev_page_offset, page_id);
+    EncodeFixed32(page_ + prev_page_offset, page_id);
 }
 
 void DataPage::SetNextPageId(uint32_t page_id)
 {
-    EncodeFixed32(page_.get() + next_page_offset, page_id);
+    EncodeFixed32(page_ + next_page_offset, page_id);
 }
 
-void DataPage::Init(uint32_t id)
+void DataPage::Init(uint32_t id, uint32_t size)
 {
     page_id_ = id;
-    if (page_ == nullptr)
+    if (!page_)
     {
-        page_ = std::make_unique<char[]>(kv_options.data_page_size);
+        page_ = (char *) std::aligned_alloc(page_align, size);
     }
 }
 
@@ -75,7 +98,12 @@ uint32_t DataPage::PageId() const
 
 char *DataPage::PagePtr() const
 {
-    return page_.get();
+    return page_;
+}
+
+char **DataPage::PagePtrPtr()
+{
+    return &page_;
 }
 
 std::ostream &operator<<(std::ostream &out, DataPage const &page)
@@ -85,10 +113,11 @@ std::ostream &operator<<(std::ostream &out, DataPage const &page)
     return out;
 }
 
-DataPageIter::DataPageIter(const DataPage *data_page,
-                           const Comparator *comparator)
-    : cmp_(comparator),
-      page_(data_page == nullptr ? std::string_view{} : data_page->Page()),
+DataPageIter::DataPageIter(const DataPage *data_page, const KvOptions *options)
+    : cmp_(options->comparator_),
+      page_(data_page == nullptr ? std::string_view{}
+                                 : std::string_view{data_page->PagePtr(),
+                                                    options->data_page_size}),
       restart_num_(data_page == nullptr ? 0 : data_page->RestartNum()),
       restart_offset_(data_page == nullptr
                           ? 0
@@ -99,11 +128,11 @@ DataPageIter::DataPageIter(const DataPage *data_page,
 {
 }
 
-void DataPageIter::Reset(const DataPage *data_page)
+void DataPageIter::Reset(const DataPage *data_page, uint32_t size)
 {
     if (data_page)
     {
-        page_ = data_page->Page();
+        page_ = std::string_view{data_page->PagePtr(), size};
         restart_num_ = data_page->RestartNum();
         restart_offset_ =
             data_page->ContentLength() - (1 + restart_num_) * sizeof(uint16_t);

@@ -7,11 +7,11 @@ set(UTEST_INCLUDE
     ${CMAKE_SOURCE_DIR})
 
 set(UTEST_SOURCES
-    insert.cpp
-    upsert.cpp
-    small_pool.cpp
     scan.cpp
     delete.cpp
+    persist.cpp
+    manifest.cpp
+    concurrency.cpp
 )
 
 string( REPLACE ".cpp" "" BASENAMES_UTEST "${UTEST_SOURCES}" )

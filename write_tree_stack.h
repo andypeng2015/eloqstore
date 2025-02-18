@@ -3,6 +3,7 @@
 #include <string_view>
 #include <vector>
 
+#include "kv_options.h"
 #include "mem_index_page.h"
 #include "write_op.h"
 
@@ -18,8 +19,8 @@ struct IndexOp
 class IndexStackEntry
 {
 public:
-    IndexStackEntry(MemIndexPage *page, const Comparator *cmp)
-        : idx_page_(page), idx_page_iter_(page, cmp)
+    IndexStackEntry(MemIndexPage *page, const KvOptions *opts)
+        : idx_page_(page), idx_page_iter_(page, opts)
     {
     }
 

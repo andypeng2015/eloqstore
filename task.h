@@ -1,46 +1,72 @@
 #pragma once
 
+#include <boost/context/continuation.hpp>
+#include <cassert>
 #include <cstdint>
 
-#include "error.h"
+#include "comparator.h"
 
 namespace kvstore
 {
+class KvRequest;
+class KvTask;
+class IndexPageManager;
+class AsyncIoManager;
+class KvOptions;
+class TaskManager;
+
+inline thread_local IndexPageManager *index_mgr;
+inline thread_local TaskManager *task_mgr;
+inline thread_local KvTask *thd_task;
+
+AsyncIoManager *IoMgr();
+const KvOptions *Options();
+const Comparator *Comp();
+
 enum class TaskStatus : uint8_t
 {
-    Unstarted = 0,
+    Idle = 0,
     Ongoing,
-    Finished,
-    Rollback,
-    Errored,
-    BlockedForOne,
-    BlockedForAll
+    Blocked,
+    WaitSyncIo,
+    WaitAnyAsynIo,
+    WaitAllAsynIo
 };
 
 enum struct TaskType
 {
     Read = 0,
     Scan,
-    Write
+    Write,
 };
 
 class KvTask
 {
 public:
     virtual ~KvTask() = default;
-
     virtual TaskType Type() const = 0;
-
-    virtual void Yield() = 0;
+    void Yield();
     /**
      * @brief Re-schedules the task to run. Note: the resumed task does not run
      * in place.
      *
      */
-    virtual void Resume() = 0;
-    virtual void Rollback() = 0;
+    void Resume();
 
-    TaskStatus status_;
-    KvError kv_error_;
+    int WaitSyncIo();
+    int WaitAsynIo(bool all = true);
+    void FinishIo(bool is_sync_io);
+
+    TaskStatus status_{TaskStatus::Idle};
+
+    uint32_t inflight_io_{0};
+    int io_res_{0};
+    uint32_t io_flags_{0};
+    int asyn_io_err_{0};
+
+    KvRequest *req_{nullptr};
+    boost::context::continuation main_;
+    boost::context::continuation coro_;
+    boost::context::stack_context stack_ctx_;
 };
 }  // namespace kvstore

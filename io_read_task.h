@@ -43,7 +43,7 @@ public:
                &zero,
                sizeof(uint32_t));
 
-        status_ = TaskStatus::Unstarted;
+        status_ = TaskStatus::Idle;
         ring_ = uring.Get();
         sqe_ = io_uring_get_sqe(ring_);
     }
@@ -64,7 +64,7 @@ public:
 
     void Finish()
     {
-        status_ = TaskStatus::Finished;
+        status_ = TaskStatus::Idle;
         uint32_t *int_ptr =
             (uint32_t *) (page_buf_.get() + (page_len_ - sizeof(uint32_t)));
         if (*int_ptr != (offset_ >> 12))

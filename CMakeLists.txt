@@ -4,9 +4,17 @@ project(eloqkvstore)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
 find_package(glog REQUIRED)
+
+find_package(Boost REQUIRED COMPONENTS context)
+if(Boost_FOUND)
+    message(STATUS "Boost found at: ${Boost_INCLUDE_DIRS}")
+else()
+    message(FATAL_ERROR "Boost.Context not found!")
+endif()
 
 find_path(URING_INCLUDE_PATH NAMES liburing.h)
 find_library(URING_LIB NAMES uring)
@@ -24,6 +32,7 @@ SET(ELOQ_STORE_SOURCE_DIR ${CMAKE_SOURCE_DIR})
 SET(ELOQ_STORE_INCLUDE
     ${ELOQ_KV_SOURCE_DIR}
     ${URING_INCLUDE_PATH}
+    ${Boost_INCLUDE_DIRS}
     )
 
 set(ELOQ_STORE_SOURCES
@@ -33,6 +42,7 @@ set(ELOQ_STORE_SOURCES
     index_page_builder.cpp
     mem_index_page.cpp
     index_page_manager.cpp
+    task.cpp
     write_task.cpp
     read_task.cpp
     scan_task.cpp
@@ -40,17 +50,16 @@ set(ELOQ_STORE_SOURCES
     async_io_manager.cpp
     data_page.cpp
     page_mapper.cpp
-    storage_manager.cpp
+    task_manager.cpp
+    eloq_store.cpp
+    root_meta.cpp
+    replayer.cpp
     crc32.cpp)
 
 add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES})
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
-target_link_libraries(eloqstore PRIVATE ${URING_LIB})
-
-add_executable(btree_test btree_test.cpp)
-target_include_directories(btree_test PUBLIC ${ELOQ_STORE_INCLUDE})
-target_link_libraries(btree_test PRIVATE ${URING_LIB} eloqstore)
+target_link_libraries(eloqstore PRIVATE ${URING_LIB} Boost::context glog::glog)
 
 add_executable(io_test io_test.cpp)
 target_link_libraries(io_test ${URING_LIB})

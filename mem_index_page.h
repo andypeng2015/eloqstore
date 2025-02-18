@@ -10,7 +10,8 @@
 
 #include "coding.h"
 #include "comparator.h"
-#include "global_variables.h"
+#include "kv_options.h"
+#include "page_type.h"
 
 namespace kvstore
 {
@@ -22,7 +23,7 @@ class MemIndexPage
 {
 public:
     static size_t const max_page_size = 1 << 16;
-    static uint16_t const page_size_offset = sizeof(uint8_t);
+    static uint16_t const page_size_offset = page_type_offset + sizeof(uint8_t);
     static uint16_t const leftmost_ptr_offset =
         page_size_offset + sizeof(uint16_t);
 
@@ -31,19 +32,20 @@ public:
      *
      * @param page_size The maximal allowed page size is 64KB
      */
-    explicit MemIndexPage(uint16_t page_size = kv_options.index_page_size);
+    explicit MemIndexPage(uint16_t page_size);
+    ~MemIndexPage();
 
     uint16_t ContentLength() const;
     uint16_t RestartNum() const;
 
-    std::string_view Page() const
-    {
-        return {page_.get(), kv_options.index_page_size};
-    }
-
     char *PagePtr() const
     {
-        return page_.get();
+        return page_;
+    }
+
+    char **PagePtrPtr()
+    {
+        return &page_;
     }
 
     void Deque();
@@ -92,7 +94,7 @@ public:
     /**
      * @brief Encode the page to a human readable string , used for debugging.
      */
-    std::string String(const Comparator *cmp) const;
+    std::string String(const KvOptions *opts) const;
 
 private:
     /**
@@ -112,7 +114,7 @@ private:
      */
     uint32_t ref_cnt_{0};
 
-    std::unique_ptr<char[]> page_{nullptr};
+    char *page_{nullptr};
 
     /**
      * @brief A doubly-linked list of in-memory pages for cache replacement. An
@@ -150,7 +152,7 @@ public:
     using uptr = std::unique_ptr<IndexPageIter>;
 
     IndexPageIter() = delete;
-    IndexPageIter(const MemIndexPage *index_page, const Comparator *comparator);
+    IndexPageIter(const MemIndexPage *index_page, const KvOptions *opts);
 
     bool HasNext() const
     {

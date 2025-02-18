@@ -1,10 +1,11 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <string>
 
 #include "comparator.h"
+#include "kv_options.h"
+#include "page_type.h"
 
 namespace kvstore
 {
@@ -12,21 +13,20 @@ class DataPage
 {
 public:
     DataPage() : page_id_(UINT32_MAX){};
-    DataPage(uint32_t page_id);
+    DataPage(uint32_t page_id, uint32_t page_size);
     DataPage(const DataPage &) = delete;
     DataPage(DataPage &&rhs);
-    DataPage &operator=(DataPage &&) = default;
-    ~DataPage() = default;
+    DataPage &operator=(DataPage &&);
+    ~DataPage();
 
-    static uint16_t const page_size_offset = sizeof(uint8_t);
+    static uint16_t const page_size_offset = page_type_offset + sizeof(uint8_t);
     static uint16_t const prev_page_offset =
         page_size_offset + sizeof(uint16_t);
     static uint16_t const next_page_offset =
         prev_page_offset + sizeof(uint32_t);
     static uint16_t const content_offset = next_page_offset + sizeof(uint32_t);
 
-    void Init(uint32_t id);
-    std::string_view Page() const;
+    void Init(uint32_t id, uint32_t size);
     uint16_t ContentLength() const;
     uint16_t RestartNum() const;
     uint32_t PrevPageId() const;
@@ -36,10 +36,11 @@ public:
     void SetPageId(uint32_t page_id);
     uint32_t PageId() const;
     char *PagePtr() const;
+    char **PagePtrPtr();
 
 private:
     uint32_t page_id_;
-    std::unique_ptr<char[]> page_{nullptr};
+    char *page_{nullptr};
 };
 
 std::ostream &operator<<(std::ostream &out, DataPage const &page);
@@ -48,9 +49,9 @@ class DataPageIter
 {
 public:
     DataPageIter() = delete;
-    DataPageIter(const DataPage *data_page, const Comparator *comparator);
+    DataPageIter(const DataPage *data_page, const KvOptions *options);
 
-    void Reset(const DataPage *data_page);
+    void Reset(const DataPage *data_page, uint32_t size);
     void Reset();
     std::string_view Key() const;
     std::string_view Value() const;

@@ -4,11 +4,12 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 
 #include "coding.h"
+#include "kv_options.h"
 #include "page_mapper.h"
 #include "page_type.h"
 
@@ -16,17 +17,22 @@ namespace kvstore
 {
 MemIndexPage::MemIndexPage(uint16_t page_size)
 {
-    page_ = std::make_unique<char[]>(page_size);
+    page_ = (char *) std::aligned_alloc(page_align, page_size);
+}
+
+MemIndexPage::~MemIndexPage()
+{
+    free(page_);
 }
 
 uint16_t MemIndexPage::ContentLength() const
 {
-    return DecodeFixed16(page_.get() + page_size_offset);
+    return DecodeFixed16(page_ + page_size_offset);
 }
 
 uint16_t MemIndexPage::RestartNum() const
 {
-    return DecodeFixed16(page_.get() + ContentLength() - sizeof(uint16_t));
+    return DecodeFixed16(page_ + ContentLength() - sizeof(uint16_t));
 }
 
 void MemIndexPage::Deque()
@@ -96,10 +102,10 @@ void MemIndexPage::EnqueNext(MemIndexPage *new_page)
 
 bool MemIndexPage::IsPointingToLeaf() const
 {
-    return static_cast<PageType>(page_[0]) == PageType::LeafIndex;
+    return TypeOfPage(page_) == PageType::LeafIndex;
 }
 
-std::string MemIndexPage::String(const Comparator *cmp) const
+std::string MemIndexPage::String(const KvOptions *opts) const
 {
     std::string str = "{";
     if (IsPointingToLeaf())
@@ -112,7 +118,7 @@ std::string MemIndexPage::String(const Comparator *cmp) const
     }
     str.append(std::to_string(PageId()));
     str.push_back('|');
-    IndexPageIter iter(this, cmp);
+    IndexPageIter iter(this, opts);
     while (iter.HasNext())
     {
         iter.Next();
@@ -127,9 +133,11 @@ std::string MemIndexPage::String(const Comparator *cmp) const
 }
 
 IndexPageIter::IndexPageIter(const MemIndexPage *index_page,
-                             const Comparator *comparator)
-    : comparator_(comparator),
-      page_(index_page == nullptr ? std::string_view{} : index_page->Page()),
+                             const KvOptions *opts)
+    : comparator_(opts->comparator_),
+      page_(index_page == nullptr ? std::string_view{}
+                                  : std::string_view{index_page->PagePtr(),
+                                                     opts->data_page_size}),
       restart_num_(index_page == nullptr ? 0 : index_page->RestartNum()),
       restart_offset_(index_page == nullptr
                           ? 0

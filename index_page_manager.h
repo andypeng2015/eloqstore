@@ -3,14 +3,15 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "async_io_manager.h"
 #include "circular_queue.h"
 #include "comparator.h"
+#include "error.h"
 #include "kv_options.h"
 #include "mem_index_page.h"
+#include "root_meta.h"
 #include "table_ident.h"
 
 namespace kvstore
@@ -18,17 +19,10 @@ namespace kvstore
 class KvTask;
 class PageMapper;
 
-struct CowRootMeta
-{
-    MemIndexPage *root_;
-    std::unique_ptr<PageMapper> new_mapper_;
-    std::shared_ptr<MappingSnapshot> old_mapping_;
-};
-
 class IndexPageManager
 {
 public:
-    IndexPageManager(const KvOptions *opt, AsyncIoManager *io_manager);
+    IndexPageManager(AsyncIoManager *io_manager);
     ~IndexPageManager();
 
     const Comparator *GetComparator() const;
@@ -49,16 +43,20 @@ public:
      */
     void EnqueuIndexPage(MemIndexPage *page);
 
-    std::pair<MemIndexPage *, PageMapper *> FindRoot(
+    std::tuple<MemIndexPage *, PageMapper *, KvError> FindRoot(
         const TableIdent &tbl_ident);
 
-    CowRootMeta MakeCowRoot(const TableIdent &tbl_ident);
+    KvError MakeCowRoot(const TableIdent &tbl_ident, CowRootMeta &cow_meta);
 
-    void UpdateRoot(const TableIdent &tbl_ident,
-                    MemIndexPage *new_root,
-                    std::unique_ptr<PageMapper> new_mapper);
+    RootMeta &UpdateRoot(const TableIdent &tbl_ident,
+                         MemIndexPage *new_root,
+                         std::unique_ptr<PageMapper> new_mapper);
 
-    MemIndexPage *FindPage(MappingSnapshot *mapping, uint32_t page_id);
+    KvError LoadTablePartition(const TableIdent &tbl_id);
+
+    KvError FindPage(MappingSnapshot *mapping,
+                     uint32_t page_id,
+                     MemIndexPage **result);
 
     void FreeMappingSnapshot(MappingSnapshot *mapping);
 
@@ -69,15 +67,18 @@ public:
                   uint32_t page_id,
                   uint32_t file_page_id);
 
-private:
-    struct RootMeta
-    {
-        MemIndexPage *root_page_;
-        std::unique_ptr<PageMapper> mapper_;
-        std::unordered_set<MappingSnapshot *> mapping_snapshots_;
-        uint32_t ref_cnt_{0};
-    };
+    // Given the table id, tree root and the input key, returns the logical page
+    // id of the data page that might contain the key.
+    KvError SeekIndex(MappingSnapshot *mapping,
+                      const TableIdent &tbl_ident,
+                      MemIndexPage *node,
+                      std::string_view key,
+                      uint32_t &result);
 
+    const KvOptions *Options() const;
+    AsyncIoManager *IoMgr() const;
+
+private:
     /**
      * @brief Returns if memory is full. TODO: Replaces with a reasonable
      * implementation.
@@ -100,8 +101,6 @@ private:
         std::unordered_map<TableIdent, RootMeta>::iterator root_it);
 
     bool RecyclePage(MemIndexPage *page);
-
-    const KvOptions *const options_;
 
     /**
      * @brief Reserved head and tail for the active list. The head points to the

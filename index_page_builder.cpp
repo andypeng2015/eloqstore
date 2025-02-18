@@ -62,8 +62,8 @@ std::string_view IndexPageBuilder::Finish()
     EncodeFixed16(buffer_.data() + MemIndexPage::page_size_offset,
                   content_size);
 
-    assert(buffer_.size() <= options_->index_page_size);
-    buffer_.resize(options_->index_page_size);
+    assert(buffer_.size() <= options_->data_page_size);
+    buffer_.resize(options_->data_page_size);
 
     finished_ = true;
 
@@ -78,8 +78,9 @@ bool IndexPageBuilder::Add(std::string_view key,
     {
         assert(buffer_.size() >= HeaderSize());
         // Sets the page type.
-        buffer_[0] = (uint8_t) (is_leaf_index ? PageType::LeafIndex
-                                              : PageType::NonLeafIndex);
+        SetPageType(
+            buffer_.data(),
+            is_leaf_index ? PageType::LeafIndex : PageType::NonLeafIndex);
 
         // The leftmost pointer can only be set once.
         assert(DecodeFixed32(buffer_.data() +
@@ -101,8 +102,8 @@ bool IndexPageBuilder::Add(std::string_view key,
 
     // If the page type has been set and the input pointer does not match the
     // type, throws an error.
-    if (buffer_[0] != (uint8_t) (is_leaf_index ? PageType::LeafIndex
-                                               : PageType::NonLeafIndex))
+    if (TypeOfPage(buffer_.data()) !=
+        (is_leaf_index ? PageType::LeafIndex : PageType::NonLeafIndex))
     {
         throw std::runtime_error(
             "Unmatched storage pointers in the same index page.");
@@ -148,7 +149,7 @@ bool IndexPageBuilder::Add(std::string_view key,
     addition_delta += Varint32Size(p_delta);
 
     // Does not add the index entry if it would overflow the page.
-    if (CurrentSizeEstimate() + addition_delta > options_->index_page_size)
+    if (CurrentSizeEstimate() + addition_delta > options_->data_page_size)
     {
         return false;
     }
@@ -170,7 +171,7 @@ bool IndexPageBuilder::Add(std::string_view key,
 #ifndef NDEBUG
     uint16_t minus = is_restart ? sizeof(uint16_t) : 0;
     assert(buffer_.size() - buf_prev_size == addition_delta - minus);
-    assert(CurrentSizeEstimate() <= options_->index_page_size);
+    assert(CurrentSizeEstimate() <= options_->data_page_size);
 #endif
 
     last_key_.resize(shared);
@@ -186,7 +187,7 @@ size_t IndexPageBuilder::HeaderSize()
 {
     // 1 byte for the page type and the following 8 bytes for the leftmost
     // pointer.
-    return 1 +                 // 1 byte for the page type
+    return 4 + 1 +             // 4 bytes for crc, 1 byte for the page type
            sizeof(uint16_t) +  // 2 bytes for content size
            sizeof(uint32_t);   // 4 bytes for leftmost pointer
 }
