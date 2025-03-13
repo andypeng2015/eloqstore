@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.2)
 project(eloqkvstore)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -84,3 +84,5 @@ target_link_libraries (cache_q_test glog::glog)
 if (WITH_UNIT_TESTS)
     add_subdirectory(tests)
 endif()
+
+add_subdirectory(examples)
