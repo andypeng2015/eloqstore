@@ -11,7 +11,7 @@
 #include "coding.h"
 #include "comparator.h"
 #include "kv_options.h"
-#include "page_type.h"
+#include "page.h"
 
 namespace kvstore
 {
@@ -118,7 +118,7 @@ private:
      */
     uint32_t ref_cnt_{0};
 
-    std::unique_ptr<char[]> page_{nullptr};
+    Page page_{nullptr, std::free};
 
     /**
      * @brief A doubly-linked list of in-memory pages for cache replacement. An

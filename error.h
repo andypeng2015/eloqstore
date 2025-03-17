@@ -15,6 +15,7 @@ enum struct KvError : uint8_t
     NoError = 0,
     InvalidArgs,
     NotFound,
+    NotRunning,
     EndOfFile,
     OutOfSpace,
     OutOfMem,
@@ -37,6 +38,8 @@ constexpr const char *ErrorString(KvError err)
         return "Invalid arguments";
     case KvError::NotFound:
         return "Resource not found";
+    case KvError::NotRunning:
+        return "EloqStore is not running";
     case KvError::EndOfFile:
         return "End of file";
     case KvError::OutOfSpace:

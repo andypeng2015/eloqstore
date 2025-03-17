@@ -7,7 +7,6 @@
 
 #include "coding.h"
 #include "data_page.h"
-#include "page_type.h"
 
 namespace kvstore
 {

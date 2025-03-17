@@ -11,14 +11,12 @@
 #include "coding.h"
 #include "kv_options.h"
 #include "page_mapper.h"
-#include "page_type.h"
 
 namespace kvstore
 {
 MemIndexPage::MemIndexPage(uint16_t page_size)
 {
-    char *p = (char *) std::aligned_alloc(page_align, page_size);
-    page_ = std::unique_ptr<char[]>(p);
+    page_ = alloc_page(page_size);
 }
 
 uint16_t MemIndexPage::ContentLength() const

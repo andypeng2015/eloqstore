@@ -25,9 +25,7 @@ DataPage::DataPage(uint32_t page_id, uint32_t page_size) : page_id_(page_id)
     }
     else
     {
-        char *p = (char *) std::aligned_alloc(page_align, page_size);
-        assert(p != nullptr);
-        page_ = std::unique_ptr<char[]>(p);
+        page_ = alloc_page(page_size);
     }
 }
 
@@ -102,12 +100,12 @@ char *DataPage::PagePtr() const
     return page_.get();
 }
 
-std::unique_ptr<char[]> DataPage::GetPtr()
+Page DataPage::GetPtr()
 {
     return std::move(page_);
 }
 
-void DataPage::SetPtr(std::unique_ptr<char[]> ptr)
+void DataPage::SetPtr(Page ptr)
 {
     page_ = std::move(ptr);
 }
@@ -396,28 +394,4 @@ const char *DataPageIter::DecodeEntry(const char *p,
     return p;
 }
 
-PagePool::PagePool(uint16_t page_size) : page_size_(page_size)
-{
-}
-
-std::unique_ptr<char[]> PagePool::Allocate()
-{
-    if (pages_.empty())
-    {
-        char *p = (char *) std::aligned_alloc(page_align, page_size_);
-        assert(p != nullptr);
-        return std::unique_ptr<char[]>(p);
-    }
-    else
-    {
-        std::unique_ptr<char[]> page = std::move(pages_.back());
-        pages_.pop_back();
-        return page;
-    }
-}
-
-void PagePool::Free(std::unique_ptr<char[]> page)
-{
-    pages_.emplace_back(std::move(page));
-}
 }  // namespace kvstore

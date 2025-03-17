@@ -14,7 +14,6 @@
 #include "index_page_manager.h"
 #include "mem_index_page.h"
 #include "page_mapper.h"
-#include "page_type.h"
 #include "table_ident.h"
 #include "write_op.h"
 

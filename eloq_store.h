@@ -123,7 +123,7 @@ public:
         return SendRequest(req);
     }
 
-    bool ExecSync(KvRequest *req);
+    void ExecSync(KvRequest *req);
 
 private:
     bool SendRequest(KvRequest *req);
@@ -134,7 +134,7 @@ private:
     int dir_fd_{-1};
     std::vector<std::unique_ptr<Worker>> workers_;
     std::atomic<bool> stopped_;
-    const KvOptions options_;
+    KvOptions options_;
     friend Worker;
 };
 }  // namespace kvstore

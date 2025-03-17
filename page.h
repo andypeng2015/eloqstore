@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 #include "coding.h"
 #include "crc32.h"
@@ -44,4 +46,44 @@ inline static bool ValidatePageCrc32(char *p, uint16_t pgsz)
     uint32_t crc = crc32::Value(p + page_type_offset, pgsz - page_type_offset);
     return crc == Crc32OfPage(p);
 }
+
+inline static size_t page_align = sysconf(_SC_PAGESIZE);
+
+using Page = std::unique_ptr<char, decltype(&std::free)>;
+
+inline Page alloc_page(uint16_t page_size)
+{
+    char *p = (char *) std::aligned_alloc(page_align, page_size);
+    assert(p);
+    return Page(p, std::free);
+}
+
+class PagePool
+{
+public:
+    PagePool(uint16_t page_size) : page_size_(page_size) {};
+    Page Allocate()
+    {
+        if (pages_.empty())
+        {
+            return alloc_page(page_size_);
+        }
+        else
+        {
+            Page page = std::move(pages_.back());
+            pages_.pop_back();
+            return page;
+        }
+    }
+    void Free(Page page)
+    {
+        pages_.emplace_back(std::move(page));
+    }
+
+private:
+    const uint16_t page_size_;
+    std::vector<Page> pages_;
+};
+
+inline thread_local PagePool *page_pool;
 }  // namespace kvstore

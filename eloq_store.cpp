@@ -69,13 +69,9 @@ private:
 
 EloqStore::EloqStore(const KvOptions &opts) : options_(opts), stopped_(true)
 {
-    assert(!(options_.data_page_size & (page_align - 1)));
-
-    workers_.reserve(options_.num_threads);
-    for (size_t i = 0; i < options_.num_threads; i++)
-    {
-        workers_.emplace_back(std::make_unique<Worker>(this));
-    }
+    // Align stack size
+    options_.coroutine_stack_size =
+        ((options_.coroutine_stack_size + page_align - 1) & ~(page_align - 1));
 }
 
 EloqStore::~EloqStore()
@@ -93,6 +89,11 @@ EloqStore::~EloqStore()
 
 KvError EloqStore::Start()
 {
+    if (options_.data_page_size & (page_align - 1))
+    {
+        return KvError::InvalidArgs;
+    }
+
     LOG(INFO) << "EloqStore is starting...";
     if (!options_.db_path.empty())
     {
@@ -100,9 +101,14 @@ KvError EloqStore::Start()
         CHECK_KV_ERR(err);
     }
 
-    for (auto &w : workers_)
+    workers_.resize(options_.num_threads);
+    for (size_t i = 0; i < options_.num_threads; i++)
     {
-        KvError err = w->Init(dir_fd_);
+        if (workers_[i] == nullptr)
+        {
+            workers_[i] = std::make_unique<Worker>(this);
+        }
+        KvError err = workers_[i]->Init(dir_fd_);
         CHECK_KV_ERR(err);
     }
 
@@ -170,16 +176,18 @@ void EloqStore::CloseDBDir()
     }
 }
 
-bool EloqStore::ExecSync(KvRequest *req)
+void EloqStore::ExecSync(KvRequest *req)
 {
     req->user_data_ = 0;
     req->callback_ = nullptr;
-    if (!SendRequest(req))
+    if (SendRequest(req))
     {
-        return false;
+        req->Wait();
     }
-    req->Wait();
-    return true;
+    else
+    {
+        req->SetDone(KvError::NotRunning);
+    }
 }
 
 bool EloqStore::SendRequest(KvRequest *req)

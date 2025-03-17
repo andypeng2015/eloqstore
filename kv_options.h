@@ -1,7 +1,5 @@
 #pragma once
 
-#include <unistd.h>
-
 #include <cstdint>
 #include <string>
 
@@ -46,12 +44,14 @@ struct KvOptions
     uint32_t io_queue_size = 4096;
     /**
      * @brief Size of io-uring selected buffer ring.
+     * It must be a power-of 2, and can be up to 32768.
      */
     uint16_t buf_ring_size = 1 << 10;
     /**
      * @brief Size of coroutine stack.
+     * According to the latest test results, at least 16KB is required.
      */
-    uint32_t coroutine_stack_size = 8 * 1024;
+    uint32_t coroutine_stack_size = 16 * 1024;
 
     /*
      * The following options will be persisted. User cannot change them after
@@ -60,6 +60,7 @@ struct KvOptions
 
     /**
      * @brief Size of B+Tree index/data node (page).
+     * Ensure that it is aligned to the system's page size.
      */
     uint16_t data_page_size = 1 << 12;  // 4KB
     /**
@@ -67,7 +68,5 @@ struct KvOptions
      */
     uint8_t num_file_pages_shift = 11;  // 2048
 };
-
-inline static size_t page_align = sysconf(_SC_PAGESIZE);
 
 }  // namespace kvstore

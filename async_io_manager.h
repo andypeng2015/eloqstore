@@ -49,10 +49,9 @@ public:
     virtual void PollComplete() = 0;
 
     /** These methods are used by read/write task. */
-    virtual std::pair<std::unique_ptr<char[]>, KvError> ReadPage(
-        const TableIdent &tbl_id,
-        uint32_t fp_id,
-        std::unique_ptr<char[]> page) = 0;
+    virtual std::pair<Page, KvError> ReadPage(const TableIdent &tbl_id,
+                                              uint32_t fp_id,
+                                              Page page) = 0;
     virtual KvError WritePage(const TableIdent &tbl_id,
                               VarPage page,
                               uint32_t file_page_id) = 0;
@@ -77,10 +76,9 @@ public:
     void Submit() override;
     void PollComplete() override;
 
-    std::pair<std::unique_ptr<char[]>, KvError> ReadPage(
-        const TableIdent &tbl_id,
-        uint32_t fp_id,
-        std::unique_ptr<char[]> page) override;
+    std::pair<Page, KvError> ReadPage(const TableIdent &tbl_id,
+                                      uint32_t fp_id,
+                                      Page page) override;
     KvError WritePage(const TableIdent &tbl_id,
                       VarPage page,
                       uint32_t file_page_id) override;
@@ -216,9 +214,7 @@ private:
                uint64_t flags,
                uint64_t mode = 0);
     int Read(FdIdx fd, char *dst, size_t n, uint64_t offset);
-    std::pair<std::unique_ptr<char[]>, int> Read(FdIdx fd,
-                                                 std::unique_ptr<char[]> ptr,
-                                                 uint32_t offset);
+    std::pair<Page, int> Read(FdIdx fd, Page ptr, uint32_t offset);
     int Write(FdIdx fd, const char *src, size_t n, uint64_t offset);
     int Fdatasync(FdIdx fd);
     int Rename(FdIdx dir_fd, const char *old_path, const char *new_path);
@@ -248,7 +244,7 @@ private:
     std::vector<uint32_t> free_reg_slots_;
 
     io_uring_buf_ring *buf_ring_{nullptr};
-    std::vector<std::unique_ptr<char[]>> bufs_pool_;
+    std::vector<Page> bufs_pool_;
     const int buf_group_{0};
 
     io_uring ring_;
@@ -264,10 +260,9 @@ public:
     void Submit() override {};
     void PollComplete() override {};
 
-    std::pair<std::unique_ptr<char[]>, KvError> ReadPage(
-        const TableIdent &tbl_id,
-        uint32_t file_page_id,
-        std::unique_ptr<char[]> page) override;
+    std::pair<Page, KvError> ReadPage(const TableIdent &tbl_id,
+                                      uint32_t file_page_id,
+                                      Page page) override;
     KvError WritePage(const TableIdent &tbl_id,
                       VarPage page,
                       uint32_t file_page_id) override;

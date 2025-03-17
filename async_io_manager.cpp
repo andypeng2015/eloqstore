@@ -95,16 +95,8 @@ KvError IouringMgr::Init(int dir_fd)
     bufs_pool_.reserve(num_bufs);
     for (uint16_t i = 0; i < num_bufs; i++)
     {
-        char *buf = (char *) std::aligned_alloc(page_align, buf_size);
-        if (buf == nullptr)
-        {
-            LOG(ERROR) << "failed to allocate memory for buffer ring";
-            io_uring_unregister_files(&ring_);
-            io_uring_queue_exit(&ring_);
-            return KvError::OutOfMem;
-        }
-        bufs_pool_.emplace_back(std::unique_ptr<char[]>(buf));
-        io_uring_buf_ring_add(buf_ring_, buf, buf_size, i, mask, i);
+        auto &page = bufs_pool_.emplace_back(alloc_page(buf_size));
+        io_uring_buf_ring_add(buf_ring_, page.get(), buf_size, i, mask, i);
     }
     io_uring_buf_ring_advance(buf_ring_, num_bufs);
 
@@ -112,8 +104,9 @@ KvError IouringMgr::Init(int dir_fd)
     return KvError::NoError;
 }
 
-std::pair<std::unique_ptr<char[]>, KvError> IouringMgr::ReadPage(
-    const TableIdent &tbl_id, uint32_t fp_id, std::unique_ptr<char[]> page)
+std::pair<Page, KvError> IouringMgr::ReadPage(const TableIdent &tbl_id,
+                                              uint32_t fp_id,
+                                              Page page)
 {
     auto [file_id, offset] = ConvFilePageId(fp_id);
     LruFD::Ref fd_ref = GetFD(tbl_id, file_id);
@@ -128,12 +121,12 @@ std::pair<std::unique_ptr<char[]>, KvError> IouringMgr::ReadPage(
         auto ret_pair = Read(fd_ref.FdPair(), std::move(page), offset);
         page = std::move(ret_pair.first);
         res = ret_pair.second;
-    } while (res == -ENOBUFS);
+    } while (res == -ENOBUFS || res == -EAGAIN ||
+             (res >= 0 && res < options_->data_page_size));
 
-    if (res < options_->data_page_size)
+    if (res < 0)
     {
-        KvError err = res < 0 ? ToKvError(res) : KvError::TryAgain;
-        return {std::move(page), err};
+        return {std::move(page), ToKvError(res)};
     }
 
     if (!ValidatePageCrc32(page.get(), options_->data_page_size))
@@ -502,7 +495,6 @@ void IouringMgr::PollComplete()
     unsigned cnt = 0;
     io_uring_for_each_cqe(&ring_, head, cqe)
     {
-        DLOG_IF(INFO, cqe->res < 0) << "iouring operation failed " << cqe->res;
         cnt++;
 
         auto [ptr, typ] = DecodeUserData(cqe->user_data);
@@ -618,8 +610,7 @@ int IouringMgr::Read(FdIdx fd, char *dst, size_t n, uint64_t offset)
     return thd_task->WaitSyncIo();
 }
 
-std::pair<std::unique_ptr<char[]>, int> IouringMgr::Read(
-    FdIdx fd, std::unique_ptr<char[]> page, uint32_t offset)
+std::pair<Page, int> IouringMgr::Read(FdIdx fd, Page page, uint32_t offset)
 {
     io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, thd_task);
     if (fd.second)
@@ -632,7 +623,6 @@ std::pair<std::unique_ptr<char[]>, int> IouringMgr::Read(
     int ret = thd_task->WaitSyncIo();
     if (thd_task->io_flags_ & IORING_CQE_F_BUFFER)
     {
-        assert(ret > 0);
         uint16_t buf_id = thd_task->io_flags_ >> IORING_CQE_BUFFER_SHIFT;
         assert(buf_id < bufs_pool_.size());
         page.swap(bufs_pool_[buf_id]);
@@ -642,10 +632,6 @@ std::pair<std::unique_ptr<char[]>, int> IouringMgr::Read(
         io_uring_buf_ring_add(
             buf_ring_, bufs_pool_[buf_id].get(), buf_size, buf_id, mask, 0);
         io_uring_buf_ring_advance(buf_ring_, 1);
-    }
-    else
-    {
-        assert(ret <= 0);
     }
     return {std::move(page), ret};
 }
@@ -1139,8 +1125,9 @@ KvError MemStoreMgr::Init(int dir_fd)
     return KvError::NoError;
 }
 
-std::pair<std::unique_ptr<char[]>, KvError> MemStoreMgr::ReadPage(
-    const TableIdent &tbl_id, uint32_t fp_id, std::unique_ptr<char[]> page)
+std::pair<Page, KvError> MemStoreMgr::ReadPage(const TableIdent &tbl_id,
+                                               uint32_t fp_id,
+                                               Page page)
 {
     auto it = store_.find(tbl_id);
     if (it == store_.end())

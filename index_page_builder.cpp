@@ -12,7 +12,6 @@
 #include "coding.h"
 #include "kv_options.h"
 #include "mem_index_page.h"
-#include "page_type.h"
 
 namespace kvstore
 {

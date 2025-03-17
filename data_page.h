@@ -1,29 +1,14 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <string>
-#include <vector>
 
 #include "comparator.h"
 #include "kv_options.h"
-#include "page_type.h"
+#include "page.h"
 
 namespace kvstore
 {
-class PagePool
-{
-public:
-    PagePool(uint16_t page_size);
-    std::unique_ptr<char[]> Allocate();
-    void Free(std::unique_ptr<char[]> page);
-
-private:
-    const uint16_t page_size_;
-    std::vector<std::unique_ptr<char[]>> pages_;
-};
-
-inline thread_local PagePool *page_pool;
 
 class DataPage
 {
@@ -52,13 +37,13 @@ public:
     void SetPageId(uint32_t page_id);
     uint32_t PageId() const;
     char *PagePtr() const;
-    std::unique_ptr<char[]> GetPtr();
-    void SetPtr(std::unique_ptr<char[]> ptr);
+    Page GetPtr();
+    void SetPtr(Page ptr);
     void Clear();
 
 private:
     uint32_t page_id_{UINT32_MAX};
-    std::unique_ptr<char[]> page_{nullptr};
+    Page page_{nullptr, std::free};
 };
 
 std::ostream &operator<<(std::ostream &out, DataPage const &page);
