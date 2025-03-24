@@ -71,14 +71,17 @@ public:
         assert(Compare(left, right) < 0);
 
         size_t diff_idx = 0;
-        while (diff_idx < left.size() && left[diff_idx] >= right[diff_idx])
+        while (diff_idx < left.size() && left[diff_idx] == right[diff_idx])
         {
             ++diff_idx;
             assert(diff_idx >= left.size() || diff_idx < right.size());
         }
+        assert(diff_idx <= left.size());
+        assert(diff_idx < right.size());
+        assert(diff_idx == left.size() ||
+               uint8_t(left[diff_idx]) < uint8_t(right[diff_idx]));
 
-        size_t len = diff_idx >= left.size() ? diff_idx : diff_idx + 1;
-        std::string_view split{right.data(), len};
+        std::string_view split{right.data(), diff_idx + 1};
         assert(Compare(split, left) > 0 && Compare(split, right) <= 0);
 
         return split;
