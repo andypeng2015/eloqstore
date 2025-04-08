@@ -104,7 +104,6 @@ EloqStore::~EloqStore()
 
 KvError EloqStore::Start()
 {
-    LOG(INFO) << "EloqStore is starting...";
     if (!options_.db_path.empty())
     {
         KvError err = InitDBDir();
@@ -127,6 +126,7 @@ KvError EloqStore::Start()
     {
         w->Start();
     }
+    LOG(INFO) << "EloqStore is started.";
     return KvError::NoError;
 }
 

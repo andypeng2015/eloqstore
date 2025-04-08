@@ -59,12 +59,20 @@ set(ELOQ_STORE_SOURCES
     eloq_store.cpp
     root_meta.cpp
     replayer.cpp
-    xxhash.c)
+    xxhash.c
+    kill_point.cpp
+    test_utils.cpp)
 
 add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES})
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
 target_link_libraries(eloqstore PRIVATE ${URING_LIB} Boost::context glog::glog)
+
+add_library(test_util STATIC test_utils.cpp)
+target_link_libraries(test_util PRIVATE eloqstore)
+
+add_executable(test_client test_client.cpp)
+target_link_libraries(test_client PRIVATE test_util)
 
 add_executable(io_test io_test.cpp)
 target_link_libraries(io_test ${URING_LIB})
@@ -85,4 +93,8 @@ endif()
 
 if (WITH_EXAMPLE)
     add_subdirectory(examples)
+endif()
+
+if (WITH_DB_STRESS)
+    add_subdirectory(db_stress)
 endif()

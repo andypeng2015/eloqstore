@@ -8,12 +8,15 @@
 #include "common.h"
 #include "test_utils.h"
 
+using namespace test_util;
+
 TEST_CASE("concurrent tasks with memory store", "[concurrency]")
 {
     InitMemStore();
-    ConcurrencyTester tester(memstore.get(), "t1", 1, 16, 32, 20);
+    ConcurrencyTester tester(memstore.get(), "t1", 1, 16, 32);
     tester.Init();
-    tester.Run(5);
+    tester.Run(5, 32, 20);
+    tester.Clear();
 }
 
 TEST_CASE("concurrently write to partition", "[concurrency]")

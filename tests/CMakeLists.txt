@@ -27,7 +27,7 @@ include(CTest)
 include(Catch)
 
 foreach( name ${ALL_TARGETS} )
-   add_executable( ${name} ${UTEST_DIR}/${name}.cpp common.cpp test_utils.cpp)
+   add_executable( ${name} ${UTEST_DIR}/${name}.cpp common.cpp)
    catch_discover_tests(${name})
 endforeach()
 
@@ -36,5 +36,5 @@ foreach( name ${ALL_TARGETS} )
 endforeach()
 
 foreach( name ${ALL_TARGETS} )
-    target_link_libraries( ${name} PRIVATE Catch2::Catch2WithMain eloqstore)
+    target_link_libraries( ${name} PRIVATE Catch2::Catch2WithMain test_util)
 endforeach()

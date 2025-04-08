@@ -16,6 +16,8 @@
 #include "table_ident.h"
 #include "test_utils.h"
 
+using namespace test_util;
+
 static std::unique_ptr<kvstore::EloqStore> eloqstore = nullptr;
 constexpr char test_path[] = "/tmp/eloqstore";
 kvstore::KvOptions opts = {
@@ -91,17 +93,19 @@ TEST_CASE("persist with restart", "[persist]")
 TEST_CASE("easy concurrent tasks with iouring", "[concurrency]")
 {
     InitStore();
-    ConcurrencyTester tester(eloqstore.get(), "t1", 1, 16, 32, 20);
+    ConcurrencyTester tester(eloqstore.get(), "t1", 1, 16, 32);
     tester.Init();
-    tester.Run(5);
+    tester.Run(5, 32, 20);
+    tester.Clear();
 }
 
 TEST_CASE("hard concurrent tasks with iouring", "[concurrency][slow]")
 {
     InitStore();
-    ConcurrencyTester tester(eloqstore.get(), "t1", 8, 16, 1024, 1000);
+    ConcurrencyTester tester(eloqstore.get(), "t1", 8, 16, 1024);
     tester.Init();
-    tester.Run(5);
+    tester.Run(5, 1000, 1000);
+    tester.Clear();
 }
 
 TEST_CASE("simple LRU for opened fd", "[persist]")

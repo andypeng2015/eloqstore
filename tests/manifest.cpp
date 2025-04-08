@@ -5,6 +5,8 @@
 #include "kv_options.h"
 #include "test_utils.h"
 
+using namespace test_util;
+
 TEST_CASE("simple manifest recovery", "[manifest]")
 {
     kvstore::KvOptions opts;
@@ -54,4 +56,9 @@ TEST_CASE("medium manifest recovery", "[manifest]")
 
         verifier.Verify();
     }
+}
+
+TEST_CASE("detect manifest corruption", "[manifest]")
+{
+    // TODO:
 }

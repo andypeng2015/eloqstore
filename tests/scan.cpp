@@ -5,6 +5,8 @@
 #include "common.h"
 #include "test_utils.h"
 
+using namespace test_util;
+
 TEST_CASE("delete scan", "[scan]")
 {
     InitMemStore();

@@ -23,6 +23,7 @@ struct TableIdent
     static TableIdent FromString(const std::string &str);
     void SerializeTo(std::string &dst) const;
     size_t Hash() const;
+    bool IsValid() const;
 
     std::string tbl_name_;
     uint32_t partition_id_;
@@ -61,6 +62,11 @@ inline void TableIdent::SerializeTo(std::string &dst) const
 inline size_t TableIdent::Hash() const
 {
     return std::hash<std::string>()(tbl_name_) * 23 + partition_id_;
+}
+
+inline bool TableIdent::IsValid() const
+{
+    return !tbl_name_.empty();
 }
 
 inline std::ostream &operator<<(std::ostream &out, const TableIdent &tid)

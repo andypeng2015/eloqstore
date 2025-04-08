@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "error.h"
+#include "kill_point.h"
 #include "kv_options.h"
 #include "read_task.h"
 #include "table_ident.h"
@@ -245,10 +246,12 @@ KvError IouringMgr::WritePage(const TableIdent &tbl_id,
                               VarPage page,
                               uint32_t file_page_id)
 {
+    TEST_KILL_POINT("WritePage:0")
     auto [file_id, offset] = ConvFilePageId(file_page_id);
     auto [fd_ref, err] = GetOrCreateFD(tbl_id, file_id);
     CHECK_KV_ERR(err);
     fd_ref.Get()->dirty_ = true;
+    TEST_KILL_POINT("WritePage:1")
 
     auto [fd, registered] = fd_ref.FdPair();
     WriteReq *req = AllocWriteReq(std::move(fd_ref), std::move(page));
@@ -600,8 +603,9 @@ void IouringMgr::Submit()
     {
         return;
     }
-
+    TEST_KILL_POINT("Submit:0")
     int ret = io_uring_submit(&ring_);
+    TEST_KILL_POINT("Submit:1")
     if (ret < 0)
     {
         LOG(ERROR) << "iouring submit failed " << ret;
@@ -932,10 +936,12 @@ KvError IouringMgr::AppendManifest(const TableIdent &tbl_id,
                                    std::string_view log,
                                    uint64_t manifest_size)
 {
+    TEST_KILL_POINT("AppendManifest:GetOrCreateFD")
     assert(manifest_size > 0);
     auto [fd_ref, err] = GetOrCreateFD(tbl_id, LruFD::kManifest);
     CHECK_KV_ERR(err);
 
+    TEST_KILL_POINT("AppendManifest:Write")
     int res = Write(fd_ref.FdPair(), log.data(), log.size(), manifest_size);
     if (res < 0)
     {
@@ -943,6 +949,7 @@ KvError IouringMgr::AppendManifest(const TableIdent &tbl_id,
         return ToKvError(res);
     }
 
+    TEST_KILL_POINT("AppendManifest:Fdatasync")
     res = Fdatasync(fd_ref.FdPair());
     if (res < 0)
     {
@@ -955,6 +962,7 @@ KvError IouringMgr::AppendManifest(const TableIdent &tbl_id,
 KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
                                    std::string_view snapshot)
 {
+    TEST_KILL_POINT("SwitchManifest:0")
     LOG(INFO) << "switch manifest file for " << tbl_id;
     // Unregister and close the old manifest if it is opened
     LruFD::Ref fd_ref = GetCachedFD(tbl_id, LruFD::kManifest);
@@ -973,6 +981,7 @@ KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
         fd_ref.Get()->fd_ = LruFD::FdEmpty;
     }
 
+    TEST_KILL_POINT("SwitchManifest:1")
     // Generate temporary manifest
     auto [tmp_ref, err] = GetOrCreateFD(tbl_id, LruFD::kTmpManifest);
     CHECK_KV_ERR(err);
@@ -982,6 +991,7 @@ KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
         LOG(ERROR) << "init temporary manifest write failed " << res;
         return ToKvError(res);
     }
+    TEST_KILL_POINT("SwitchManifest:Fdatasync:0")
     res = Fdatasync(tmp_ref.FdPair());
     if (res < 0)
     {
@@ -989,15 +999,18 @@ KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
         return ToKvError(res);
     }
 
+    TEST_KILL_POINT("SwitchManifest:3")
     // Switch manifest on disk
     auto [dfd_ref, dir_err] = GetOrCreateFD(tbl_id, LruFD::kDirectiry);
     CHECK_KV_ERR(dir_err);
+    TEST_KILL_POINT("SwitchManifest:Rename")
     res = Rename(dfd_ref.FdPair(), mani_tmpfile, mani_file);
     if (res < 0)
     {
         LOG(ERROR) << "switch manifest rename failed " << res;
         return ToKvError(res);
     }
+    TEST_KILL_POINT("SwitchManifest:Fdatasync:2")
     res = Fdatasync(dfd_ref.FdPair());
     if (res < 0)
     {

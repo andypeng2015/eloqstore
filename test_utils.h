@@ -4,13 +4,32 @@
 #include <map>
 #include <string>
 
-#include "eloq_queue.h"
 #include "eloq_store.h"
 #include "table_ident.h"
 
+// https://github.com/cameron314/concurrentqueue/issues/280
+#undef BLOCK_SIZE
+#include "concurrentqueue.h"
+
+namespace test_util
+{
 std::string Key(uint64_t k);
 std::string Value(uint64_t val, uint32_t len = 0);
 void CheckKvEntry(const kvstore::KvEntry &left, const kvstore::KvEntry &right);
+
+uint64_t UnixTimestamp();
+
+inline uint32_t decode_key(const char *ptr)
+{
+    return __builtin_bswap32(kvstore::DecodeFixed32(ptr));
+}
+
+std::string FormatEntries(const std::vector<kvstore::KvEntry> &entries);
+
+std::pair<std::string, kvstore::KvError> Scan(kvstore::EloqStore *store,
+                                              const kvstore::TableIdent &tbl_id,
+                                              uint32_t begin,
+                                              uint32_t end);
 
 class MapVerifier
 {
@@ -57,38 +76,48 @@ public:
                       std::string tbl_name,
                       uint32_t n_partitions,
                       uint8_t seg_size,
-                      uint16_t seg_count,
-                      uint16_t n_readers);
-    ~ConcurrencyTester();
+                      uint16_t seg_count);
     void Init();
-    void Run(uint32_t rounds);
+    void Run(uint32_t rounds, uint32_t interval, uint16_t n_readers);
+    void Clear();
 
     static constexpr uint32_t average_v = 10;
 
 private:
-    struct Reader : kvstore::ScanRequest
+    struct Reader
     {
-        uint32_t begin_ts_;
+        Reader() = default;
+        uint16_t id_;
+        uint32_t start_tick_;
+        uint32_t partition_id_;
+        uint32_t begin_;
+        uint32_t end_;
         char begin_key_[4];
         char end_key_[4];
+        kvstore::ScanRequest req_;
     };
 
     struct Partition
     {
         bool IsWriting() const;
-        uint32_t Rounds() const;
+        void FinishWrite();
+        uint32_t FinishedRounds() const;
+
         uint32_t id_;
         std::vector<uint32_t> kvs_;
-        uint32_t ts_{0};
-        std::unique_ptr<kvstore::WriteRequest> writer_;
-        uint32_t write_interval_{0};
+        uint32_t ticks_{0};
+        kvstore::WriteRequest req_;
+        uint32_t verify_cnt_{0};
     };
 
     void Wake(kvstore::KvRequest *req);
     void ExecRead(Reader *reader);
     void VerifyRead(Reader *reader);
-    bool AllTasksDone(uint32_t rounds) const;
+    std::string DebugSegment(uint32_t partition_id,
+                             uint16_t seg_id,
+                             const std::vector<kvstore::KvEntry> *resp);
     void ExecWrite(Partition &partition);
+    bool AllTasksDone(uint32_t rounds) const;
 
     const uint8_t seg_size_;
     const uint16_t seg_count_;
@@ -96,10 +125,9 @@ private:
     const std::string tbl_name_;
 
     std::vector<Partition> partitions_;
-    std::vector<Reader> readers_;
-    eloq::SpscQueue<uint64_t> ready_;
+    moodycamel::ConcurrentQueue<uint64_t> finished_reqs_;
     uint32_t verify_sum_{0};
-    uint32_t verify_val_{0};
+    uint32_t verify_kv_{0};
     kvstore::EloqStore *const store_;
 };
 
@@ -127,3 +155,4 @@ private:
     kvstore::ManifestBuilder builder_;
     std::string file_;
 };
+}  // namespace test_util
