@@ -24,6 +24,7 @@ WriteTask::WriteTask(const TableIdent &tid)
       idx_page_builder_(Options()),
       data_page_builder_(Options())
 {
+    overflow_ptrs_.reserve(Options()->overflow_pointers * 4);
 }
 
 const TableIdent &WriteTask::TableId() const
@@ -39,9 +40,7 @@ void WriteTask::Reset(const TableIdent &tbl_id)
 
 void WriteTask::Abort()
 {
-    // Wait all asynchronous IO finished.
-    // PollComplete will access KvTask* stored in io_uring_cqe->user_data
-    WaitAsynIo();
+    IoMgr()->AbortWrite(tbl_ident_);
 
     // Unpins all index pages in the stack.
     while (!stack_.empty())
@@ -80,7 +79,8 @@ KvError WriteTask::DeleteTree(uint32_t page_id)
     {
         while (iter.Next())
         {
-            FreePage(iter.PageId());
+            err = DeleteDataPage(iter.PageId());
+            CHECK_KV_ERR(err);
         }
         return KvError::NoError;
     }
@@ -96,6 +96,23 @@ KvError WriteTask::DeleteTree(uint32_t page_id)
         }
     }
     idx_page->Unpin();
+    return KvError::NoError;
+}
+
+KvError WriteTask::DeleteDataPage(uint32_t page_id)
+{
+    auto [page, err] = LoadDataPage(page_id);
+    CHECK_KV_ERR(err);
+    DataPageIter iter(&page, Options());
+    while (iter.Next())
+    {
+        if (iter.IsOverflow())
+        {
+            err = DelOverflowValue(iter.Value());
+            CHECK_KV_ERR(err);
+        }
+    }
+    FreePage(page_id);
     return KvError::NoError;
 }
 
@@ -150,7 +167,13 @@ void WriteTask::AdvanceIndexPageIter(IndexPageIter &iter, bool &is_valid)
 KvError WriteTask::WritePage(DataPage &&page)
 {
     auto [_, fp_id] = AllocatePage(page.PageId());
-    return IoMgr()->WritePage(tbl_ident_, std::move(page), fp_id);
+    return WritePage(std::move(page), fp_id);
+}
+
+KvError WriteTask::WritePage(OverflowPage &&page)
+{
+    auto [_, fp_id] = AllocatePage(page.PageId());
+    return WritePage(std::move(page), fp_id);
 }
 
 KvError WriteTask::WritePage(MemIndexPage *page)
@@ -158,16 +181,45 @@ KvError WriteTask::WritePage(MemIndexPage *page)
     auto [page_id, file_page_id] = AllocatePage(page->PageId());
     page->SetPageId(page_id);
     page->SetFilePageId(file_page_id);
-    return IoMgr()->WritePage(tbl_ident_, page, file_page_id);
+    return WritePage(page, file_page_id);
 }
 
-void WriteTask::WritePageCallback(VarPage page)
+KvError WriteTask::WritePage(VarPage page, uint32_t file_page_id)
+{
+    if (inflight_io_ >= 32)
+    {
+        // Avoid long running WriteTask block ReadTask/ScanTask
+        KvError err = WaitWrite();
+        if (err != KvError::NoError)
+        {
+            return err;
+        }
+    }
+    return IoMgr()->WritePage(tbl_ident_, std::move(page), file_page_id);
+}
+
+void WriteTask::WritePageCallback(VarPage page, KvError err)
 {
     if (page.index() == 0)
     {
         MemIndexPage *idx_page = std::get<MemIndexPage *>(page);
-        index_mgr->FinishIo(cow_meta_.mapper_->GetMapping(), idx_page);
+        if (err == KvError::NoError)
+        {
+            index_mgr->FinishIo(cow_meta_.mapper_->GetMapping(), idx_page);
+        }
+        else
+        {
+            index_mgr->FreeIndexPage(idx_page);
+            write_err_ = err;
+        }
     }
+}
+
+KvError WriteTask::WaitWrite()
+{
+    write_err_ = KvError::NoError;
+    WaitAsynIo();
+    return write_err_;
 }
 
 KvError BatchWriteTask::SeekStack(std::string_view search_key)
@@ -293,7 +345,7 @@ KvError BatchWriteTask::LoadTripleElement(uint8_t idx, uint32_t page_id)
         return KvError::NoError;
     }
     assert(page_id != UINT32_MAX);
-    auto [page, err] = LoadDataPage(tbl_ident_, page_id, ToFilePage(page_id));
+    auto [page, err] = LoadDataPage(page_id);
     CHECK_KV_ERR(err);
     leaf_triple_[idx] = std::move(page);
     return KvError::NoError;
@@ -413,7 +465,7 @@ bool BatchWriteTask::SetBatch(std::vector<WriteDataEntry> &&entries)
     const Comparator *cmp = Comp();
     if (entries.size() > 1)
     {
-        // Ensure the input batch keys are unique and ordered
+        // Ensure the input batch keys are unique and ordered.
         for (uint64_t i = 1; i < entries.size(); i++)
         {
             if (cmp->Compare(entries[i - 1].key_, entries[i].key_) >= 0)
@@ -422,7 +474,17 @@ bool BatchWriteTask::SetBatch(std::vector<WriteDataEntry> &&entries)
             }
         }
     }
+
+    for (WriteDataEntry &ent : entries)
+    {
+        // Limit key size to 2048 bytes.
+        if (ent.key_.empty() || ent.key_.size() > max_key_size)
+        {
+            return false;
+        }
+    }
 #endif
+
     batch_ = std::move(entries);
     return true;
 }
@@ -517,8 +579,7 @@ KvError BatchWriteTask::LoadApplyingPage(uint32_t page_id)
     }
     else
     {
-        auto [page, err] =
-            LoadDataPage(tbl_ident_, page_id, ToFilePage(page_id));
+        auto [page, err] = LoadDataPage(page_id);
         CHECK_KV_ERR(err);
         applying_page_ = std::move(page);
     }
@@ -603,12 +664,25 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
         assert(page_key <= base_page_iter.Key());
     }
 
-    auto add_to_page =
-        [&](std::string_view key, std::string_view val, uint64_t ts)
+    std::function<KvError(std::string_view, std::string_view, bool, uint64_t)>
+        add_to_page = [&](std::string_view key,
+                          std::string_view val,
+                          bool is_ptr,
+                          uint64_t ts) -> KvError
     {
-        bool success = data_page_builder_.Add(key, val, ts);
+        bool success = data_page_builder_.Add(key, val, ts, is_ptr);
         if (!success)
         {
+            if (!is_ptr &&
+                DataPageBuilder::IsOverflowKV(key, val.size(), ts, Options()))
+            {
+                // The key-value pair is too large to fit in a single data page.
+                // Split it into multiple overflow pages.
+                KvError err = WriteOverflowValue(val);
+                CHECK_KV_ERR(err);
+                return add_to_page(key, overflow_ptrs_, true, ts);
+            }
+
             // Finishes the current page.
             std::string_view page_view = data_page_builder_.Finish();
             KvError err =
@@ -619,9 +693,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
                 {prev_key.data(), prev_key.size()}, key);
             assert(!prev_key.empty() && prev_key < curr_page_key);
             data_page_builder_.Reset();
-            success = data_page_builder_.Add(key, val, ts);
-            // Doesn't support a single key-value pair spanning more than one
-            // page for now.
+            success = data_page_builder_.Add(key, val, ts, is_ptr);
             assert(success);
             page_id = UINT32_MAX;
         }
@@ -635,6 +707,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
         std::string_view base_key = base_page_iter.Key();
         std::string_view base_val = base_page_iter.Value();
         uint64_t base_ts = base_page_iter.Timestamp();
+        bool is_overflow_ptr = false;
 
         change_key = {change_it->key_.data(), change_it->key_.size()};
         std::string_view change_val = {change_it->val_.data(),
@@ -659,6 +732,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
             new_key = base_key;
             new_val = base_val;
             new_ts = base_ts;
+            is_overflow_ptr = base_page_iter.IsOverflow();
             adv_type = AdvanceType::PageIter;
         }
         else if (cmp_ret == 0)
@@ -666,6 +740,11 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
             adv_type = AdvanceType::Both;
             if (change_ts > base_ts)
             {
+                if (base_page_iter.IsOverflow())
+                {
+                    KvError err = DelOverflowValue(base_val);
+                    CHECK_KV_ERR(err);
+                }
                 if (change_it->op_ == WriteOp::Delete)
                 {
                     new_key = std::string_view{};
@@ -682,6 +761,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
                 new_key = base_key;
                 new_val = base_val;
                 new_ts = base_ts;
+                is_overflow_ptr = base_page_iter.IsOverflow();
             }
         }
         else
@@ -701,7 +781,8 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
 
         if (!new_key.empty())
         {
-            KvError err = add_to_page(new_key, new_val, new_ts);
+            KvError err =
+                add_to_page(new_key, new_val, is_overflow_ptr, new_ts);
             CHECK_KV_ERR(err);
         }
 
@@ -724,8 +805,9 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
     {
         std::string_view new_key = base_page_iter.Key();
         std::string_view new_val = base_page_iter.Value();
+        bool overflow = base_page_iter.IsOverflow();
         uint64_t new_ts = base_page_iter.Timestamp();
-        KvError err = add_to_page(new_key, new_val, new_ts);
+        KvError err = add_to_page(new_key, new_val, overflow, new_ts);
         CHECK_KV_ERR(err);
         AdvanceDataPageIter(base_page_iter, is_base_iter_valid);
     }
@@ -739,7 +821,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx)
             std::string_view new_val{change_it->val_.data(),
                                      change_it->val_.size()};
             uint64_t new_ts = change_it->timestamp_;
-            KvError err = add_to_page(new_key, new_val, new_ts);
+            KvError err = add_to_page(new_key, new_val, false, new_ts);
             CHECK_KV_ERR(err);
         }
         ++change_it;
@@ -1092,6 +1174,110 @@ KvError BatchWriteTask::FinishDataPage(std::string_view page_view,
     return KvError::NoError;
 }
 
+KvError WriteTask::WriteOverflowValue(std::string_view value)
+{
+    const KvOptions *opts = Options();
+    const uint16_t page_cap = OverflowPage::Capacity(opts, false);
+    const uint16_t end_page_cap = OverflowPage::Capacity(opts, true);
+    overflow_ptrs_.clear();
+    uint32_t end_page_id = UINT32_MAX;
+    std::string_view page_val;
+    KvError err;
+    std::array<uint32_t, max_overflow_pointers> buf;
+    std::span<uint32_t> pointers;
+
+    while (!value.empty())
+    {
+        // Calculates how many page ids are needed for the next group.
+        // Round upward and up to KvOptions::overflow_pointers.
+        size_t next_group_size = (value.size() + page_cap - 1) / page_cap;
+        next_group_size =
+            std::min(next_group_size, size_t(opts->overflow_pointers));
+        // Allocate pointers to the next group.
+        for (uint8_t i = 0; i < next_group_size; i++)
+        {
+            buf[i] = cow_meta_.mapper_->GetPage();
+        }
+        pointers = {buf.data(), next_group_size};
+        if (end_page_id == UINT32_MAX)
+        {
+            // Store head pointers of this link list in overflow_ptrs_.
+            for (uint32_t pg_id : pointers)
+            {
+                PutFixed32(&overflow_ptrs_, pg_id);
+            }
+        }
+        else
+        {
+            // Write end page of the previous group that contains pointers to
+            // the next group.
+            err =
+                WritePage(OverflowPage(end_page_id, opts, page_val, pointers));
+            CHECK_KV_ERR(err);
+        }
+
+        // Write the next overflow pages group.
+        uint8_t i = 0;
+        for (uint32_t pg_id : pointers)
+        {
+            i++;
+            if (i == opts->overflow_pointers && value.size() > page_cap)
+            {
+                // The end page of this group can't hold the remaining value.
+                // So we need at least one more group.
+                end_page_id = pg_id;
+                // The end page of a group has a smaller capacity.
+                uint16_t page_val_size =
+                    std::min(size_t(end_page_cap), value.size());
+                page_val = value.substr(0, page_val_size);
+                value = value.substr(page_val_size);
+                break;
+            }
+            uint16_t page_val_size = std::min(size_t(page_cap), value.size());
+            page_val = value.substr(0, page_val_size);
+            value = value.substr(page_val_size);
+            err = WritePage(OverflowPage(pg_id, opts, page_val));
+            CHECK_KV_ERR(err);
+        }
+        assert(i == pointers.size());
+    }
+    return KvError::NoError;
+}
+
+KvError WriteTask::DelOverflowValue(std::string_view encoded_ptrs)
+{
+    std::array<uint32_t, max_overflow_pointers> pointers;
+    uint8_t n_ptrs = DecodeOverflowPointers(encoded_ptrs, pointers);
+    for (uint8_t i = 0; i < n_ptrs;)
+    {
+        uint32_t page_id = pointers[i];
+        if (i == (Options()->overflow_pointers - 1))
+        {
+            auto [page, err] = LoadOverflowPage(page_id);
+            CHECK_KV_ERR(err);
+            encoded_ptrs = page.GetEncodedPointers(Options());
+            n_ptrs = DecodeOverflowPointers(encoded_ptrs, pointers);
+            i = 0;
+        }
+        else
+        {
+            i++;
+        }
+        FreePage(page_id);
+    }
+    return KvError::NoError;
+}
+
+std::pair<DataPage, KvError> WriteTask::LoadDataPage(uint32_t page_id)
+{
+    return KvTask::LoadDataPage(tbl_ident_, page_id, ToFilePage(page_id));
+}
+
+std::pair<OverflowPage, KvError> WriteTask::LoadOverflowPage(uint32_t page_id)
+{
+    return KvTask::LoadOverflowPage(tbl_ident_, page_id, ToFilePage(page_id));
+}
+
 std::pair<MemIndexPage *, KvError> TruncateTask::TruncateIndexPage(
     uint32_t page_id, std::string_view trunc_pos)
 {
@@ -1133,7 +1319,7 @@ std::pair<MemIndexPage *, KvError> TruncateTask::TruncateIndexPage(
         // delete whole sub-node
         if (is_leaf_idx)
         {
-            FreePage(sub_node_id);
+            DeleteDataPage(sub_node_id);
             return KvError::NoError;
         }
         else
@@ -1272,20 +1458,31 @@ KvError TruncateTask::Truncate(std::string_view trunc_pos)
 std::pair<bool, KvError> TruncateTask::TruncateDataPage(
     uint32_t page_id, std::string_view trunc_pos)
 {
-    auto [page, err] = LoadDataPage(tbl_ident_, page_id, ToFilePage(page_id));
+    auto [page, err] = LoadDataPage(page_id);
     if (err != KvError::NoError)
     {
         return {true, err};
     }
 
     const Comparator *cmp = index_mgr->GetComparator();
-    DataPageIter page_iter{&page, Options()};
+    DataPageIter iter{&page, Options()};
     data_page_builder_.Reset();
-    while (page_iter.Next() && cmp->Compare(page_iter.Key(), trunc_pos) < 0)
+    while (iter.Next() && cmp->Compare(iter.Key(), trunc_pos) < 0)
     {
-        bool ok = data_page_builder_.Add(
-            page_iter.Key(), page_iter.Value(), page_iter.Timestamp());
+        bool ok =
+            data_page_builder_.Add(iter.Key(), iter.Value(), iter.Timestamp());
         assert(ok);
+    }
+    while (iter.Next())
+    {
+        if (iter.IsOverflow())
+        {
+            err = DelOverflowValue(iter.Value());
+            if (err != KvError::NoError)
+            {
+                return {true, err};
+            }
+        }
     }
 
     if (data_page_builder_.IsEmpty())
@@ -1299,8 +1496,7 @@ std::pair<bool, KvError> TruncateTask::TruncateDataPage(
         }
         // The previous data page will become the new tail data page.
         // We don't need to update the previous page id of the next data page.
-        auto [prev_page, err] =
-            LoadDataPage(tbl_ident_, prev_page_id, ToFilePage(prev_page_id));
+        auto [prev_page, err] = LoadDataPage(prev_page_id);
         if (err != KvError::NoError)
         {
             return {false, err};

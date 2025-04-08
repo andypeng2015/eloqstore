@@ -83,4 +83,6 @@ if (WITH_UNIT_TESTS)
     add_subdirectory(tests)
 endif()
 
-add_subdirectory(examples)
+if (WITH_EXAMPLE)
+    add_subdirectory(examples)
+endif()

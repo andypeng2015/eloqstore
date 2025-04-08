@@ -31,15 +31,13 @@ int KvTask::WaitSyncIo()
     return io_res_;
 }
 
-int KvTask::WaitAsynIo()
+void KvTask::WaitAsynIo()
 {
-    asyn_io_err_ = 0;
     while (inflight_io_ > 0)
     {
         status_ = TaskStatus::WaitAllAsynIo;
         Yield();
     }
-    return asyn_io_err_;
 }
 
 void KvTask::FinishIo(bool is_sync_io)
@@ -65,18 +63,132 @@ void KvTask::FinishIo(bool is_sync_io)
     }
 }
 
+std::pair<Page, KvError> KvTask::LoadPage(const TableIdent &tbl_id,
+                                          uint32_t file_page_id)
+{
+    auto [page, err] =
+        IoMgr()->ReadPage(tbl_id, file_page_id, page_pool->Allocate());
+    if (err != KvError::NoError)
+    {
+        return {Page(nullptr, std::free), err};
+    }
+    return {std::move(page), KvError::NoError};
+}
+
 std::pair<DataPage, KvError> KvTask::LoadDataPage(const TableIdent &tbl_id,
                                                   uint32_t page_id,
                                                   uint32_t file_page_id)
 {
-    DataPage page(page_id, Options()->data_page_size);
-    auto [ptr, err] = IoMgr()->ReadPage(tbl_id, file_page_id, page.GetPtr());
-    page.SetPtr(std::move(ptr));
+    auto [page, err] = LoadPage(tbl_id, file_page_id);
     if (err != KvError::NoError)
     {
         return {DataPage(), err};
     }
-    return {std::move(page), KvError::NoError};
+    return {DataPage(page_id, std::move(page)), KvError::NoError};
+}
+
+std::pair<OverflowPage, KvError> KvTask::LoadOverflowPage(
+    const TableIdent &tbl_id, uint32_t page_id, uint32_t file_page_id)
+{
+    auto [page, err] = LoadPage(tbl_id, file_page_id);
+    if (err != KvError::NoError)
+    {
+        return {OverflowPage(), err};
+    }
+    return {OverflowPage(page_id, std::move(page)), KvError::NoError};
+}
+
+std::pair<std::string, KvError> KvTask::GetOverflowValue(
+    const TableIdent &tbl_id,
+    const MappingSnapshot *mapping,
+    std::string_view encoded_ptrs)
+{
+    std::array<uint32_t, max_overflow_pointers> ids_buf;
+    // Decode and convert overflow pointers (logical) to file page ids.
+    auto to_file_page_ids =
+        [&](std::string_view encoded_ptrs) -> std::span<uint32_t>
+    {
+        uint8_t n = DecodeOverflowPointers(encoded_ptrs, ids_buf);
+        for (uint8_t i = 0; i < n; i++)
+        {
+            ids_buf[i] = mapping->ToFilePage(ids_buf[i]);
+        }
+        return {ids_buf.data(), n};
+    };
+
+    std::span<uint32_t> page_ids = to_file_page_ids(encoded_ptrs);
+    std::vector<Page> pages;
+    std::string value;
+    value.reserve(page_ids.size() * OverflowPage::Capacity(Options(), false));
+    while (!page_ids.empty())
+    {
+        KvError err = IoMgr()->ReadPages(tbl_id, page_ids, pages);
+        if (err != KvError::NoError)
+        {
+            return {{}, err};
+        }
+        uint8_t i = 0;
+        for (Page &pg : pages)
+        {
+            OverflowPage page(UINT32_MAX, std::move(pg));
+            value.append(page.GetValue());
+            if (++i == pages.size())
+            {
+                encoded_ptrs = page.GetEncodedPointers(Options());
+                page_ids = to_file_page_ids(encoded_ptrs);
+            }
+        }
+    }
+
+    return {std::move(value), KvError::NoError};
+}
+
+uint8_t KvTask::DecodeOverflowPointers(
+    std::string_view encoded,
+    std::span<uint32_t, max_overflow_pointers> pointers)
+{
+    assert(encoded.size() % sizeof(uint32_t) == 0);
+    uint8_t n_ptrs = 0;
+    while (!encoded.empty())
+    {
+        pointers[n_ptrs++] = DecodeFixed32(encoded.data());
+        encoded = encoded.substr(sizeof(uint32_t));
+    }
+    assert(n_ptrs <= max_overflow_pointers);
+    return n_ptrs;
+}
+
+void WaitingZone::Sleep(KvTask *task)
+{
+    tasks_.Enqueue(thd_task);
+    thd_task->status_ = TaskStatus::Blocked;
+    thd_task->Yield();
+}
+
+void WaitingZone::WakeOne()
+{
+    if (tasks_.Size() > 0)
+    {
+        KvTask *task = tasks_.Peek();
+        tasks_.Dequeue();
+        task->Resume();
+    }
+}
+
+void WaitingZone::WakeN(size_t n)
+{
+    n = std::min(n, tasks_.Size());
+    for (size_t i = 0; i < n; i++)
+    {
+        KvTask *task = tasks_.Peek();
+        tasks_.Dequeue();
+        task->Resume();
+    }
+}
+
+void WaitingZone::WakeAll()
+{
+    WakeN(tasks_.Size());
 }
 
 AsyncIoManager *IoMgr()

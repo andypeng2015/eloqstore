@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 
 #include "comparator.h"
@@ -9,12 +10,22 @@
 
 namespace kvstore
 {
+enum class ValLenBit : uint8_t
+{
+    Overflow = 0,
+    Reserved1,
+    Reserved2,
+    Reserved3,
+    BitsCount
+};
 
 class DataPage
 {
 public:
     DataPage() = default;
     DataPage(uint32_t page_id, uint32_t page_size = 0);
+    DataPage(uint32_t page_id, Page page)
+        : page_id_(page_id), page_(std::move(page)) {};
     DataPage(const DataPage &) = delete;
     DataPage(DataPage &&rhs);
     DataPage &operator=(DataPage &&);
@@ -58,6 +69,7 @@ public:
     void Reset();
     std::string_view Key() const;
     std::string_view Value() const;
+    bool IsOverflow() const;
     uint64_t Timestamp() const;
 
     bool HasNext() const;
@@ -73,7 +85,8 @@ private:
                                    const char *limit,
                                    uint32_t *shared,
                                    uint32_t *non_shared,
-                                   uint32_t *value_length);
+                                   uint32_t *value_length,
+                                   bool *overflow);
 
     const Comparator *const cmp_;
     std::string_view page_;
@@ -85,7 +98,56 @@ private:
 
     std::string key_;
     std::string_view value_;
+    bool overflow_;
     uint64_t timestamp_;
 };
 
+/**
+ * @brief The overflow page is used to store the overflow value that can not fit
+ * in a DataPage.
+ * Format:
+ * +---------------+-----------+----------------+-------+
+ * | checksum (8B) | type (1B) | value len (2B) | value |
+ * +---------------+-----------+----------------+-------+
+ * +----------------------+-------------------------+
+ * | pointers (N*4 Bytes) | number of pointers (1B) | <End>
+ * +----------------------+-------------------------+
+ * The pointers are stored at the end of the page.
+ */
+class OverflowPage
+{
+public:
+    OverflowPage() = default;
+    OverflowPage(uint32_t page_id, Page page);
+    OverflowPage(uint32_t page_id,
+                 const KvOptions *opts,
+                 std::string_view val,
+                 std::span<uint32_t> pointers = {});
+    OverflowPage(const OverflowPage &) = delete;
+    OverflowPage(OverflowPage &&rhs);
+    ~OverflowPage();
+    void Clear();
+    void SetPageId(uint32_t page_id);
+    uint32_t PageId() const;
+    char *PagePtr() const;
+    uint16_t ValueSize() const;
+    std::string_view GetValue() const;
+    uint8_t NumPointers(const KvOptions *options) const;
+    std::string_view GetEncodedPointers(const KvOptions *options) const;
+
+    /**
+     * @brief Calculate the capacity of an overflow page.
+     * @param options The options of the KV store.
+     * @param end Whether the page is the end page of a overflow group.
+     */
+    static uint16_t Capacity(const KvOptions *options, bool end);
+
+    static const uint16_t page_size_offset = page_type_offset + sizeof(uint8_t);
+    static const uint16_t value_offset = page_size_offset + sizeof(uint16_t);
+    static const uint16_t header_size = value_offset;
+
+private:
+    uint32_t page_id_{UINT32_MAX};
+    Page page_{nullptr, std::free};
+};
 }  // namespace kvstore

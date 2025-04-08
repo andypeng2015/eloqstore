@@ -46,7 +46,7 @@ TEST_CASE("random upsert/delete and scan", "[delete]")
 {
     InitMemStore();
     MapVerifier verify(test_tbl_id, memstore.get());
-    verify.SetValueLength(100);
+    verify.SetValueSize(100);
     constexpr uint64_t max_val = 50000;
     for (int i = 0; i < 10; i++)
     {
@@ -63,7 +63,7 @@ TEST_CASE("easy truncate table partition", "[truncate]")
 {
     InitMemStore();
     MapVerifier verify(test_tbl_id, memstore.get());
-    verify.SetValueLength(1000);
+    verify.SetValueSize(1000);
 
     verify.Upsert(0, 10);
     verify.Truncate(5);
@@ -74,7 +74,7 @@ TEST_CASE("truncate table partition", "[truncate]")
 {
     InitMemStore();
     MapVerifier verify(test_tbl_id, memstore.get());
-    verify.SetValueLength(100);
+    verify.SetValueSize(100);
 
     verify.Upsert(1, 100000);
     verify.Truncate(100000);

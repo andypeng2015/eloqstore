@@ -21,7 +21,7 @@ std::string Key(uint64_t k)
     return kstr;
 }
 
-std::string Value(uint64_t val, uint16_t len)
+std::string Value(uint64_t val, uint32_t len)
 {
     std::string s = std::to_string(val);
     if (s.size() < len)
@@ -31,8 +31,21 @@ std::string Value(uint64_t val, uint16_t len)
     return s;
 }
 
-MapVerifier::MapVerifier(kvstore::TableIdent tid, kvstore::EloqStore *store)
-    : tid_(std::move(tid)), eloq_store_(store)
+void CheckKvEntry(const kvstore::KvEntry &left, const kvstore::KvEntry &right)
+{
+    CHECK(std::get<0>(left) == std::get<0>(right));
+    {
+        std::string_view lval(std::get<1>(left));
+        std::string_view rval(std::get<1>(right));
+        CHECK(lval == rval);
+    }
+    CHECK(std::get<2>(left) == std::get<2>(right));
+}
+
+MapVerifier::MapVerifier(kvstore::TableIdent tid,
+                         kvstore::EloqStore *store,
+                         bool validate)
+    : tid_(std::move(tid)), eloq_store_(store), auto_validate_(validate)
 {
 }
 
@@ -52,9 +65,8 @@ void MapVerifier::Upsert(uint64_t begin, uint64_t end)
     for (size_t idx = begin; idx < end; ++idx)
     {
         std::string key = Key(idx);
-        std::string val = Value(ts_ + idx, val_len_);
+        std::string val = Value(ts_ + idx, val_size_);
         entries.emplace_back(key, val, ts_, kvstore::WriteOp::Upsert);
-        answer_.insert_or_assign(key, kvstore::KvEntry(key, val, ts_));
     }
     kvstore::WriteRequest req;
     req.SetArgs(tid_, std::move(entries));
@@ -70,7 +82,6 @@ void MapVerifier::Delete(uint64_t begin, uint64_t end)
     {
         std::string key = Key(idx);
         entries.emplace_back(key, "", ts_, kvstore::WriteOp::Delete);
-        answer_.erase(key);
     }
     kvstore::WriteRequest req;
     req.SetArgs(tid_, std::move(entries));
@@ -91,8 +102,6 @@ void MapVerifier::Truncate(uint64_t position)
         return;
     }
 
-    auto it = answer_.lower_bound(key);
-    answer_.erase(it, answer_.end());
     req.SetArgs(tid_, key);
     ExecWrite(&req);
 }
@@ -107,7 +116,6 @@ void MapVerifier::WriteRnd(uint64_t begin,
     density = density > max ? max : density;
     LOG(INFO) << "WriteRnd(" << begin << ',' << end << ',' << int(del) << ','
               << int(density) << ')';
-    srand(ts_);
 
     std::vector<kvstore::WriteDataEntry> entries;
     for (size_t idx = begin; idx < end; ++idx)
@@ -116,17 +124,20 @@ void MapVerifier::WriteRnd(uint64_t begin,
         {
             continue;
         }
+
         std::string key = Key(idx);
+        uint64_t ts = ts_;
         if ((rand() % max) < del)
         {
-            entries.emplace_back(key, "", ts_, kvstore::WriteOp::Delete);
-            answer_.erase(key);
+            entries.emplace_back(
+                std::move(key), std::string(), ts, kvstore::WriteOp::Delete);
         }
         else
         {
-            std::string val = Value(ts_ + idx, val_len_);
-            entries.emplace_back(key, val, ts_, kvstore::WriteOp::Upsert);
-            answer_.insert_or_assign(key, kvstore::KvEntry(key, val, ts_));
+            uint32_t len = (rand() % val_size_) + 1;
+            std::string val = Value(ts + idx, len);
+            entries.emplace_back(
+                std::move(key), std::move(val), ts, kvstore::WriteOp::Upsert);
         }
     }
     kvstore::WriteRequest req;
@@ -138,44 +149,46 @@ void MapVerifier::Clean()
 {
     LOG(INFO) << "Clean()";
 
-    std::vector<kvstore::WriteDataEntry> entries;
-    for (auto [k, _] : answer_)
-    {
-        entries.emplace_back(k, "", ts_, kvstore::WriteOp::Delete);
-    }
-    answer_.clear();
-
-    kvstore::WriteRequest req;
-    req.SetArgs(tid_, std::move(entries));
+    kvstore::TruncateRequest req;
+    req.SetArgs(tid_, {});
     ExecWrite(&req);
 }
 
-void MapVerifier::Read(uint64_t k)
+void MapVerifier::Read(uint64_t key)
 {
-    LOG(INFO) << "Read(" << k << ')';
+    Read(Key(key));
+}
 
-    std::string key = Key(k);
+void MapVerifier::Read(std::string_view key)
+{
+    LOG(INFO) << "Read(" << key << ')';
+
     kvstore::ReadRequest req;
     req.SetArgs(tid_, key);
     eloq_store_->ExecSync(&req);
     if (req.Error() == kvstore::KvError::NoError)
     {
         kvstore::KvEntry ret(key, req.value_, req.ts_);
-        CHECK(answer_.at(key) == ret);
+        CHECK(answer_.at(std::string(key)) == ret);
     }
     else
     {
         CHECK(req.Error() == kvstore::KvError::NotFound);
-        CHECK(answer_.find(key) == answer_.end());
+        CHECK(answer_.find(std::string(key)) == answer_.end());
     }
 }
 
 void MapVerifier::Scan(uint64_t begin, uint64_t end)
 {
+    Scan(Key(begin), Key(end));
+}
+
+void MapVerifier::Scan(std::string_view begin, std::string_view end)
+{
     LOG(INFO) << "Scan(" << begin << ',' << end << ')';
 
-    std::string begin_key = Key(begin);
-    std::string end_key = Key(end);
+    std::string begin_key(begin);
+    std::string end_key(end);
     kvstore::ScanRequest req;
     req.SetArgs(tid_, begin_key, end_key);
     eloq_store_->ExecSync(&req);
@@ -184,7 +197,7 @@ void MapVerifier::Scan(uint64_t begin, uint64_t end)
         auto it = answer_.lower_bound(begin_key);
         for (auto &t : req.entries_)
         {
-            CHECK(t == it->second);
+            CheckKvEntry(t, it->second);
             it++;
         }
     }
@@ -198,7 +211,7 @@ void MapVerifier::Scan(uint64_t begin, uint64_t end)
 void MapVerifier::Validate()
 {
     kvstore::ScanRequest req;
-    req.SetArgs(tid_, "", "");
+    req.SetArgs(tid_, {}, {});
     eloq_store_->ExecSync(&req);
     if (req.Error() == kvstore::KvError::NotFound)
     {
@@ -211,7 +224,7 @@ void MapVerifier::Validate()
     auto it = answer_.begin();
     for (auto &t : req.entries_)
     {
-        CHECK(t == it->second);
+        CheckKvEntry(t, it->second);
         it++;
     }
     CHECK(it == answer_.end());
@@ -219,8 +232,63 @@ void MapVerifier::Validate()
 
 void MapVerifier::ExecWrite(kvstore::KvRequest *req)
 {
+    switch (req->Type())
+    {
+    case kvstore::RequestType::Write:
+    {
+        const auto wreq = static_cast<kvstore::WriteRequest *>(req);
+        for (const kvstore::WriteDataEntry &ent : wreq->batch_)
+        {
+            auto it = answer_.find(ent.key_);
+            if (it == answer_.end())
+            {
+                if (ent.op_ == kvstore::WriteOp::Delete)
+                {
+                    continue;
+                }
+                auto ret = answer_.try_emplace(ent.key_);
+                assert(ret.second);
+                it = ret.first;
+            }
+            else
+            {
+                if (ent.timestamp_ <= std::get<2>(it->second))
+                {
+                    continue;
+                }
+            }
+            assert(it != answer_.end());
+
+            if (ent.op_ == kvstore::WriteOp::Upsert)
+            {
+                it->second =
+                    kvstore::KvEntry(ent.key_, ent.val_, ent.timestamp_);
+            }
+            else if (ent.op_ == kvstore::WriteOp::Delete)
+            {
+                answer_.erase(it);
+            }
+            else
+            {
+                assert(false);
+            }
+        }
+        break;
+    }
+    case kvstore::RequestType::Truncate:
+    {
+        const auto treq = static_cast<kvstore::TruncateRequest *>(req);
+        auto it = answer_.lower_bound(std::string(treq->position_));
+        answer_.erase(it, answer_.end());
+        break;
+    }
+    default:
+        assert(false);
+    }
+
     eloq_store_->ExecSync(req);
     CHECK(req->Error() == kvstore::KvError::NoError);
+
     if (auto_validate_)
     {
         Validate();
@@ -233,14 +301,19 @@ void MapVerifier::SetAutoValidate(bool v)
     auto_validate_ = v;
 }
 
-void MapVerifier::SetValueLength(uint16_t val_len)
+void MapVerifier::SetValueSize(uint32_t val_size)
 {
-    val_len_ = val_len;
+    val_size_ = val_size;
 }
 
 void MapVerifier::SetStore(kvstore::EloqStore *store)
 {
     eloq_store_ = store;
+}
+
+void MapVerifier::SetTimestamp(uint64_t ts)
+{
+    ts_ = ts;
 }
 
 bool ConcurrencyTester::Partition::IsWriting() const

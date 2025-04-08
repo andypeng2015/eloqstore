@@ -51,10 +51,27 @@ public:
      * Enqueues the page into the cache replacement list (so that the page is
      * allowed to be evicted) if it is a index page.
      */
-    void WritePageCallback(VarPage page);
+    void WritePageCallback(VarPage page, KvError err);
+
+    KvError WaitWrite();
+    // write_err_ record the result of the last failed write
+    // request.
+    KvError write_err_{KvError::NoError};
 
 protected:
     KvError DeleteTree(uint32_t page_id);
+    KvError DeleteDataPage(uint32_t page_id);
+
+    /**
+     * @brief Split and write overflow value into multiple pages.
+     * @return overflow_ptrs_ store the encoded overflow pointers.
+     */
+    KvError WriteOverflowValue(std::string_view value);
+    /**
+     * @brief Delete overflow value.
+     * @param encoded_ptrs The encoded overflow pointers.
+     */
+    KvError DelOverflowValue(std::string_view encoded_ptrs);
 
     /**
      * @brief Calculates the left boundary of the data page or the top index
@@ -81,6 +98,8 @@ protected:
     KvError UpdateMeta(MemIndexPage *root);
 
     std::pair<uint32_t, KvError> Seek(std::string_view key);
+    std::pair<DataPage, KvError> LoadDataPage(uint32_t page_id);
+    std::pair<OverflowPage, KvError> LoadOverflowPage(uint32_t page_id);
 
     std::pair<uint32_t, uint32_t> AllocatePage(uint32_t page_id);
     void FreePage(uint32_t page_id);
@@ -88,12 +107,15 @@ protected:
     uint32_t ToFilePage(uint32_t page_id);
 
     KvError WritePage(DataPage &&page);
+    KvError WritePage(OverflowPage &&page);
     KvError WritePage(MemIndexPage *page);
+    KvError WritePage(VarPage page, uint32_t file_page_id);
 
     TableIdent tbl_ident_;
 
     IndexPageBuilder idx_page_builder_;
     DataPageBuilder data_page_builder_;
+    std::string overflow_ptrs_;
 
     std::vector<std::unique_ptr<IndexStackEntry>> stack_;
 
@@ -126,6 +148,7 @@ private:
     KvError FinishDataPage(std::string_view page_view,
                            std::string page_key,
                            uint32_t page_id);
+
     /**
      * @brief Pops up the index stack such that the top index entry contains the
      * search key.
@@ -190,6 +213,10 @@ public:
     KvError Truncate(std::string_view trunc_pos);
 
 private:
+    /**
+     * @brief Truncate the data page at page_id from the trunc_pos.
+     * @return true if the page is empty after truncation.
+     */
     std::pair<bool, KvError> TruncateDataPage(uint32_t page_id,
                                               std::string_view trunc_pos);
     std::pair<MemIndexPage *, KvError> TruncateIndexPage(

@@ -188,15 +188,12 @@ KvError IndexPageManager::LoadTablePartition(const TableIdent &tbl_id)
     auto load_func = [this](const TableIdent &tbl_id)
     {
         // load manifest file
-        ManifestFilePtr manifest = IoMgr()->GetManifest(tbl_id);
-        if (manifest == nullptr)
-        {
-            return KvError::NotFound;
-        }
+        auto [manifest, err] = IoMgr()->GetManifest(tbl_id);
+        CHECK_KV_ERR(err);
 
         // replay
         Replayer replayer;
-        KvError err = replayer.Replay(std::move(manifest), Options());
+        err = replayer.Replay(std::move(manifest), Options());
         if (err != KvError::NoError)
         {
             LOG(ERROR) << "load evicted table: replay failed";

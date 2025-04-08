@@ -9,12 +9,15 @@
 #include "table_ident.h"
 
 std::string Key(uint64_t k);
-std::string Value(uint64_t val, uint16_t len = 0);
+std::string Value(uint64_t val, uint32_t len = 0);
+void CheckKvEntry(const kvstore::KvEntry &left, const kvstore::KvEntry &right);
 
 class MapVerifier
 {
 public:
-    MapVerifier(kvstore::TableIdent tid, kvstore::EloqStore *store);
+    MapVerifier(kvstore::TableIdent tid,
+                kvstore::EloqStore *store,
+                bool validate = true);
     ~MapVerifier();
     void Upsert(uint64_t begin, uint64_t end);
     void Delete(uint64_t begin, uint64_t end);
@@ -24,23 +27,25 @@ public:
                   uint8_t del = 20,
                   uint8_t density = 25);
     void Clean();
+    void ExecWrite(kvstore::KvRequest *req);
 
-    void Read(uint64_t k);
+    void Read(uint64_t key);
+    void Read(std::string_view key);
     void Scan(uint64_t begin, uint64_t end);
+    void Scan(std::string_view begin, std::string_view end);
 
     void Validate();
     void SetAutoValidate(bool v);
-    void SetValueLength(uint16_t val_size);
+    void SetValueSize(uint32_t val_size);
     void SetStore(kvstore::EloqStore *store);
+    void SetTimestamp(uint64_t ts);
 
 private:
-    void ExecWrite(kvstore::KvRequest *req);
-
     const kvstore::TableIdent tid_;
     uint64_t ts_{0};
     std::map<std::string, kvstore::KvEntry> answer_;
     bool auto_validate_{true};
-    uint16_t val_len_{12};
+    uint32_t val_size_{12};
 
     kvstore::EloqStore *eloq_store_;
 };

@@ -17,6 +17,7 @@ enum struct PageType : uint8_t
     NonLeafIndex = 0,
     LeafIndex,
     Data,
+    Overflow,
     Deleted = 255
 };
 
@@ -51,7 +52,7 @@ inline static size_t page_align = sysconf(_SC_PAGESIZE);
 
 using Page = std::unique_ptr<char, decltype(&std::free)>;
 
-inline Page alloc_page(uint16_t page_size)
+inline Page AllocPage(uint16_t page_size)
 {
     char *p = (char *) std::aligned_alloc(page_align, page_size);
     assert(p);
@@ -66,7 +67,7 @@ public:
     {
         if (pages_.empty())
         {
-            return alloc_page(page_size_);
+            return AllocPage(page_size_);
         }
         else
         {

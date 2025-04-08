@@ -23,7 +23,10 @@ public:
 
     // REQUIRES: Finish() has not been called since the last call to Reset().
     // REQUIRES: key is larger than any previously added key
-    bool Add(std::string_view key, std::string_view value, uint64_t ts = 0);
+    bool Add(std::string_view key,
+             std::string_view value,
+             uint64_t ts = 0,
+             bool overflow = false);
 
     // Finish building the block and return a view that refers to the page
     // contents. The returned view will remain valid for the lifetime of this
@@ -33,6 +36,10 @@ public:
     // Returns an estimate of the current (uncompressed) size of the block
     // we are building.
     size_t CurrentSizeEstimate() const;
+    static bool IsOverflowKV(std::string_view key,
+                             uint32_t val_size,
+                             uint64_t ts,
+                             const KvOptions *options);
 
     // Return true iff no entries have been added since the last Reset()
     bool IsEmpty() const
@@ -40,9 +47,22 @@ public:
         return cnt_ == 0;
     }
 
+    bool NeedRestart() const
+    {
+        return counter_ >= options_->data_page_restart_interval;
+    }
+
     static size_t HeaderSize();
 
 private:
+    static std::tuple<size_t, size_t, size_t, uint64_t> CalculateDelta(
+        std::string_view key,
+        uint32_t val_size,
+        uint64_t ts,
+        std::string_view last_key,
+        uint64_t last_ts,
+        bool restart);
+
     const KvOptions *const options_;
     std::string buffer_;              // Destination buffer
     std::vector<uint32_t> restarts_;  // Restart points
@@ -52,4 +72,5 @@ private:
     std::string last_key_;
     int64_t last_timestamp_{0};
 };
+
 }  // namespace kvstore

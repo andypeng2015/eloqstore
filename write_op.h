@@ -6,9 +6,7 @@ namespace kvstore
 {
 enum class WriteOp : uint8_t
 {
-    Insert = 0,
-    Update,
-    Delete,
-    Upsert
+    Upsert = 0,
+    Delete
 };
 }

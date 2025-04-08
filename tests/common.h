@@ -7,7 +7,7 @@
 #include "coding.h"
 #include "eloq_store.h"
 
-static constexpr kvstore::TableIdent test_tbl_id = {"t1", 1};
+static constexpr kvstore::TableIdent test_tbl_id = {"t1", 0};
 inline std::unique_ptr<kvstore::EloqStore> memstore = nullptr;
 
 void InitMemStore();

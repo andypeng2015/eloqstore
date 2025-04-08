@@ -202,3 +202,49 @@ TEST_CASE("detect corrupted page", "[checksum]")
         REQUIRE(req.Error() == kvstore::KvError::Corrupted);
     }
 }
+
+TEST_CASE("overflow kv", "[overflow_kv]")
+{
+    InitStore();
+
+    const kvstore::TableIdent tbl_id("overflow", 0);
+    const uint32_t biggest = (128 << 20);
+    MapVerifier verifier(tbl_id, eloqstore.get());
+
+    kvstore::WriteRequest write_req;
+    write_req.SetTableId(tbl_id);
+
+    for (uint32_t sz = 1; sz <= biggest; sz <<= 1)
+    {
+        write_req.AddWrite(Key(sz), Value(sz, sz), 1, kvstore::WriteOp::Upsert);
+    }
+    verifier.ExecWrite(&write_req);
+
+    verifier.Read(Key(1 << 20));
+
+    verifier.Scan(Key(2 << 10), Key(16 << 20));
+
+    for (uint32_t i : {1, 100, 1024, 5000, 131072})
+    {
+        write_req.AddWrite(
+            Key(i), Value(i + 1, i), 2, kvstore::WriteOp::Upsert);
+    }
+    verifier.ExecWrite(&write_req);
+
+    verifier.Read(Key(5000));
+}
+
+TEST_CASE("random overflow kv", "[overflow_kv]")
+{
+    InitStore();
+    MapVerifier verifier(test_tbl_id, eloqstore.get());
+    verifier.SetValueSize(5000);
+    verifier.WriteRnd(1, 100);
+    verifier.SetValueSize(10000);
+    verifier.WriteRnd(1, 100);
+    verifier.SetValueSize(1 << 20);
+    verifier.WriteRnd(1, 100, 20, 10);
+    verifier.WriteRnd(1, 100, 20, 10);
+    verifier.SetValueSize(5000);
+    verifier.WriteRnd(1, 100);
+}

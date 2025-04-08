@@ -7,6 +7,9 @@
 
 namespace kvstore
 {
+constexpr uint8_t max_overflow_pointers = 128;
+constexpr uint16_t max_key_size = 2048;
+
 struct KvOptions
 {
     /**
@@ -38,10 +41,13 @@ struct KvOptions
      */
     uint32_t fd_limit = 1024;
     /**
-     * @brief Size of io-uring submission queue.
-     * Limit max amount of inflight IO per thread.
+     * @brief Size of io-uring submission queue per thread.
      */
     uint32_t io_queue_size = 4096;
+    /**
+     * @brief Max amount of inflight write IO per thread.
+     */
+    uint32_t max_inflight_write = 4096;
     /**
      * @brief Size of io-uring selected buffer ring.
      * It must be a power-of 2, and can be up to 32768.
@@ -67,6 +73,11 @@ struct KvOptions
      * @brief Amount of pages per data file (1 << num_file_pages_shift).
      */
     uint8_t num_file_pages_shift = 11;  // 2048
+    /**
+     * @brief Amount of pointers stored in overflow page.
+     * The maximum value is 128.
+     */
+    uint8_t overflow_pointers = 16;
 };
 
 }  // namespace kvstore

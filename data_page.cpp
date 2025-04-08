@@ -25,7 +25,7 @@ DataPage::DataPage(uint32_t page_id, uint32_t page_size) : page_id_(page_id)
     }
     else
     {
-        page_ = alloc_page(page_size);
+        page_ = AllocPage(page_size);
     }
 }
 
@@ -184,6 +184,11 @@ std::string_view DataPageIter::Value() const
     return value_;
 }
 
+bool DataPageIter::IsOverflow() const
+{
+    return overflow_;
+}
+
 uint64_t DataPageIter::Timestamp() const
 {
     return timestamp_;
@@ -219,7 +224,8 @@ void DataPageIter::Seek(std::string_view search_key)
                                           page_.data() + restart_offset_,
                                           &shared,
                                           &non_shared,
-                                          &val_len);
+                                          &val_len,
+                                          &overflow_);
         if (key_ptr == nullptr || shared != 0)
         {
             Invalidate();
@@ -298,10 +304,7 @@ bool DataPageIter::ParseNextKey()
 
     if (pt >= limit)
     {
-        curr_offset_ = restart_offset_;
-        curr_restart_idx_ = restart_num_;
-        key_.clear();
-        timestamp_ = 0;
+        Invalidate();
         return false;
     }
     else if (curr_offset_ < DataPage::content_offset)
@@ -312,7 +315,7 @@ bool DataPageIter::ParseNextKey()
 
     bool is_restart_pointer = curr_offset_ == RestartOffset(curr_restart_idx_);
     uint32_t shared = 0, non_shared = 0, value_len = 0;
-    pt = DecodeEntry(pt, limit, &shared, &non_shared, &value_len);
+    pt = DecodeEntry(pt, limit, &shared, &non_shared, &value_len, &overflow_);
 
     if (pt == nullptr || key_.size() < shared)
     {
@@ -365,7 +368,8 @@ const char *DataPageIter::DecodeEntry(const char *p,
                                       const char *limit,
                                       uint32_t *shared,
                                       uint32_t *non_shared,
-                                      uint32_t *value_length)
+                                      uint32_t *value_length,
+                                      bool *overflow)
 {
     if (limit - p < 3)
         return nullptr;
@@ -387,11 +391,141 @@ const char *DataPageIter::DecodeEntry(const char *p,
             return nullptr;
     }
 
+    *overflow = *value_length & (1 << uint8_t(ValLenBit::Overflow));
+    *value_length >>= uint8_t(ValLenBit::BitsCount);
+
     if (static_cast<uint32_t>(limit - p) < (*non_shared + *value_length))
     {
         return nullptr;
     }
     return p;
+}
+
+OverflowPage::OverflowPage(uint32_t page_id, Page page)
+    : page_id_(page_id), page_(std::move(page))
+{
+    assert(TypeOfPage(page_.get()) == PageType::Overflow);
+}
+
+OverflowPage::OverflowPage(uint32_t page_id,
+                           const KvOptions *opts,
+                           std::string_view val,
+                           std::span<uint32_t> pointers)
+    : page_id_(page_id)
+{
+    if (opts->data_page_size == 0)
+    {
+        return;
+    }
+
+    if (page_pool != nullptr)
+    {
+        page_ = page_pool->Allocate();
+    }
+    else
+    {
+        page_ = AllocPage(opts->data_page_size);
+    }
+
+    SetPageType(page_.get(), PageType::Overflow);
+
+    EncodeFixed16(page_.get() + OverflowPage::page_size_offset, val.size());
+    memcpy(page_.get() + OverflowPage::value_offset, val.data(), val.size());
+
+    char *dst = (page_.get() + opts->data_page_size - 1);
+    *dst = pointers.size();
+    if (!pointers.empty())
+    {
+        dst -= (pointers.size() * sizeof(uint32_t));
+        for (uint32_t p : pointers)
+        {
+            EncodeFixed32(dst, p);
+            dst += sizeof(uint32_t);
+        }
+    }
+
+    SetPageChecksum(page_.get(), opts->data_page_size);
+    assert(NumPointers(opts) == pointers.size());
+}
+
+OverflowPage::OverflowPage(OverflowPage &&rhs)
+    : page_id_(rhs.page_id_), page_(std::move(rhs.page_))
+{
+}
+
+OverflowPage::~OverflowPage()
+{
+    Clear();
+}
+
+void OverflowPage::Clear()
+{
+    if (page_ != nullptr)
+    {
+        if (page_pool != nullptr)
+        {
+            page_pool->Free(std::move(page_));
+        }
+        else
+        {
+            page_ = nullptr;
+        }
+    }
+}
+
+uint16_t OverflowPage::ValueSize() const
+{
+    return DecodeFixed16(page_.get() + page_size_offset);
+}
+
+std::string_view OverflowPage::GetValue() const
+{
+    return {page_.get() + value_offset, ValueSize()};
+}
+
+void OverflowPage::SetPageId(uint32_t page_id)
+{
+    page_id_ = page_id;
+}
+
+uint32_t OverflowPage::PageId() const
+{
+    return page_id_;
+}
+
+char *OverflowPage::PagePtr() const
+{
+    return page_.get();
+}
+
+uint16_t OverflowPage::Capacity(const KvOptions *options, bool end)
+{
+    // The last byte is reserved for the number of pointers.
+    uint16_t cap = options->data_page_size - header_size - 1;
+    if (end)
+    {
+        // The end page of a overflow group has pointers to the next group.
+        cap -= (options->overflow_pointers * sizeof(uint32_t));
+    }
+    return cap;
+}
+
+uint8_t OverflowPage::NumPointers(const KvOptions *options) const
+{
+    return *(page_.get() + options->data_page_size - 1);
+}
+
+std::string_view OverflowPage::GetEncodedPointers(
+    const KvOptions *options) const
+{
+    uint8_t n = NumPointers(options);
+    if (n == 0)
+    {
+        return {};
+    }
+    char *ptr =
+        page_.get() + options->data_page_size - 1 - (n * sizeof(uint32_t));
+    return {ptr, n * sizeof(uint32_t)};
 }
 
 }  // namespace kvstore

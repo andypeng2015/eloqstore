@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string_view>
 
 #include "coding.h"
@@ -35,8 +36,63 @@ void DataPageBuilder::Reset()
 size_t DataPageBuilder::CurrentSizeEstimate() const
 {
     return (buffer_.size() +                       // Raw data buffer
-            restarts_.size() * sizeof(uint32_t) +  // Restart array
-            sizeof(uint32_t));                     // Restart array length
+            restarts_.size() * sizeof(uint16_t) +  // Restart array
+            sizeof(uint16_t));                     // Restart array length
+}
+
+bool DataPageBuilder::IsOverflowKV(std::string_view key,
+                                   uint32_t val_size,
+                                   uint64_t ts,
+                                   const KvOptions *options)
+{
+    val_size <<= uint8_t(ValLenBit::BitsCount);
+    auto ret = CalculateDelta(key, val_size, ts, {}, 0, false);
+    return HeaderSize() + std::get<0>(ret) > options->data_page_size;
+}
+
+std::tuple<size_t, size_t, size_t, uint64_t> DataPageBuilder::CalculateDelta(
+    std::string_view key,
+    uint32_t val_size,
+    uint64_t ts,
+    std::string_view last_key,
+    uint64_t last_ts,
+    bool restart)
+{
+    // The number of bytes incurred by adding the key-value pair.
+    size_t addition_delta = 0;
+    size_t shared = 0;
+    if (restart)
+    {
+        // Restarting compression adds one more restart point
+        addition_delta += sizeof(uint16_t);
+        last_ts = 0;
+    }
+    else
+    {
+        // See how much sharing to do with previous string
+        const size_t min_length = std::min(last_key.size(), key.size());
+        while ((shared < min_length) && (last_key[shared] == key[shared]))
+        {
+            shared++;
+        }
+    }
+    size_t non_shared = key.size() - shared;
+
+    // The data entry starts with the triple <shared><non_shared><value_size>
+    addition_delta += Varint32Size(shared);
+    addition_delta += Varint32Size(non_shared);
+    addition_delta += Varint32Size(val_size);
+    // Key
+    addition_delta += non_shared;
+    // Value
+    addition_delta += val_size >> uint8_t(ValLenBit::BitsCount);
+
+    // Timestamp delta
+    assert(ts <= INT64_MAX);
+    int64_t ts_delta = (int64_t) ts - last_ts;
+    uint64_t p_ts_delta = EncodeInt64Delta(ts_delta);
+    addition_delta += Varint64Size(p_ts_delta);
+    return {addition_delta, shared, non_shared, p_ts_delta};
 }
 
 size_t DataPageBuilder::HeaderSize()
@@ -69,81 +125,53 @@ std::string_view DataPageBuilder::Finish()
 
 bool DataPageBuilder::Add(std::string_view key,
                           std::string_view value,
-                          uint64_t ts)
+                          uint64_t ts,
+                          bool overflow)
 {
 #ifndef NDEBUG
     size_t buf_prev_size = buffer_.size();
     bool is_restart = false;
 #endif
 
-    std::string_view last_key_view{last_key_.data(), last_key_.size()};
     assert(!finished_);
     assert(counter_ <= options_->data_page_restart_interval);
     assert(buffer_.empty() ||
-           options_->comparator_->Compare(key, last_key_view) > 0);
-    // The number of bytes incurred by adding the key-value pair.
-    size_t addition_delta = 0;
-    size_t shared = 0;
-    if (counter_ < options_->data_page_restart_interval)
+           options_->comparator_->Compare(key, last_key_) > 0);
+
+    uint32_t val_size = value.size() << uint8_t(ValLenBit::BitsCount);
+    val_size |= (overflow << uint8_t(ValLenBit::Overflow));
+    auto [size_delta, shared, non_shared, ts_delta] = CalculateDelta(
+        key, val_size, ts, last_key_, last_timestamp_, NeedRestart());
+
+    // Does not add the data item if it would overflow the page.
+    if (CurrentSizeEstimate() + size_delta > options_->data_page_size)
     {
-        // See how much sharing to do with previous string
-        const size_t min_length = std::min(last_key_view.size(), key.size());
-        while ((shared < min_length) && (last_key_view[shared] == key[shared]))
-        {
-            shared++;
-        }
+        return false;
     }
-    else
+
+    if (NeedRestart())
     {
-        // Restarting compression adds one more restart point
-        addition_delta += sizeof(uint16_t);
+        restarts_.emplace_back(buffer_.size());
+        counter_ = 0;
         last_timestamp_ = 0;
 #ifndef NDEBUG
         is_restart = true;
 #endif
     }
-    size_t non_shared = key.size() - shared;
-
-    // The data entry starts with the triple <shared><non_shared><value_size>
-    addition_delta += Varint32Size(shared);
-    addition_delta += Varint32Size(non_shared);
-    addition_delta += Varint32Size(value.size());
-    // Key
-    addition_delta += non_shared;
-    // Value
-    addition_delta += value.size();
-
-    // Timestamp delta
-    assert(ts <= INT64_MAX);
-    int64_t ts_delta = (int64_t) ts - last_timestamp_;
-    uint64_t p_ts_delta = EncodeInt64Delta(ts_delta);
-    addition_delta += Varint64Size(p_ts_delta);
-
-    // Does not add the data item if it would overflow the page.
-    if (CurrentSizeEstimate() + addition_delta > options_->data_page_size)
-    {
-        return false;
-    }
-
-    if (counter_ >= options_->data_page_restart_interval)
-    {
-        restarts_.emplace_back(buffer_.size());
-        counter_ = 0;
-    }
 
     // Adds the triple <shared><non_shared><value_size>
     PutVarint32(&buffer_, shared);
     PutVarint32(&buffer_, non_shared);
-    PutVarint32(&buffer_, value.size());
+    PutVarint32(&buffer_, val_size);
 
     // Adds string delta to buffer_ followed by value
     buffer_.append(key.data() + shared, non_shared);
     buffer_.append(value.data(), value.size());
-    PutVarint64(&buffer_, p_ts_delta);
+    PutVarint64(&buffer_, ts_delta);
 
 #ifndef NDEBUG
     uint16_t minus = is_restart ? sizeof(uint16_t) : 0;
-    assert(buffer_.size() - buf_prev_size == addition_delta - minus);
+    assert(buffer_.size() - buf_prev_size == size_delta - minus);
 #endif
 
     // Update state
@@ -156,4 +184,5 @@ bool DataPageBuilder::Add(std::string_view key,
 
     return true;
 }
+
 }  // namespace kvstore

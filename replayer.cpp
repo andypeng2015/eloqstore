@@ -26,6 +26,7 @@ KvError Replayer::Replay(ManifestFilePtr log, const KvOptions *opts)
 {
     root_ = UINT32_MAX;
     mapper_ = std::make_unique<PageMapper>();
+    mapper_->Mapping().reserve(opts->init_page_count);
     file_size_ = 0;
 
     KvError err = NextRecord(log.get());

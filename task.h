@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdint>
 
+#include "circular_queue.h"
 #include "comparator.h"
 #include "data_page.h"
 #include "error.h"
@@ -18,6 +19,7 @@ class AsyncIoManager;
 class KvOptions;
 class TaskManager;
 class PagePool;
+class MappingSnapshot;
 
 inline thread_local IndexPageManager *index_mgr;
 inline thread_local TaskManager *task_mgr;
@@ -60,22 +62,61 @@ public:
     void Resume();
 
     int WaitSyncIo();
-    int WaitAsynIo();
+    void WaitAsynIo();
     void FinishIo(bool is_sync_io);
 
+    std::pair<Page, KvError> LoadPage(const TableIdent &tbl_id,
+                                      uint32_t file_page_id);
     std::pair<DataPage, KvError> LoadDataPage(const TableIdent &tbl_id,
                                               uint32_t page_id,
                                               uint32_t file_page_id);
+    std::pair<OverflowPage, KvError> LoadOverflowPage(const TableIdent &tbl_id,
+                                                      uint32_t page_id,
+                                                      uint32_t file_page_id);
+
+    /**
+     * @brief Get overflow value.
+     * @param tbl_id The table partition identifier.
+     * @param mapping The mapping snapshot of this table partition.
+     * @param encoded_ptrs The encoded overflow pointers.
+     */
+    std::pair<std::string, KvError> GetOverflowValue(
+        const TableIdent &tbl_id,
+        const MappingSnapshot *mapping,
+        std::string_view encoded_ptrs);
+    /**
+     * @brief Decode overflow pointers.
+     * @param encoded The encoded overflow pointers.
+     * @param pointers The buffer to store the decoded overflow pointers.
+     * @return The number of decoded overflow pointers.
+     */
+    static uint8_t DecodeOverflowPointers(
+        std::string_view encoded,
+        std::span<uint32_t, max_overflow_pointers> pointers);
 
     TaskStatus status_{TaskStatus::Idle};
 
     uint32_t inflight_io_{0};
     int io_res_{0};
     uint32_t io_flags_{0};
-    int asyn_io_err_{0};
 
     KvRequest *req_{nullptr};
+    // TODO: main_ should be a member of class Worker, and a thread local
+    // variable of type Worker* is needed on every thread.
     boost::context::continuation main_;
     boost::context::continuation coro_;
+};
+
+class WaitingZone
+{
+public:
+    WaitingZone(size_t capacity = 8) : tasks_(capacity) {};
+    void Sleep(KvTask *task);
+    void WakeOne();
+    void WakeN(size_t n);
+    void WakeAll();
+
+private:
+    CircularQueue<KvTask *> tasks_;
 };
 }  // namespace kvstore

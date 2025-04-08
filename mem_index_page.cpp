@@ -16,7 +16,7 @@ namespace kvstore
 {
 MemIndexPage::MemIndexPage(uint16_t page_size)
 {
-    page_ = alloc_page(page_size);
+    page_ = AllocPage(page_size);
 }
 
 uint16_t MemIndexPage::ContentLength() const

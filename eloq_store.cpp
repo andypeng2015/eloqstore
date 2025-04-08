@@ -73,9 +73,20 @@ private:
 
 EloqStore::EloqStore(const KvOptions &opts) : options_(opts), stopped_(true)
 {
+    CHECK((options_.data_page_size & (page_align - 1)) == 0);
+
     // Align stack size
     options_.coroutine_stack_size =
         ((options_.coroutine_stack_size + page_align - 1) & ~(page_align - 1));
+
+    if (options_.overflow_pointers < 1)
+    {
+        options_.overflow_pointers = 1;
+    }
+    else if (options_.overflow_pointers > max_overflow_pointers)
+    {
+        options_.overflow_pointers = max_overflow_pointers;
+    }
 }
 
 EloqStore::~EloqStore()
@@ -93,11 +104,6 @@ EloqStore::~EloqStore()
 
 KvError EloqStore::Start()
 {
-    if (options_.data_page_size & (page_align - 1))
-    {
-        return KvError::InvalidArgs;
-    }
-
     LOG(INFO) << "EloqStore is starting...";
     if (!options_.db_path.empty())
     {
@@ -180,6 +186,13 @@ void EloqStore::CloseDBDir()
     }
 }
 
+bool EloqStore::ExecAsyn(KvRequest *req)
+{
+    req->user_data_ = 0;
+    req->callback_ = nullptr;
+    return SendRequest(req);
+}
+
 void EloqStore::ExecSync(KvRequest *req)
 {
     req->user_data_ = 0;
@@ -229,6 +242,11 @@ bool EloqStore::IsStopped() const
     return stopped_.load(std::memory_order_relaxed);
 }
 
+void KvRequest::SetTableId(TableIdent tbl_id)
+{
+    tbl_id_ = std::move(tbl_id);
+}
+
 KvError KvRequest::Error() const
 {
     return err_;
@@ -244,7 +262,7 @@ uint64_t KvRequest::UserData() const
     return user_data_;
 }
 
-void KvRequest::Wait()
+void KvRequest::Wait() const
 {
     CHECK(callback_ == nullptr);
     done_.wait(false, std::memory_order_acquire);
@@ -269,6 +287,14 @@ void WriteRequest::SetArgs(TableIdent tid, std::vector<WriteDataEntry> &&batch)
 {
     tbl_id_ = std::move(tid);
     batch_ = std::move(batch);
+}
+
+void WriteRequest::AddWrite(std::string key,
+                            std::string value,
+                            uint64_t ts,
+                            WriteOp op)
+{
+    batch_.push_back({std::move(key), std::move(value), ts, op});
 }
 
 void TruncateRequest::SetArgs(TableIdent tid, std::string_view position)

@@ -23,6 +23,7 @@ class KvRequest
 {
 public:
     virtual RequestType Type() const = 0;
+    void SetTableId(TableIdent tbl_id);
     KvError Error() const;
     const char *ErrMessage() const;
     const TableIdent &TableId() const;
@@ -32,9 +33,9 @@ public:
      * @brief Test if this request is done.
      */
     bool IsDone() const;
+    void Wait() const;
 
 protected:
-    void Wait();
     void SetDone(KvError err);
 
     TableIdent tbl_id_;
@@ -87,6 +88,7 @@ public:
         return RequestType::Write;
     }
     void SetArgs(TableIdent tid, std::vector<WriteDataEntry> &&batch);
+    void AddWrite(std::string key, std::string value, uint64_t ts, WriteOp op);
 
     // input
     std::vector<WriteDataEntry> batch_;
@@ -122,7 +124,7 @@ public:
         req->callback_ = std::move(callback);
         return SendRequest(req);
     }
-
+    bool ExecAsyn(KvRequest *req);
     void ExecSync(KvRequest *req);
 
 private:

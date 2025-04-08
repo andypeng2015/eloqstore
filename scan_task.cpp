@@ -45,10 +45,23 @@ KvError ScanTask::Scan(const TableIdent &tbl_id,
     {
         return err == KvError::EndOfFile ? KvError::NoError : err;
     }
-    while (end_key.empty() || iter_.Key() < end_key)
+    while (end_key.empty() || Comp()->Compare(iter_.Key(), end_key) < 0)
     {
-        entries.emplace_back(iter_.Key(), iter_.Value(), iter_.Timestamp());
-        if ((err = Next(mapping.get())) != KvError::NoError)
+        std::string value;
+        if (iter_.IsOverflow())
+        {
+            auto ret = GetOverflowValue(tbl_id, mapping.get(), iter_.Value());
+            CHECK_KV_ERR(ret.second);
+            value = std::move(ret.first);
+        }
+        else
+        {
+            value = iter_.Value();
+        }
+        entries.emplace_back(iter_.Key(), std::move(value), iter_.Timestamp());
+
+        err = Next(mapping.get());
+        if (err != KvError::NoError)
         {
             break;
         }
@@ -73,9 +86,10 @@ KvError ScanTask::Next(MappingSnapshot *m)
         data_page_ = std::move(page);
 
         iter_.Reset(&data_page_, Options()->data_page_size);
+        assert(iter_.HasNext());
     }
-    bool ok = iter_.Next();
-    assert(ok && !iter_.Key().empty());
+    iter_.Next();
+    assert(!iter_.Key().empty());
     return KvError::NoError;
 }
 
