@@ -380,7 +380,7 @@ void Worker::Loop()
             OnReceiveReq(reqs[i]);
         }
 
-        if (nreqs == 0 && task_mgr_.NumActive() == 0)
+        if (nreqs == 0 && task_mgr_.IsIdle())
         {
             if (store_->IsStopped())
             {

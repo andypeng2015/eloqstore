@@ -49,6 +49,10 @@ struct KvOptions
      */
     uint32_t max_inflight_write = 4096;
     /**
+     * @brief Max amount of inflight write IO per task.
+     */
+    uint16_t max_write_task_io = 64;
+    /**
      * @brief Size of io-uring selected buffer ring.
      * It must be a power-of 2, and can be up to 32768.
      */

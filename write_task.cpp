@@ -186,7 +186,7 @@ KvError WriteTask::WritePage(MemIndexPage *page)
 
 KvError WriteTask::WritePage(VarPage page, uint32_t file_page_id)
 {
-    if (inflight_io_ >= 32)
+    if (inflight_io_ >= Options()->max_write_task_io)
     {
         // Avoid long running WriteTask block ReadTask/ScanTask
         KvError err = WaitWrite();

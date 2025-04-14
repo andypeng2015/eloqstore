@@ -20,6 +20,7 @@ public:
     ScanTask *GetScanTask();
     void FreeTask(KvTask *task);
     uint32_t NumActive() const;
+    bool IsIdle() const;
     void ResumeScheduled();
 
     CircularQueue<KvTask *> scheduled_;

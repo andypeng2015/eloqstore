@@ -99,6 +99,14 @@ uint32_t TaskManager::NumActive() const
            (truncate_tasks_.size() - free_truncate_.size());
 }
 
+bool TaskManager::IsIdle() const
+{
+    return read_tasks_.size() == free_read_.size() &&
+           scan_tasks_.size() == free_scan_.size() &&
+           batch_write_tasks_.size() == free_batch_write_.size() &&
+           truncate_tasks_.size() == free_truncate_.size();
+}
+
 void TaskManager::ResumeScheduled()
 {
     while (scheduled_.Size() > 0)
