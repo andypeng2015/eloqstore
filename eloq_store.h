@@ -139,6 +139,7 @@ public:
     ~EloqStore();
     KvError Start();
     void Stop();
+    bool IsStopped() const;
 
     template <typename F>
     bool ExecAsyn(KvRequest *req, uint64_t data, F callback)
@@ -152,13 +153,12 @@ public:
 
 private:
     bool SendRequest(KvRequest *req);
-    bool IsStopped() const;
     KvError InitDBDir();
     void CloseDBDir();
 
     int dir_fd_{-1};
     std::vector<std::unique_ptr<Worker>> workers_;
-    std::atomic<bool> stopped_;
+    std::atomic<bool> stopped_{true};
     KvOptions options_;
     friend Worker;
 };

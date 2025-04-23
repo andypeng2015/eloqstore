@@ -37,7 +37,7 @@ public:
     // we are building.
     size_t CurrentSizeEstimate() const;
     static bool IsOverflowKV(std::string_view key,
-                             uint32_t val_size,
+                             size_t val_size,
                              uint64_t ts,
                              const KvOptions *options);
 
@@ -57,7 +57,7 @@ public:
 private:
     static std::tuple<size_t, size_t, size_t, uint64_t> CalculateDelta(
         std::string_view key,
-        uint32_t val_size,
+        size_t val_size,
         uint64_t ts,
         std::string_view last_key,
         uint64_t last_ts,
