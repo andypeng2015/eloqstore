@@ -26,7 +26,7 @@ static constexpr char FileNameTmpfile[] = "tmpfile";
 
 struct TableIdent
 {
-    static constexpr char Separator = '-';
+    static constexpr char separator = '#';
     friend bool operator==(const TableIdent &lhs, const TableIdent &rhs)
     {
         return lhs.tbl_name_ == rhs.tbl_name_ &&
@@ -46,12 +46,12 @@ struct TableIdent
 
 inline std::string TableIdent::ToString() const
 {
-    return tbl_name_ + Separator + std::to_string(partition_id_);
+    return tbl_name_ + separator + std::to_string(partition_id_);
 }
 
 inline TableIdent TableIdent::FromString(const std::string &str)
 {
-    size_t p = str.find(Separator);
+    size_t p = str.find_last_of(separator);
     if (p == std::string::npos)
     {
         return {};
@@ -86,7 +86,7 @@ inline bool TableIdent::IsValid() const
 
 inline std::ostream &operator<<(std::ostream &out, const TableIdent &tid)
 {
-    out << tid.tbl_name_ << TableIdent::Separator << tid.partition_id_;
+    out << tid.tbl_name_ << TableIdent::separator << tid.partition_id_;
     return out;
 }
 

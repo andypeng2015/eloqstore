@@ -538,6 +538,7 @@ std::pair<IouringMgr::LruFD::Ref, KvError> IouringMgr::GetOrCreateFD(
             }
             else
             {
+                assert(file_id <= LruFD::kMaxDataFile);
                 std::string filename = DataFileName(file_id);
                 fs::path path = tbl_id.ToString();
                 path.append(filename);
@@ -600,6 +601,13 @@ std::pair<IouringMgr::LruFD::Ref, KvError> IouringMgr::GetOrCreateFD(
             {
                 lru_fd.Get()->reg_idx_ = RegisterFile(fd);
             }
+            if (file_id <= LruFD::kMaxDataFile)
+            {
+                uint64_t file_size = options_->data_page_size
+                                     << options_->pages_per_file_shift;
+                Fallocate(lru_fd.FdPair(), file_size);
+            }
+
             lru_fd.Get()->fd_ = fd;
             // notify all waiting tasks success
             for (KvTask *task : lru_fd.Get()->loading_)
@@ -979,19 +987,21 @@ int IouringMgr::UnregisterFile(int idx)
     return res;
 }
 
-// uint64_t IouringMgr::GetFileSize(int dfd, const char *path)
-// {
-//     io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, thd_task);
-//     struct statx stx;
-//     io_uring_prep_statx(sqe, dfd, path, 0, STATX_SIZE, &stx);
-//     int res = thd_task->WaitIo();
-//     if (res < 0)
-//     {
-//         LOG(ERROR) << "statx " << dfd << '/' << path << " failed " << res;
-//         return UINT64_MAX;
-//     }
-//     return stx.stx_size;
-// }
+int IouringMgr::Fallocate(FdIdx fd, uint64_t size)
+{
+    io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, thd_task);
+    if (fd.second)
+    {
+        sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    io_uring_prep_fallocate(sqe, fd.first, 0, 0, size);
+    int res = thd_task->WaitSyncIo();
+    if (res < 0)
+    {
+        LOG(ERROR) << "fallocate failed " << res;
+    }
+    return res;
+}
 
 KvError IouringMgr::AppendManifest(const TableIdent &tbl_id,
                                    std::string_view log,

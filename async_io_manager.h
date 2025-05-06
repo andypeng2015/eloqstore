@@ -173,6 +173,7 @@ private:
         static constexpr FileId kDirectiry = MaxFileId;
         static constexpr FileId kManifest = MaxFileId - 1;
         static constexpr FileId kTmpFile = MaxFileId - 2;
+        static constexpr FileId kMaxDataFile = MaxFileId - 3;
 
         static constexpr int FdEmpty = -1;
         static constexpr int FdLocked = -2;
@@ -277,6 +278,7 @@ private:
     KvError CloseFile(LruFD::Ref fd_ref);
     int RegisterFile(int fd);
     int UnregisterFile(int idx);
+    int Fallocate(FdIdx fd, uint64_t size);
     KvError AtomicWriteFile(const TableIdent &tbl_id,
                             const char *name,
                             std::string_view content,
