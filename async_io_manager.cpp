@@ -340,8 +340,8 @@ KvError IouringMgr::SyncData(const TableIdent &tbl_id)
         {
             continue;
         }
-        // reqs vector has reserved enough space, so it will never reallocate.
-        // FsyncReq element has pointer stability.
+        // FsyncReq elements have pointer stability, because we have reserved
+        // enough space for this vector and it will never reallocate.
         const FsyncReq &req = reqs.emplace_back(thd_task, std::move(fd_ref));
         auto [fd, registered] = req.fd_ref_.FdPair();
         io_uring_sqe *sqe = GetSQE(UserDataType::FsyncReq, &req);
@@ -931,10 +931,7 @@ int IouringMgr::CloseFile(int fd)
 
 KvError IouringMgr::CloseFile(LruFD::Ref fd_ref)
 {
-    // This LruFD will be removed by ~LruFD::Ref if succeed to close, otherwise
-    // be enqueued back to LRU.
     LruFD *lru_fd = fd_ref.Get();
-    assert(lru_fd->ref_count_ == 1);
     FdIdx fd_idx = lru_fd->FdPair();
     int fd = lru_fd->fd_;
 
@@ -976,6 +973,8 @@ bool IouringMgr::EvictFD()
             return false;
         }
         assert(lru_fd->ref_count_ == 0);
+        // This LruFD will be removed by ~LruFD::Ref if succeed to close,
+        // otherwise be enqueued back to LRU.
         CloseFile(LruFD::Ref(lru_fd, this));
     }
     return true;
@@ -1145,24 +1144,12 @@ KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
 {
     LOG(INFO) << "switch manifest file for " << tbl_id;
     // Unregister and close the old manifest if it is opened
-    LruFD::Ref fd_ref = GetFDSlot(tbl_id, LruFD::kManifest);
-    if (fd_ref == nullptr)
+    LruFD::Ref fd_ref = GetOpenedFD(tbl_id, LruFD::kManifest);
+    if (fd_ref != nullptr)
     {
-        return KvError::OpenFileLimit;
+        KvError err = CloseFile(fd_ref);
+        CHECK_KV_ERR(err);
     }
-    TEST_KILL_POINT("SwitchManifest:0")
-    auto [old_fd, registered] = fd_ref.FdPair();
-    if (old_fd >= 0)
-    {
-        if (registered)
-        {
-            UnregisterFile(old_fd);
-        }
-        CloseFile(fd_ref.Get()->fd_);
-        fd_ref.Get()->fd_ = LruFD::FdEmpty;
-    }
-
-    TEST_KILL_POINT("SwitchManifest:1")
     return AtomicWriteFile(
         tbl_id, FileNameManifest, snapshot, std::move(fd_ref));
 }
