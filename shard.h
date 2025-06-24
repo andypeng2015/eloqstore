@@ -63,16 +63,14 @@ private:
                                                  {
                                                      task->Abort();
                                                  }
-                                                 if (task->req_ != nullptr)
-                                                 {
-                                                     task->req_->SetDone(err);
-                                                     task->req_ = nullptr;
-                                                 }
+                                                 task->req_->SetDone(err);
+                                                 task->req_ = nullptr;
                                                  task->status_ =
                                                      TaskStatus::Idle;
                                                  shard->finished_.Enqueue(task);
                                                  return std::move(shard->main_);
                                              });
+        running_ = nullptr;
     }
 
     moodycamel::ConcurrentQueue<KvRequest *> requests_;

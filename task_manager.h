@@ -50,6 +50,7 @@ private:
                 T *task = free_head_;
                 free_head_ = static_cast<T *>(task->next_);
                 task->next_ = nullptr;
+                assert(task->status_ == TaskStatus::Idle);
                 return task;
             }
             auto &task = ext_pool_.emplace_back(std::make_unique<T>());
@@ -58,6 +59,8 @@ private:
 
         void FreeTask(T *task)
         {
+            assert(task->status_ == TaskStatus::Idle);
+            assert(task->inflight_io_ == 0);
             task->next_ = free_head_;
             free_head_ = task;
         }

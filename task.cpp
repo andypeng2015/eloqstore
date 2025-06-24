@@ -14,8 +14,12 @@ void KvTask::Yield()
 
 void KvTask::Resume()
 {
+    // Resume the task only if it is blocked.
     if (status_ != TaskStatus::Ongoing)
     {
+        assert(status_ == TaskStatus::Blocked ||
+               status_ == TaskStatus::BlockedIO ||
+               Type() == TaskType::EvictFile);
         status_ = TaskStatus::Ongoing;
         shard->scheduled_.Enqueue(this);
     }
@@ -174,6 +178,7 @@ void WaitingZone::WakeOne()
 {
     if (KvTask *task = PopFront(); task != nullptr)
     {
+        assert(task->status_ == TaskStatus::Blocked);
         task->Resume();
     }
 }
@@ -187,6 +192,7 @@ void WaitingZone::WakeN(size_t n)
         {
             break;  // No more tasks to wake.
         }
+        assert(task->status_ == TaskStatus::Blocked);
         task->Resume();
     }
 }
@@ -195,11 +201,11 @@ void WaitingZone::WakeAll()
 {
     for (KvTask *task = head_; task != nullptr; task = task->next_)
     {
+        assert(task->status_ == TaskStatus::Blocked);
         task->Resume();
     }
     head_ = tail_ = nullptr;  // Clear the waiting zone.
-    // Note: This will not clear the next_ pointers of the tasks, but they
-    // are not used after being resumed.
+    // Note: WakeAll did not clear the next_ pointers of the tasks.
 }
 
 bool WaitingZone::Empty() const
@@ -209,6 +215,7 @@ bool WaitingZone::Empty() const
 
 void WaitingZone::PushBack(KvTask *task)
 {
+    task->next_ = nullptr;
     if (tail_ == nullptr)
     {
         assert(head_ == nullptr);
@@ -217,7 +224,6 @@ void WaitingZone::PushBack(KvTask *task)
     else
     {
         assert(head_ != nullptr);
-        task->next_ = nullptr;
         tail_->next_ = task;
         tail_ = task;
     }

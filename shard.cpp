@@ -264,9 +264,11 @@ void Shard::ResumeScheduled()
 {
     while (scheduled_.Size() > 0)
     {
-        running_ = scheduled_.Peek();
+        KvTask *task = scheduled_.Peek();
         scheduled_.Dequeue();
-        running_->coro_ = running_->coro_.resume();
+        assert(task->status_ == TaskStatus::Ongoing);
+        running_ = task;
+        task->coro_ = task->coro_.resume();
     }
     running_ = nullptr;
 }
