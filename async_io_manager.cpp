@@ -200,7 +200,8 @@ std::pair<Page, KvError> IouringMgr::ReadPage(const TableIdent &tbl_id,
         return {std::move(page), err};
     }
 
-    if (!ValidatePageChecksum(page.Ptr(), options_->data_page_size))
+    if (!options_->skip_verify_checksum &&
+        !ValidateChecksum({page.Ptr(), options_->data_page_size}))
     {
         LOG(ERROR) << "corrupted " << tbl_id << " page " << fp_id;
         return {std::move(page), KvError::Corrupted};
@@ -309,14 +310,17 @@ KvError IouringMgr::ReadPages(const TableIdent &tbl_id,
     }
 
     // Validate result pages.
-    for (ReadReq &req : reqs)
+    if (!options_->skip_verify_checksum)
     {
-        if (!ValidatePageChecksum(req.page_.Ptr(), options_->data_page_size))
+        for (const ReadReq &req : reqs)
         {
-            FileId file_id = req.fd_ref_.Get()->file_id_;
-            LOG(ERROR) << "corrupted " << tbl_id << " file " << file_id
-                       << " at " << req.offset_;
-            return KvError::Corrupted;
+            if (!ValidateChecksum({req.page_.Ptr(), options_->data_page_size}))
+            {
+                FileId file_id = req.fd_ref_.Get()->file_id_;
+                LOG(ERROR) << "corrupted " << tbl_id << " file " << file_id
+                           << " at " << req.offset_;
+                return KvError::Corrupted;
+            }
         }
     }
 
@@ -1833,7 +1837,7 @@ size_t CloudStoreMgr::EstimateFileSize(std::string_view filename) const
     case 'm':  // manifest or manifest_xxx
         return options_->manifest_limit;
     default:
-        assert(false);
+        LOG(FATAL) << "Unknown file type: " << filename;
     }
 }
 

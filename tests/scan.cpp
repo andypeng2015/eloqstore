@@ -64,14 +64,14 @@ TEST_CASE("paginate the scan results", "[scan]")
     // Paginate by entries amount.
     verify.Scan(0, 10000, 1000);
     // Paginate by result size.
-    verify.Scan(0, 10000, 0, 10000);
+    verify.Scan(0, 10000, SIZE_MAX, 10000);
     // Paginate by entries amount and size.
     verify.Scan(0, 10000, 100, 5000);
 
     // Paginate with overflow value.
     verify.SetValueSize(10000);
     verify.Upsert(1, 3);
-    verify.Scan(0, 10, 0, 1000);
+    verify.Scan(0, 10, SIZE_MAX, 1000);
 }
 
 TEST_CASE("read floor", "[read]")

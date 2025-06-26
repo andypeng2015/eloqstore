@@ -12,6 +12,7 @@
 #include "comparator.h"
 #include "kv_options.h"
 #include "page.h"
+#include "task.h"
 #include "types.h"
 
 namespace kvstore
@@ -102,9 +103,8 @@ private:
      *
      */
     PageId page_id_{MaxPageId};
-
     FilePageId file_page_id_{MaxFilePageId};
-
+    Page page_;
     /**
      * @brief Number of concurrent tasks that have pinned the page. A page is
      * pinned when a read/write task is traversing down the tree. A pinned page
@@ -113,7 +113,7 @@ private:
      */
     uint32_t ref_cnt_{0};
 
-    Page page_;
+    WaitingZone waiting_;
 
     /**
      * @brief A doubly-linked list of in-memory pages for cache replacement. An
@@ -122,26 +122,7 @@ private:
      */
     MemIndexPage *next_{nullptr};
     MemIndexPage *prev_{nullptr};
-
-    /**
-     * @brief The map for swizzling pointers: maps a child page pointer to the
-     * memory address, if the pointed page is cached in memory. TODO: replaces
-     * std::unordered_map with a memory-efficient alternative.
-     *
-     */
-    // std::unordered_map<uint32_t, MemIndexPage *> swizzling_map_;
-
-    /**
-     * @brief When a page is evicted, it needs to notify its owning mapper to
-     * disable its swizzling pointer. A page can be referenced by at most two
-     * mappers, one in the read copy of the tree and the other in the
-     * copy-on-write copy of the tree.
-     *
-     */
-    // MappingSnapshot *mapping_0_{nullptr};
-    // MappingSnapshot *mapping_1_{nullptr};
     const TableIdent *tbl_ident_{nullptr};
-
     friend class IndexPageManager;
 };
 

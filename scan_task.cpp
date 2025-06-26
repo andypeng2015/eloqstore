@@ -103,28 +103,24 @@ MappingSnapshot *ScanIterator::Mapping() const
     return mapping_.get();
 }
 
-KvError ScanTask::Scan(const TableIdent &tbl_id,
-                       std::string_view begin_key,
-                       std::string_view end_key,
-                       bool begin_inclusive,
-                       size_t page_entries,
-                       size_t page_size,
-                       std::vector<KvEntry> &result,
-                       bool &has_remaining)
+KvError ScanTask::Scan()
 {
-    assert(page_entries > 0 && page_size > 0);
-    result.clear();
-    has_remaining = false;
+    const TableIdent &tbl_id = req_->TableId();
+    auto req = static_cast<ScanRequest *>(req_);
+    assert(req->page_entries_ > 0 && req->page_size_ > 0);
+    req->num_entries_ = 0;
+    req->has_remaining_ = false;
     size_t result_size = 0;
 
     ScanIterator iter(tbl_id);
-    KvError err = iter.Seek(begin_key);
+    KvError err = iter.Seek(req->begin_key_);
     if (err != KvError::NoError)
     {
         return err == KvError::EndOfFile ? KvError::NoError : err;
     }
 
-    if (!begin_inclusive && Comp()->Compare(iter.Key(), begin_key) == 0)
+    if (!req->begin_inclusive_ &&
+        Comp()->Compare(iter.Key(), req->begin_key_) == 0)
     {
         err = iter.Next();
         if (err != KvError::NoError)
@@ -133,24 +129,27 @@ KvError ScanTask::Scan(const TableIdent &tbl_id,
         }
     }
 
-    while (end_key.empty() || Comp()->Compare(iter.Key(), end_key) < 0)
+    while (req->end_key_.empty() ||
+           Comp()->Compare(iter.Key(), req->end_key_) < 0)
     {
         // Check entries number limit.
-        if (result.size() == page_entries)
+        if (req->num_entries_ == req->page_entries_)
         {
-            has_remaining = true;
+            req->has_remaining_ = true;
             break;
         }
 
         // Fetch value
-        std::string value;
+        std::string overflow_value;
+        std::string_view value;
         if (iter.IsOverflow())
         {
             auto ret = GetOverflowValue(tbl_id, iter.Mapping(), iter.Value());
             err = ret.second;
             assert(err != KvError::EndOfFile);
             CHECK_KV_ERR(err);
-            value = std::move(ret.first);
+            overflow_value = std::move(ret.first);
+            value = overflow_value;
         }
         else
         {
@@ -158,19 +157,31 @@ KvError ScanTask::Scan(const TableIdent &tbl_id,
         }
 
         // Check result size limit.
-        size_t entry_size = iter.Key().size() + value.size() +
-                            sizeof(iter.Timestamp()) + sizeof(iter.ExpireTs());
-        if (result_size > 0 && result_size + entry_size > page_size)
+        const size_t entry_size = iter.Key().size() + value.size() +
+                                  sizeof(iter.Timestamp()) +
+                                  sizeof(iter.ExpireTs());
+        if (result_size > 0 && result_size + entry_size > req->page_size_)
         {
-            has_remaining = true;
+            req->has_remaining_ = true;
             break;
         }
         result_size += entry_size;
 
-        std::string key(iter.Key());
-        uint64_t ts = iter.Timestamp();
-        uint64_t expire_ts = iter.ExpireTs();
-        result.emplace_back(std::move(key), std::move(value), ts, expire_ts);
+        KvEntry &entry = req->num_entries_ < req->entries_.size()
+                             ? req->entries_[req->num_entries_]
+                             : req->entries_.emplace_back();
+        req->num_entries_++;
+        entry.key_.assign(iter.Key());
+        if (iter.IsOverflow())
+        {
+            entry.value_ = std::move(overflow_value);
+        }
+        else
+        {
+            entry.value_.assign(value);
+        }
+        entry.timestamp_ = iter.Timestamp();
+        entry.expire_ts_ = iter.ExpireTs();
 
         err = iter.Next();
         if (err != KvError::NoError)

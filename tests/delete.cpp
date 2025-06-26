@@ -141,7 +141,7 @@ TEST_CASE("upsert with expire timestamp", "[TTL]")
     req.SetArgs(test_tbl_id, {}, {});
     store->ExecSync(&req);
     CHECK(req.Error() == kvstore::KvError::NoError);
-    CHECK(req.entries_.empty());
+    CHECK(req.Entries().empty());
     CHECK(verify.DataSet().empty());
 }
 

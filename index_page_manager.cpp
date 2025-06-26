@@ -19,15 +19,9 @@
 namespace kvstore
 {
 IndexPageManager::IndexPageManager(AsyncIoManager *io_manager)
-    : read_reqs_(io_manager->options_->index_page_read_queue),
-      io_manager_(io_manager)
+    : io_manager_(io_manager)
 {
     active_head_.EnqueNext(&active_tail_);
-
-    for (auto &req : read_reqs_)
-    {
-        RecycleReadReq(&req);
-    }
 }
 
 IndexPageManager::~IndexPageManager()
@@ -232,76 +226,49 @@ void IndexPageManager::UpdateRoot(const TableIdent &tbl_ident,
 std::pair<MemIndexPage *, KvError> IndexPageManager::FindPage(
     MappingSnapshot *mapping, PageId page_id)
 {
-    // First checks swizzling pointers.
-    MemIndexPage *idx_page = mapping->GetSwizzlingPointer(page_id);
-    while (idx_page == nullptr)
+    while (true)
     {
-        auto it = loading_zone_.find(page_id);
-        if (it != loading_zone_.end())
-        {
-            // There is already a read request issuing an async read on the same
-            // page. Waits for the request in the waiting queue.
-            it->second->pending_tasks_.emplace_back(ThdTask());
-            ThdTask()->status_ = TaskStatus::Blocked;
-            ThdTask()->Yield();
-            // When resumed, the read request should have loaded the page,
-            // unless the page is evicted again or corrupted.
-            idx_page = mapping->GetSwizzlingPointer(page_id);
-        }
-        else
+        // First checks swizzling pointers.
+        MemIndexPage *idx_page = mapping->GetSwizzlingPointer(page_id);
+        if (idx_page == nullptr)
         {
             // This is the first request to load the page.
-            ReadReq *read_req = GetFreeReadReq();
-            assert(read_req != nullptr);
-            auto it = loading_zone_.try_emplace(page_id, read_req);
-            assert(it.second);
-            ReadReq *req = it.first->second;
-
             MemIndexPage *new_page = AllocIndexPage();
             if (new_page == nullptr)
             {
-                for (auto &task : req->pending_tasks_)
-                {
-                    // This task is about to rollback. Resumes other tasks
-                    // waiting for it. Note: Resume() re-schedules the task to
-                    // run, but does not run in-place.
-                    task->Resume();
-                }
-                req->pending_tasks_.clear();
-                RecycleReadReq(req);
-                loading_zone_.erase(it.first);
                 return {nullptr, KvError::OutOfMem};
             }
+            FilePageId file_page_id = mapping->ToFilePage(page_id);
+            new_page->SetPageId(page_id);
+            new_page->SetFilePageId(file_page_id);
+            mapping->AddSwizzling(page_id, new_page);
 
             // Read the page async.
-            FilePageId file_page_id = mapping->ToFilePage(page_id);
             auto [page, err] = IoMgr()->ReadPage(
                 *mapping->tbl_ident_, file_page_id, std::move(new_page->page_));
             new_page->page_ = std::move(page);
             if (err != KvError::NoError)
             {
+                new_page->waiting_.WakeAll();
+                mapping->Unswizzling(new_page);
                 FreeIndexPage(new_page);
                 return {nullptr, err};
             }
-            new_page->SetPageId(page_id);
-            new_page->SetFilePageId(file_page_id);
             FinishIo(mapping, new_page);
-
-            for (auto &task : read_req->pending_tasks_)
-            {
-                task->Resume();
-            }
-
-            loading_zone_.erase(it.first);
-            read_req->pending_tasks_.clear();
-            RecycleReadReq(read_req);
-
+            new_page->waiting_.WakeAll();
             return {new_page, KvError::NoError};
         }
+        else if (idx_page->IsDetached())
+        {
+            // This page is not loaded yet.
+            idx_page->waiting_.Wait(ThdTask());
+        }
+        else
+        {
+            EnqueuIndexPage(idx_page);
+            return {idx_page, KvError::NoError};
+        }
     }
-    assert(!idx_page->IsDetached());
-    EnqueuIndexPage(idx_page);
-    return {idx_page, KvError::NoError};
 }
 
 void IndexPageManager::FreeMappingSnapshot(MappingSnapshot *mapping)
@@ -435,36 +402,6 @@ void IndexPageManager::FinishIo(MappingSnapshot *mapping,
 
     assert(idx_page->IsDetached());
     EnqueuIndexPage(idx_page);
-}
-
-void IndexPageManager::RecycleReadReq(ReadReq *entry)
-{
-    ReadReq *first = free_read_head_.next_;
-    free_read_head_.next_ = entry;
-    entry->next_ = first;
-
-    if (waiting_zone_.Size() > 0)
-    {
-        KvTask *task = waiting_zone_.Peek();
-        waiting_zone_.Dequeue();
-        task->Resume();
-    }
-}
-
-IndexPageManager::ReadReq *IndexPageManager::GetFreeReadReq()
-{
-    ReadReq *first = free_read_head_.next_;
-    while (first == nullptr)
-    {
-        waiting_zone_.Enqueue(ThdTask());
-        ThdTask()->status_ = TaskStatus::Blocked;
-        ThdTask()->Yield();
-        first = free_read_head_.next_;
-    }
-
-    free_read_head_.next_ = first->next_;
-    first->next_ = nullptr;
-    return first;
 }
 
 KvError IndexPageManager::SeekIndex(MappingSnapshot *mapping,

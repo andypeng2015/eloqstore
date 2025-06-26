@@ -191,18 +191,7 @@ void Shard::ProcessReq(KvRequest *req)
     case RequestType::Scan:
     {
         ScanTask *task = task_mgr_.GetScanTask();
-        auto lbd = [task, req]() -> KvError
-        {
-            auto scan_req = static_cast<ScanRequest *>(req);
-            return task->Scan(req->TableId(),
-                              scan_req->begin_key_,
-                              scan_req->end_key_,
-                              scan_req->begin_inclusive_,
-                              scan_req->page_entries_,
-                              scan_req->page_size_,
-                              scan_req->entries_,
-                              scan_req->has_remaining_);
-        };
+        auto lbd = [task]() -> KvError { return task->Scan(); };
         StartTask(task, req, lbd);
         break;
     }

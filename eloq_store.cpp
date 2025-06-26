@@ -353,17 +353,33 @@ void ScanRequest::SetPagination(size_t entries, size_t size)
 {
     page_entries_ = entries != 0 ? entries : SIZE_MAX;
     page_size_ = size != 0 ? size : SIZE_MAX;
+
+    if (page_entries_ != SIZE_MAX)
+    {
+        entries_.reserve(page_entries_);
+    }
+}
+
+std::span<KvEntry> ScanRequest::Entries()
+{
+    return std::span<KvEntry>(entries_.data(), num_entries_);
 }
 
 size_t ScanRequest::ResultSize() const
 {
     size_t size = 0;
-    for (const KvEntry &ent : entries_)
+    for (size_t i = 0; i < num_entries_; i++)
     {
-        size += ent.key_.size() + ent.value_.size() + sizeof(ent.timestamp_) +
-                sizeof(ent.expire_ts_);
+        const KvEntry &entry = entries_[i];
+        size += entry.key_.size() + entry.value_.size();
+        size += sizeof(entry.timestamp_) + sizeof(entry.expire_ts_);
     }
     return size;
+}
+
+bool ScanRequest::HasRemaining() const
+{
+    return has_remaining_;
 }
 
 void BatchWriteRequest::SetArgs(TableIdent tbl_id,

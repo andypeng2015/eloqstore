@@ -65,12 +65,12 @@ int main()
             std::unique_lock lk(m);
             cv.wait(lk, [] { return ready; });
         }
-        assert(req.entries_.size() == 2);
-        kvstore::KvEntry &ent0 = req.entries_[0];
+        assert(req.Entries().size() == 2);
+        kvstore::KvEntry &ent0 = req.Entries()[0];
         assert(ent0.key_ == "key1");
         assert(ent0.value_ == "val1");
         assert(ent0.timestamp_ == 1);
-        kvstore::KvEntry &ent1 = req.entries_[1];
+        kvstore::KvEntry &ent1 = req.Entries()[1];
         assert(ent1.key_ == "key2");
         assert(ent1.value_ == "val2");
         assert(ent1.timestamp_ == 1);
@@ -93,8 +93,8 @@ int main()
         store.ExecAsyn(&req, 0, wake_up);
         while (!req.IsDone())
             ;
-        assert(req.entries_.size() == 1);
-        kvstore::KvEntry &ent0 = req.entries_[0];
+        assert(req.Entries().size() == 1);
+        kvstore::KvEntry &ent0 = req.Entries()[0];
         assert(ent0.key_ == "key3");
         assert(ent0.value_ == "val33");
         assert(ent0.timestamp_ == 2);

@@ -33,15 +33,15 @@ int KvOptions::LoadFromIni(const char *path)
         index_page_restart_interval =
             reader.GetUnsigned(sec_run, "index_page_restart_interval", 16);
     }
-    if (reader.HasValue(sec_run, "index_page_read_queue"))
-    {
-        index_page_read_queue =
-            reader.GetUnsigned(sec_run, "index_page_read_queue", 1024);
-    }
     if (reader.HasValue(sec_run, "init_page_count"))
     {
         init_page_count =
             reader.GetUnsigned(sec_run, "init_page_count", 1 << 15);
+    }
+    if (reader.HasValue(sec_run, "skip_verify_checksum"))
+    {
+        skip_verify_checksum =
+            reader.GetBoolean(sec_run, "skip_verify_checksum", false);
     }
     if (reader.HasValue(sec_run, "index_buffer_pool_size"))
     {

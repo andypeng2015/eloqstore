@@ -66,7 +66,7 @@ uint32_t DecodeValue(const std::string &val)
     return v;
 }
 
-std::string FormatEntries(const std::vector<kvstore::KvEntry> &entries)
+std::string FormatEntries(std::span<kvstore::KvEntry> entries)
 {
     std::string kvs_str;
     for (auto &[k, v, ts, exp] : entries)
@@ -100,7 +100,7 @@ std::pair<std::string, kvstore::KvError> Scan(kvstore::EloqStore *store,
     {
         return {{}, req.Error()};
     }
-    return {test_util::FormatEntries(req.entries_), kvstore::KvError::NoError};
+    return {test_util::FormatEntries(req.Entries()), kvstore::KvError::NoError};
 }
 
 MapVerifier::MapVerifier(kvstore::TableIdent tid,
@@ -317,6 +317,7 @@ void MapVerifier::Scan(std::string_view begin,
         const uint64_t now_ts = utils::UnixTs<chrono::milliseconds>();
         while (it != it_end && it->first < next_key)
         {
+            CHECK(it->second.expire_ts_ != 0);
             CHECK(it->second.expire_ts_ <= now_ts);
             answer_.erase(it++);
         }
@@ -334,22 +335,22 @@ void MapVerifier::Scan(std::string_view begin,
         }
 
         // Verify scan result
-        CHECK(req.entries_.size() <= req.page_entries_);
-        CHECK(req.ResultSize() <= req.page_size_ || req.entries_.size() == 1);
-        for (auto &entry : req.entries_)
+        CHECK(req.Entries().size() <= page_entries);
+        CHECK(req.ResultSize() <= page_size || req.Entries().size() == 1);
+        for (auto &entry : req.Entries())
         {
             clean_expired(entry.key_);
             CHECK(entry == it->second);
             it++;
         }
 
-        if (!req.has_remaining_)
+        if (!req.HasRemaining())
         {
             break;
         }
         // Continue scan the next page.
-        CHECK(!req.entries_.empty());
-        begin_key = req.entries_.back().key_;
+        CHECK(!req.Entries().empty());
+        begin_key = req.Entries().back().key_;
         req.SetArgs(tid_, begin_key, end_key, false);
     }
     clean_expired(end_key);
@@ -533,7 +534,7 @@ void ConcurrencyTester::VerifyRead(Reader *reader, uint32_t write_pause)
     const uint16_t seg_id = key_begin / seg_size_;
     const uint32_t partition_id = reader->partition_id_;
     Partition &partition = partitions_[partition_id];
-    const auto &entries = reader->req_.entries_;
+    auto entries = reader->req_.Entries();
 
     uint64_t sum_val = 0;
     for (auto &ent : entries)
@@ -587,7 +588,7 @@ void ConcurrencyTester::VerifyRead(Reader *reader, uint32_t write_pause)
 std::string ConcurrencyTester::DebugSegment(
     uint32_t partition_id,
     uint16_t seg_id,
-    const std::vector<kvstore::KvEntry> *resp) const
+    std::span<kvstore::KvEntry> *resp) const
 {
     const Partition &partition = partitions_[partition_id];
     const uint32_t begin = seg_id * seg_size_;
@@ -725,11 +726,11 @@ void ConcurrencyTester::Init()
         store_->ExecSync(&scan_req);
         CHECK(scan_req.Error() == kvstore::KvError::NoError ||
               scan_req.Error() == kvstore::KvError::NotFound);
-        if (!scan_req.entries_.empty())
+        if (!scan_req.Entries().empty())
         {
             partition.kvs_.resize(kvs_num, 0);
-            CHECK(scan_req.entries_.size() <= partition.kvs_.size());
-            for (auto &[k, v, ts, exp] : scan_req.entries_)
+            CHECK(scan_req.Entries().size() <= partition.kvs_.size());
+            for (auto &[k, v, ts, exp] : scan_req.Entries())
             {
                 uint32_t key_res = DecodeKey(k);
                 uint32_t val_res = DecodeValue(v);

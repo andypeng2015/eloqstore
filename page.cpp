@@ -4,6 +4,32 @@
 
 namespace kvstore
 {
+
+PageType TypeOfPage(const char *p)
+{
+    return static_cast<PageType>(p[page_type_offset]);
+}
+
+void SetPageType(char *p, PageType t)
+{
+    p[page_type_offset] = static_cast<char>(t);
+}
+
+void SetChecksum(std::string_view blob)
+{
+    uint64_t checksum =
+        XXH3_64bits(blob.data() + checksum_bytes, blob.size() - checksum_bytes);
+    EncodeFixed64(const_cast<char *>(blob.data()), checksum);
+}
+
+bool ValidateChecksum(std::string_view blob)
+{
+    uint64_t checksum_stored = DecodeFixed64(blob.data());
+    uint64_t checksum =
+        XXH3_64bits(blob.data() + checksum_bytes, blob.size() - checksum_bytes);
+    return checksum == checksum_stored;
+}
+
 Page::Page(bool alloc)
 {
     if (alloc)

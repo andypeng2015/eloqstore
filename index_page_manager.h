@@ -118,26 +118,6 @@ private:
      */
     std::unordered_map<TableIdent, RootMeta> tbl_roots_;
 
-    struct ReadReq
-    {
-        std::vector<KvTask *> pending_tasks_;
-        ReadReq *next_{nullptr};
-    };
-
-    void RecycleReadReq(ReadReq *entry);
-
-    ReadReq *GetFreeReadReq();
-
-    std::vector<ReadReq> read_reqs_;
-    ReadReq free_read_head_;
-
-    /**
-     * @brief A collection of tasks requesting to load pages.
-     *
-     */
-    std::unordered_map<uint32_t, ReadReq *> loading_zone_;
-    CircularQueue<KvTask *> waiting_zone_;
-
     AsyncIoManager *io_manager_;
 };
 }  // namespace kvstore

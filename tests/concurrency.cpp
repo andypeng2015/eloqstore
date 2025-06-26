@@ -48,7 +48,7 @@ TEST_CASE("concurrently write to partition", "[concurrency]")
         std::string end = Key(batch);
         scan_req.SetArgs(tbl_id, begin, end);
         store->ExecSync(&scan_req);
-        for (const kvstore::KvEntry &ent : scan_req.entries_)
+        for (const kvstore::KvEntry &ent : scan_req.Entries())
         {
             REQUIRE(ent.value_ == Value(std::size(requests) - 1));
             REQUIRE(ent.timestamp_ == std::size(requests) - 1);

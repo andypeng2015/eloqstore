@@ -29,7 +29,6 @@ public:
     uint32_t CurrentSize() const;
 
     // checksum(8B)|root(4B)|ttl_root(4B)|log_size(4B)
-    static constexpr uint16_t checksum_bytes = 8;
     static constexpr uint16_t header_bytes =
         checksum_bytes + sizeof(PageId) * 2 + sizeof(uint32_t);
 

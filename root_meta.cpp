@@ -64,9 +64,7 @@ std::string_view ManifestBuilder::Finalize(PageId new_root, PageId ttl_root)
     uint32_t len = buff_.size() - header_bytes;
     EncodeFixed32(buff_.data() + offset_len, len);
 
-    uint64_t checksum = XXH3_64bits(buff_.data() + checksum_bytes,
-                                    buff_.size() - checksum_bytes);
-    EncodeFixed64(buff_.data(), checksum);
+    SetChecksum(buff_);
     return buff_;
 }
 

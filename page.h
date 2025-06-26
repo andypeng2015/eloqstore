@@ -4,7 +4,6 @@
 #include <memory>
 #include <vector>
 
-#include "coding.h"
 #include "xxhash.h"
 
 namespace kvstore
@@ -21,32 +20,10 @@ enum struct PageType : uint8_t
     Deleted = 255
 };
 
-inline static PageType TypeOfPage(const char *p)
-{
-    return static_cast<PageType>(p[page_type_offset]);
-}
-
-inline static void SetPageType(char *p, PageType t)
-{
-    p[page_type_offset] = static_cast<char>(t);
-}
-
-inline static uint64_t GetPageChecksum(const char *p)
-{
-    return DecodeFixed64(p);
-}
-
-inline static void SetPageChecksum(char *p, uint16_t pgsz)
-{
-    uint64_t checksum = XXH3_64bits(p + checksum_bytes, pgsz - checksum_bytes);
-    EncodeFixed64(p, checksum);
-}
-
-inline static bool ValidatePageChecksum(char *p, uint16_t pgsz)
-{
-    uint64_t checksum = XXH3_64bits(p + checksum_bytes, pgsz - checksum_bytes);
-    return checksum == GetPageChecksum(p);
-}
+PageType TypeOfPage(const char *p);
+void SetPageType(char *p, PageType t);
+void SetChecksum(std::string_view blob);
+bool ValidateChecksum(std::string_view blob);
 
 inline static size_t page_align = sysconf(_SC_PAGESIZE);
 

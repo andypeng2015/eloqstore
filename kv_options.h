@@ -26,9 +26,14 @@ struct KvOptions
     const Comparator *comparator_ = Comparator::DefaultComparator();
     uint16_t data_page_restart_interval = 16;
     uint16_t index_page_restart_interval = 16;
-    uint16_t index_page_read_queue = 1024;
     uint32_t init_page_count = 1 << 15;
 
+    /**
+     * @brief Skip checksum verification when reading pages.
+     * This is useful for performance testing, but should not be used in
+     * production.
+     */
+    bool skip_verify_checksum = false;
     /**
      * @brief Max amount of cached index pages per shard.
      */

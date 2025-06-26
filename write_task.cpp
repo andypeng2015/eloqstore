@@ -54,21 +54,21 @@ void WriteTask::Abort()
 
 KvError WriteTask::WritePage(DataPage &&page)
 {
-    SetPageChecksum(page.PagePtr(), Options()->data_page_size);
+    SetChecksum({page.PagePtr(), Options()->data_page_size});
     auto [_, fp_id] = AllocatePage(page.GetPageId());
     return WritePage(std::move(page), fp_id);
 }
 
 KvError WriteTask::WritePage(OverflowPage &&page)
 {
-    SetPageChecksum(page.PagePtr(), Options()->data_page_size);
+    SetChecksum({page.PagePtr(), Options()->data_page_size});
     auto [_, fp_id] = AllocatePage(page.GetPageId());
     return WritePage(std::move(page), fp_id);
 }
 
 KvError WriteTask::WritePage(MemIndexPage *page)
 {
-    SetPageChecksum(page->PagePtr(), Options()->data_page_size);
+    SetChecksum({page->PagePtr(), Options()->data_page_size});
     auto [page_id, file_page_id] = AllocatePage(page->GetPageId());
     page->SetPageId(page_id);
     page->SetFilePageId(file_page_id);
@@ -78,7 +78,7 @@ KvError WriteTask::WritePage(MemIndexPage *page)
 KvError WriteTask::WritePage(VarPage page, FilePageId file_page_id)
 {
     const KvOptions *opts = Options();
-    assert(ValidatePageChecksum(VarPagePtr(page), opts->data_page_size));
+    assert(ValidateChecksum({VarPagePtr(page), opts->data_page_size}));
     KvError err;
     if (opts->data_append_mode)
     {

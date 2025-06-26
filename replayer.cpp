@@ -65,15 +65,13 @@ KvError Replayer::ParseNextRecord(ManifestFile *file)
     CHECK_KV_ERR(err);
 
     std::string_view content = log_buf_;
-
     // Verify checksum
-    uint64_t checksum_stored = DecodeFixed64(content.data());
-    content = content.substr(ManifestBuilder::checksum_bytes);
-    uint64_t checksum = XXH3_64bits(content.data(), content.size());
-    if (checksum != checksum_stored)
+    if (!ValidateChecksum(content))
     {
+        LOG(ERROR) << "Manifest file corrupted, checksum mismatch.";
         return KvError::Corrupted;
     }
+    content = content.substr(checksum_bytes);
 
     root_ = DecodeFixed32(content.data());
     content = content.substr(sizeof(PageId));

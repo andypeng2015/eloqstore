@@ -22,7 +22,7 @@ uint32_t DecodeKey(const std::string &key);
 void EncodeValue(std::string *dst, uint32_t val);
 uint32_t DecodeValue(const std::string &val);
 
-std::string FormatEntries(const std::vector<kvstore::KvEntry> &entries);
+std::string FormatEntries(std::span<kvstore::KvEntry> entries);
 
 std::pair<std::string, kvstore::KvError> Scan(kvstore::EloqStore *store,
                                               const kvstore::TableIdent &tbl_id,
@@ -53,12 +53,12 @@ public:
     void Floor(std::string_view key);
     void Scan(uint64_t begin,
               uint64_t end,
-              size_t page_entries = 0,
-              size_t page_size = 0);
+              size_t page_entries = SIZE_MAX,
+              size_t page_size = SIZE_MAX);
     void Scan(std::string_view begin,
               std::string_view end,
-              size_t page_entries = 0,
-              size_t page_size = 0);
+              size_t page_entries = SIZE_MAX,
+              size_t page_size = SIZE_MAX);
 
     void Validate();
     void SetAutoValidate(bool v);
@@ -134,7 +134,7 @@ private:
 
     std::string DebugSegment(uint32_t partition_id,
                              uint16_t seg_id,
-                             const std::vector<kvstore::KvEntry> *resp) const;
+                             std::span<kvstore::KvEntry> *resp) const;
 
     const uint32_t val_size_;
     const uint8_t seg_size_;

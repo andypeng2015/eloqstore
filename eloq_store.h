@@ -118,8 +118,19 @@ public:
      */
     void SetPagination(size_t entries, size_t size);
 
+    std::span<KvEntry> Entries();
     size_t ResultSize() const;
+    /**
+     * @brief Check if there are more entries to scan.
+     * @return true if there are more entries to scan, false otherwise.
+     * If this returns true, the caller should request again to fetch the
+     * next page of entries, and the begin key of the request should be set
+     * to the end key of the previously request. If this returns false, the scan
+     * is complete and no more entries are available.
+     */
+    bool HasRemaining() const;
 
+private:
     // input
     bool begin_inclusive_;
     std::string_view begin_key_;
@@ -128,7 +139,9 @@ public:
     size_t page_size_{SIZE_MAX};
     // output
     std::vector<KvEntry> entries_;
+    size_t num_entries_{0};
     bool has_remaining_;
+    friend class ScanTask;
 };
 
 class WriteRequest : public KvRequest
