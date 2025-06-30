@@ -5,6 +5,12 @@
 #include "eloq_store.h"
 #include "task_manager.h"
 
+#ifdef ELOQ_MODULE_ENABLED
+#include <condition_variable>
+
+#include "async_io_listener.h"
+#endif
+
 // https://github.com/cameron314/concurrentqueue/issues/280
 #undef BLOCK_SIZE
 #include "concurrentqueue/blockingconcurrentqueue.h"
