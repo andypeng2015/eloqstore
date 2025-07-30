@@ -17,7 +17,8 @@ DEFINE_uint32(batch_size, 1 << 20, "number of KVs per batch");
 DEFINE_uint32(inflight_batchs, 2, "number of inflight batchs");
 DEFINE_uint32(write_batchs, 512, "number of batchs to write");
 DEFINE_uint32(partitions, 4, "number of partitions");
-DEFINE_uint32(report, 0, "interval of output progress");
+
+using namespace std::chrono;
 
 class Writer;
 moodycamel::BlockingConcurrentQueue<Writer *> finished_;
@@ -146,35 +147,46 @@ int main(int argc, char *argv[])
         writers.emplace_back(&store, i);
     }
 
-    auto start = std::chrono::high_resolution_clock::now();
+    const uint64_t batch_bytes = FLAGS_kv_size * FLAGS_batch_size;
+    const auto start = high_resolution_clock::now();
+    auto last_time = start;
     for (auto &writer : writers)
     {
         writer.Begin();
     }
-    for (size_t i = 0; i < FLAGS_write_batchs; i++)
+    for (size_t i = 0; i < FLAGS_write_batchs;)
     {
         Writer *writer;
         finished_.wait_dequeue(writer);
         writer->Continue();
+        i++;
 
-        if (FLAGS_report > 0 && i % FLAGS_report == 0)
+        if (i % FLAGS_partitions == 0)
         {
+            auto now = high_resolution_clock::now();
+            double cost_ms =
+                duration_cast<milliseconds>(now - last_time).count();
+            const uint64_t write_bytes = batch_bytes * FLAGS_partitions;
+            const uint64_t speed = write_bytes * 1000 / cost_ms;
+            const uint64_t mb_per_sec = speed >> 20;
+            LOG(INFO) << "speed " << speed << " bytes/s | " << mb_per_sec
+                      << " MiB/s";
+            last_time = now;
+
             // Output the current progress at regular intervals.
-            std::cout << "\rProgress[" << i << '/' << FLAGS_write_batchs << ']'
+            std::cout << "Progress[" << i << '/' << FLAGS_write_batchs << "]\r"
                       << std::flush;
         }
     }
-    auto cost = std::chrono::high_resolution_clock::now() - start;
-    double cost_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(cost).count();
+    auto cost = high_resolution_clock::now() - start;
+    double cost_ms = duration_cast<milliseconds>(cost).count();
     std::cout << "\rBenchmark result:" << std::endl;
     std::cout << "Time spent " << cost_ms << " ms" << std::endl;
-    uint64_t write_bytes =
-        uint64_t(FLAGS_kv_size) * FLAGS_batch_size * FLAGS_write_batchs;
+    uint64_t write_bytes = batch_bytes * FLAGS_write_batchs;
     std::cout << "Total write " << write_bytes << " bytes" << std::endl;
     const uint64_t speed = write_bytes * 1000 / cost_ms;
     const uint64_t mb_per_sec = speed >> 20;
-    std::cout << "Write speed " << speed << " bytes/s | " << mb_per_sec
+    std::cout << "Average speed " << speed << " bytes/s | " << mb_per_sec
               << " MiB/s" << std::endl;
 
     for (auto &w : writers)
