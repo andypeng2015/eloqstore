@@ -231,7 +231,7 @@ void EloqStore::ExecSync(KvRequest *req)
 {
     req->user_data_ = 0;
     req->callback_ = nullptr;
-    if (SendRequest(req))
+    if (SendRequest(req))  //在很顶层就执行这个判断,bool判断是连带着下去的
     {
         req->Wait();
     }
@@ -251,6 +251,7 @@ bool EloqStore::SendRequest(KvRequest *req)
     req->err_ = KvError::NoError;
     req->done_.store(false, std::memory_order_relaxed);
 
+    // 将路由定位到对应的Shard,将任务分配
     Shard *shard = shards_[req->TableId().ShardIndex(shards_.size())].get();
     return shard->AddKvRequest(req);
 }

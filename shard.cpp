@@ -23,15 +23,17 @@ KvError Shard::Init()
 
 void Shard::WorkLoop()
 {
-    shard = this;
+    shard = this;  // 每个线程的全局变量,指向当前线程的Shard
     io_mgr_->Start();
 
     // Get new requests from the queue, only blocked when there are no requests
     // and no active tasks.
     // This allows the thread to exit gracefully when the store is stopped.
     std::array<KvRequest *, 128> reqs;
+    // 引用捕获reqs,调用这个就可以将requests_中的请求出队放到reqs
     auto dequeue_requests = [this, &reqs]() -> int
     {
+        // 好像是个无锁队列
         size_t nreqs = requests_.try_dequeue_bulk(reqs.data(), reqs.size());
         if (nreqs == 0 && task_mgr_.NumActive() == 0 && io_mgr_->IsIdle())
         {
@@ -55,18 +57,18 @@ void Shard::WorkLoop()
         int nreqs = dequeue_requests();
         if (nreqs < 0)
         {
-            break;
+            break;  //上文的优雅退出机制
         }
         for (size_t i = 0; i < nreqs; i++)
         {
-            OnReceivedReq(reqs[i]);
+            OnReceivedReq(reqs[i]);  //单独处理每个请求,每一个请求都是一个batch
         }
 
-        io_mgr_->Submit();
+        io_mgr_->Submit();  //提交io操作,然后轮询完成的io操作
         io_mgr_->PollComplete();
 
-        ResumeScheduled();
-        PollFinished();
+        ResumeScheduled();  //恢复调度的任务?,最后一步要处理的事情
+        PollFinished();     //内部会回收这次的task
     }
 
     io_mgr_->Stop();
@@ -90,13 +92,13 @@ void Shard::Stop()
 
 bool Shard::AddKvRequest(KvRequest *req)
 {
-    bool ret = requests_.enqueue(req);
+    bool ret = requests_.enqueue(req);  //无锁队列入队
 #ifdef ELOQ_MODULE_ENABLED
     if (ret)
     {
         req_queue_size_.fetch_add(1, std::memory_order_relaxed);
         // New request, notify the external processor directly.
-        eloq::EloqModule::NotifyWorker(shard_id_);
+        eloq::EloqModule::NotifyWorker(shard_id_);  //通知外部处理器
     }
 #endif
     return ret;
@@ -171,6 +173,7 @@ const KvOptions *Shard::Options() const
 
 void Shard::OnReceivedReq(KvRequest *req)
 {
+    // 多种请求类型都是writeRequest的派生类,下面这个if语句没有很看懂
     if (auto wreq = dynamic_cast<WriteRequest *>(req); wreq != nullptr)
     {
         // Try acquire lock to ensure write operation is executed
@@ -184,7 +187,7 @@ void Shard::OnReceivedReq(KvRequest *req)
         }
     }
 
-    ProcessReq(req);
+    ProcessReq(req);  // 根据不同类型执行不同请求
 }
 
 void Shard::ProcessReq(KvRequest *req)
@@ -233,7 +236,10 @@ void Shard::ProcessReq(KvRequest *req)
     }
     case RequestType::BatchWrite:
     {
+        // 仅batchWrite需要传入tableId?,然后生成一个任务,这俩一起传入协程中
+        // 二更:因为只有写操作需要cow去维护特定表的信息,然后读操作不涉及这些,所以不需要拷贝
         BatchWriteTask *task = task_mgr_.GetBatchWriteTask(req->TableId());
+        // 定义协程入口函数
         auto lbd = [task, req]() -> KvError
         {
             auto write_req = static_cast<BatchWriteRequest *>(req);
@@ -245,9 +251,9 @@ void Shard::ProcessReq(KvRequest *req)
             {
                 return KvError::InvalidArgs;
             }
-            return task->Apply();
+            return task->Apply();  // 核心执行的函数
         };
-        StartTask(task, req, lbd);
+        StartTask(task, req, lbd);  // 协程启动函数
         break;
     }
     case RequestType::Truncate:

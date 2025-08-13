@@ -23,7 +23,8 @@ class Shard;
 class EloqStore;
 
 inline EloqStore *eloq_store;
-inline thread_local Shard *shard;
+// 局部线程,每个线程的全局变量,指向当前线程的Shard
+inline thread_local Shard *shard = nullptr;
 KvTask *ThdTask();
 AsyncIoManager *IoMgr();
 const KvOptions *Options();

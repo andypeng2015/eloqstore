@@ -267,6 +267,7 @@ KvError WriteTask::UpdateMeta()
     CHECK_KV_ERR(err);
 
     // Hooks after modified partition.
+    // hooks本质上就是一种自定义回调函数的行为
     CompactIfNeeded(cow_meta_.mapper_.get());
 
     shard->IndexManager()->UpdateRoot(tbl_ident_, std::move(cow_meta_));

@@ -25,9 +25,9 @@ public:
     IndexStackEntry(const IndexStackEntry &) = delete;
     IndexStackEntry(IndexStackEntry &&rhs) = delete;
 
-    MemIndexPage *idx_page_{nullptr};
-    IndexPageIter idx_page_iter_;
-    std::vector<IndexOp> changes_{};
-    bool is_leaf_index_{false};
+    MemIndexPage *idx_page_{nullptr};  // 索引页面指针
+    IndexPageIter idx_page_iter_;      // 页面迭代器
+    std::vector<IndexOp> changes_{};   // 该层级的变更操作
+    bool is_leaf_index_{false};        // 是否为叶子索引层
 };
 }  // namespace eloqstore

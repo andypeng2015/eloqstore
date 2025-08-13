@@ -32,6 +32,7 @@ KvError BatchWriteTask::SeekStack(std::string_view search_key)
 
     // The bottom index entry (i.e., the tree root) ranges from negative
     // infinity to positive infinity.
+    // 从栈顶开始向下检查，确保search_key在当前索引项的范围内
     while (stack_.size() > 1)
     {
         IndexPageIter &idx_iter = stack_.back()->idx_page_iter_;
@@ -41,46 +42,53 @@ KvError BatchWriteTask::SeekStack(std::string_view search_key)
             idx_iter.Next();
             std::string_view idx_entry_start = idx_iter.Key();
             std::string idx_entry_end = RightBound(false);
-
+            // 检查search_key是否在[start, end)范围内
             if (entry_contains(idx_entry_start, idx_entry_end, search_key, cmp))
             {
-                break;
+                break;  // 找到合适的索引项，跳出循环
             }
             else
             {
+                // 搜索键小于当前索引项的起始键，弹出当前栈顶
                 auto [_, err] = Pop();
                 CHECK_KV_ERR(err);
             }
         }
         else
         {
+            // 搜索键大于当前索引项的结束键，弹出当前栈顶
             auto [_, err] = Pop();
             CHECK_KV_ERR(err);
         }
     }
     return KvError::NoError;
 }
-
+// B+树遍历到叶子层
 std::pair<PageId, KvError> BatchWriteTask::Seek(std::string_view key)
 {
+    // 如果栈顶是空页面，说明是空树
     if (stack_.back()->idx_page_ == nullptr)
     {
         stack_.back()->is_leaf_index_ = true;
         return {MaxPageId, KvError::NoError};
     }
-
+    // 从当前栈顶开始向下遍历到叶子层
     while (true)
     {
         IndexStackEntry *idx_entry = stack_.back().get();
         IndexPageIter &idx_iter = idx_entry->idx_page_iter_;
+        // 在当前索引页中定位key
         idx_iter.Seek(key);
         PageId page_id = idx_iter.GetPageId();
         assert(page_id != MaxPageId);
+        // 如果当前索引页指向叶子数据页，结束遍历
         if (idx_entry->idx_page_->IsPointingToLeaf())
         {
             break;
         }
         assert(!stack_.back()->is_leaf_index_);
+
+        // 否则加载下一层索引页并压入栈
         auto [node, err] = shard->IndexManager()->FindPage(
             cow_meta_.mapper_->GetMapping(), page_id);
         if (err != KvError::NoError)
@@ -231,14 +239,21 @@ void BatchWriteTask::Abort()
 
 KvError BatchWriteTask::Apply()
 {
+    // 1. 创建COW快照 - 为写操作准备隔离环境
     KvError err = shard->IndexManager()->MakeCowRoot(tbl_ident_, cow_meta_);
     CHECK_KV_ERR(err);
+    // 2. 应用数据批次 - 处理实际的KV数据
     err = ApplyBatch(cow_meta_.root_id_, true);
     CHECK_KV_ERR(err);
+    // 3. 应用TTL批次 - 处理过期时间索引
     err = ApplyTTLBatch();
     CHECK_KV_ERR(err);
+    //内部判断data_append模式,好像TTK和这个Meta都是用于处理元数据更新的,切换快照等,故上面先获取cow的快照,如何
+    //修改完了之后,放到这个位置更新快照
+    // 提交cow快照使得修改胜雄安
     err = UpdateMeta();
     CHECK_KV_ERR(err);
+    // 触发TTL清理
     TriggerTTL();
     return KvError::NoError;
 }
@@ -263,7 +278,7 @@ KvError BatchWriteTask::ApplyBatch(PageId &root_id, bool update_ttl)
 {
     do_update_ttl_ = update_ttl;
     assert(!update_ttl || ttl_batch_.empty());
-
+    // 1. 初始化索引栈 - 用于B+树遍历
     if (root_id != MaxPageId)
     {
         auto [root_page, err] = shard->IndexManager()->FindPage(
@@ -280,36 +295,43 @@ KvError BatchWriteTask::ApplyBatch(PageId &root_id, bool update_ttl)
     }
 
     KvError err;
+    // 2. 批量处理数据 - 按key顺序处理
     size_t cidx = 0;
     const uint64_t now_ms = utils::UnixTs<chrono::milliseconds>();
     while (cidx < data_batch_.size())
     {
         std::string_view batch_start_key = {data_batch_[cidx].key_.data(),
                                             data_batch_[cidx].key_.size()};
+        // 3. 定位到目标页面
         if (stack_.size() > 1)
         {
-            err = SeekStack(batch_start_key);
+            err = SeekStack(batch_start_key);  // 在索引栈中定位
             CHECK_KV_ERR(err);
         }
+        // 找到叶子页面
         auto [page_id, err] = Seek(batch_start_key);
         CHECK_KV_ERR(err);
+        // 4. 加载叶子页面
         if (page_id != MaxPageId)
         {
+            // 最终页面存放在applying_page_中
             err = LoadApplyingPage(page_id);
             CHECK_KV_ERR(err);
         }
+        // 在页面上应用修改
         err = ApplyOnePage(cidx, now_ms);
         CHECK_KV_ERR(err);
     }
-    // Flush all dirty leaf data pages in leaf_triple_ .
+    // 5. 刷新脏页和重建索引
     assert(TripleElement(2) == nullptr);
-    err = ShiftLeafLink();
+    err = ShiftLeafLink();  // 刷新叶子页链表
     CHECK_KV_ERR(err);
     err = ShiftLeafLink();
     CHECK_KV_ERR(err);
 
     assert(!stack_.empty());
     MemIndexPage *new_root = nullptr;
+    // 6. 重建索引树
     while (!stack_.empty())
     {
         auto [new_page, err] = Pop();
@@ -323,10 +345,15 @@ KvError BatchWriteTask::ApplyBatch(PageId &root_id, bool update_ttl)
 
 KvError BatchWriteTask::LoadApplyingPage(PageId page_id)
 {
+    // 叶子页面三元组: [prev_page, current_page, next_page]
+    // leaf_triple_[0]: 前一个页面
+    // leaf_triple_[1]: 当前处理页面
+    // leaf_triple_[2]: 下一个页面
     assert(page_id != MaxPageId);
     // Now we are going to fetch a data page before execute ApplyOnePage.
     // But this page may already exists at leaf_triple_[1], because it may be
     // loaded by previous ApplyOnePage for linking purpose.
+    // 快速路径：如果目标页面已在triple_[1]中，直接移动
     if (TripleElement(1) && TripleElement(1)->GetPageId() == page_id)
     {
         // Fast path: leaf_triple_[1] is exactly the page we want. Just move it
@@ -336,18 +363,21 @@ KvError BatchWriteTask::LoadApplyingPage(PageId page_id)
     }
     else
     {
+        // 从磁盘加载页面
         auto [page, err] = LoadDataPage(page_id);
         CHECK_KV_ERR(err);
         applying_page_ = std::move(page);
     }
     assert(TypeOfPage(applying_page_.PagePtr()) == PageType::Data);
-
+    // 维护三元组的连续性
     if (TripleElement(1))
     {
+        // 如果triple_[1]存在且不是目标页面，需要刷新链表
         assert(TripleElement(1)->GetPageId() != applying_page_.GetPageId());
         KvError err = ShiftLeafLink();
         CHECK_KV_ERR(err);
     }
+    // 确保triple_[0]是applying_page的前驱页面
     if (TripleElement(0) &&
         TripleElement(0)->GetPageId() != applying_page_.PrevPageId())
     {
@@ -367,31 +397,35 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
     std::string_view page_left_bound{};
     std::string page_right_key;
     std::string_view page_right_bound{};
-
+    // 1. 初始化页面边界和基础页面
     if (stack_.back()->idx_page_iter_.GetPageId() != MaxPageId)
     {
+        // 如果存在现有页面，设置基础页面和边界
         assert(stack_.back()->idx_page_iter_.GetPageId() ==
                applying_page_.GetPageId());
-        base_page = &applying_page_;
-        page_left_bound = LeftBound(true);
-        page_right_key = RightBound(true);
+        base_page = &applying_page_;        // 当前处理的数据页面
+        page_left_bound = LeftBound(true);  // 页面左边界
+        page_right_key = RightBound(true);  // 页面右边界
         page_right_bound = {page_right_key.data(), page_right_key.size()};
     }
-
+    // 2. 初始化比较器和迭代器
     const Comparator *cmp = shard->IndexManager()->GetComparator();
-    DataPageIter base_page_iter{base_page, Options()};
+    DataPageIter base_page_iter{base_page, Options()};  // 现有页面数据迭代器
     bool is_base_iter_valid = false;
-    AdvanceDataPageIter(base_page_iter, is_base_iter_valid);
+    AdvanceDataPageIter(base_page_iter,
+                        is_base_iter_valid);  // 推进到第一个有效项
 
     data_page_builder_.Reset();
 
+    // 3. 确定当前批次处理范围
     assert(cidx < data_batch_.size());
     std::string_view change_key = {data_batch_[cidx].key_.data(),
                                    data_batch_[cidx].key_.size()};
+    // 验证变更key在页面边界内
     assert(cmp->Compare(page_left_bound, change_key) <= 0);
     assert(page_right_bound.empty() ||
            cmp->Compare(page_left_bound, page_right_bound) < 0);
-
+    // 4. 计算当前页面需要处理的变更范围
     auto change_it = data_batch_.begin() + cidx;
     auto change_end_it = std::lower_bound(
         change_it,
@@ -401,6 +435,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
         {
             if (key.empty())
             {
+                // 空字符串右边界表示正无穷
                 // An empty-string right bound represents positive infinity.
                 return true;
             }
@@ -409,7 +444,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
                                   change_item.key_.size()};
             return cmp->Compare(ckey, key) < 0;
         });
-
+    // 5. 初始化页面构建相关变量
     std::string prev_key;
     std::string_view page_key = stack_.back()->idx_page_iter_.Key();
     std::string curr_page_key{page_key.data(), page_key.size()};
@@ -420,7 +455,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
         page_id = base_page->GetPageId();
         assert(page_key <= base_page_iter.Key());
     }
-
+    // 6. 定义添加KV到页面的递归lambda函数
     auto add_to_page = utils::MakeYCombinator(
         [&](auto &&self,
             std::string_view key,
@@ -429,36 +464,41 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
             uint64_t ts,
             uint64_t expire_ts) -> KvError
         {
+            // 6.1 检查是否已过期
             if (expire_ts != 0 && expire_ts <= now_ms)
             {
-                // Skip expired key-value.
+                // 跳过已过期的键值对
                 if (is_ptr)
                 {
-                    err = DelOverflowValue(val);
+                    err = DelOverflowValue(val);  // 删除溢出值
                     CHECK_KV_ERR(err);
                 }
-                UpdateTTL(expire_ts, key, WriteOp::Delete);
+                UpdateTTL(expire_ts, key, WriteOp::Delete);  // 更新TTL索引
                 return KvError::NoError;
             }
-
+            // 6.2 尝试添加到当前页面
             bool success =
                 data_page_builder_.Add(key, val, is_ptr, ts, expire_ts);
             if (!success)
             {
+                // 6.3 页面空间不足，处理溢出情况
                 if (!is_ptr && DataPageBuilder::IsOverflowKV(
                                    key, val.size(), ts, expire_ts, Options()))
                 {
                     // The key-value pair is too large to fit in a single
                     // data page. Split it into multiple overflow pages.
+                    // KV对太大，分割到多个溢出页面
                     KvError err = WriteOverflowValue(val);
                     CHECK_KV_ERR(err);
                     return self(key, overflow_ptrs_, true, ts, expire_ts);
                 }
 
                 // Finishes the current page.
+                // 6.4 完成当前页面并开始新页面
                 KvError err = FinishDataPage(std::move(curr_page_key), page_id);
                 CHECK_KV_ERR(err);
                 // Starts a new page.
+                // 生成新页面的分隔键
                 curr_page_key = cmp->FindShortestSeparator(
                     {prev_key.data(), prev_key.size()}, key);
                 assert(!prev_key.empty() && prev_key < curr_page_key);
@@ -472,9 +512,10 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
             prev_key = key;
             return KvError::NoError;
         });
-
+    // 7. 主合并循环：同时处理现有数据和批量变更
     while (is_base_iter_valid && change_it != change_end_it)
     {
+        // 7.1 获取当前比较的数据
         std::string_view base_key = base_page_iter.Key();
         std::string_view base_val = base_page_iter.Value();
         uint64_t base_ts = base_page_iter.Timestamp();
@@ -484,12 +525,12 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
         std::string_view change_val = {change_it->val_.data(),
                                        change_it->val_.size()};
         uint64_t change_ts = change_it->timestamp_;
-
+        // 7.2 定义推进类型
         enum struct AdvanceType
         {
-            PageIter,
-            Changes,
-            Both
+            PageIter,  // 只推进页面迭代器
+            Changes,   // 只推进变更迭代器
+            Both,      // 同时推进两者
         };
 
         std::string_view new_key;
@@ -497,11 +538,11 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
         uint64_t new_ts;
         uint64_t expire_ts;
         AdvanceType adv_type;
-
+        // 7.3 比较现有key和变更key，决定操作类型
         int cmp_ret = cmp->Compare(base_key, change_key);
         if (cmp_ret < 0)
         {
-            // no change
+            // 现有key < 变更key：保持现有数据不变
             new_key = base_key;
             new_val = base_val;
             new_ts = base_ts;
@@ -511,12 +552,14 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
         }
         else if (cmp_ret == 0)
         {
+            // 现有key == 变更key：需要合并操作
             adv_type = AdvanceType::Both;
             if (change_ts >= base_ts)
             {
+                // 变更时间戳更新，应用变更
                 if (base_page_iter.IsOverflow())
                 {
-                    err = DelOverflowValue(base_val);
+                    err = DelOverflowValue(base_val);  // 删除旧的溢出值
                     CHECK_KV_ERR(err);
                 }
                 const uint32_t base_expire = base_page_iter.ExpireTs();
@@ -524,7 +567,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
                 if (change_it->op_ == WriteOp::Delete)
                 {
                     /* DELETE */
-                    new_key = std::string_view{};
+                    new_key = std::string_view{};  // 空key表示删除
                     UpdateTTL(base_expire, base_key, WriteOp::Delete);
                     assert(expire_ts == 0 || expire_ts == base_expire);
                 }
@@ -560,6 +603,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
         }
         else
         {
+            // 现有key > 变更key：插入新数据
             adv_type = AdvanceType::Changes;
             if (change_it->op_ == WriteOp::Delete)
             {
@@ -576,14 +620,14 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
                 UpdateTTL(expire_ts, new_key, WriteOp::Upsert);
             }
         }
-
+        // 7.4 添加确定的KV对到页面
         if (!new_key.empty())
         {
             err = add_to_page(
                 new_key, new_val, is_overflow_ptr, new_ts, expire_ts);
             CHECK_KV_ERR(err);
         }
-
+        // 7.5 根据操作类型推进迭代器
         switch (adv_type)
         {
         case AdvanceType::PageIter:
@@ -598,7 +642,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
             break;
         }
     }
-
+    // 8. 处理剩余的现有数据
     while (is_base_iter_valid)
     {
         // no change
@@ -611,7 +655,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
         CHECK_KV_ERR(err);
         AdvanceDataPageIter(base_page_iter, is_base_iter_valid);
     }
-
+    // 9. 处理剩余的批量变更
     while (change_it != change_end_it)
     {
         if (change_it->op_ == WriteOp::Upsert)
@@ -633,9 +677,9 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
         }
         ++change_it;
     }
-
+    // 10. 完成页面处理
     if (data_page_builder_.IsEmpty())
-    {
+    {  // 页面为空，删除原页面
         if (base_page)
         {
             err = LeafLinkDelete();
@@ -643,18 +687,21 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
             FreePage(applying_page_.GetPageId());
             assert(stack_.back()->changes_.empty() ||
                    stack_.back()->changes_.back().key_ < curr_page_key);
+            // 记录删除操作到索引变更中
             stack_.back()->changes_.emplace_back(
                 std::move(curr_page_key), page_id, WriteOp::Delete);
         }
     }
     else
     {
+        // 完成页面构建
         err = FinishDataPage(std::move(curr_page_key), page_id);
         CHECK_KV_ERR(err);
     }
+    // 11. 更新叶子页面三元组
     assert(!TripleElement(1));
     leaf_triple_[1] = std::move(leaf_triple_[2]);
-
+    // 12. 更新批次处理索引
     cidx = cidx + std::distance(data_batch_.begin() + cidx, change_end_it);
     return KvError::NoError;
 }
