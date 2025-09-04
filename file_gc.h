@@ -1,6 +1,4 @@
 #pragma once
-
-#include <filesystem>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -86,8 +84,6 @@ private:
     }
 };
 
-// use forward declaration to get eloqstore and then use the object_store
-class ObjectStore;
 class CloudFileGarbageCollector : public FileGarbageCollector
 {
 public:

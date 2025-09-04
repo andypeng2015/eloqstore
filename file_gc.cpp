@@ -245,7 +245,7 @@ KvError CloudFileGarbageCollector::Execute(const GcTask &task)
     KvError list_error = KvError::NoError;
     std::vector<std::string> cloud_files;
 
-    auto list_task = std::make_unique<ObjectStore::ListTask>(
+    ObjectStore::ListTask list_task(
         options_,
         table_path,
         &cloud_files,
@@ -293,8 +293,7 @@ KvError CloudFileGarbageCollector::Execute(const GcTask &task)
             list_completed = true;
             cv.notify_one();
         });
-
-    object_store_->submit_q_.enqueue(list_task.release());
+    object_store_->submit_q_.enqueue(&list_task);
 
     {
         std::unique_lock<std::mutex> lock(mtx);
@@ -363,10 +362,11 @@ KvError CloudFileGarbageCollector::Execute(const GcTask &task)
         LOG(INFO) << "No files to delete for table " << table_path;
         return KvError::NoError;
     }
-
+    std::vector<ObjectStore::DeleteTask> delete_tasks;
+    delete_tasks.reserve(files_to_delete.size());
     for (const std::string &file_path : files_to_delete)
     {
-        auto delete_task = std::make_unique<ObjectStore::DeleteTask>(
+        delete_tasks.emplace_back(
             options_,
             file_path,
             [&, file_path](ObjectStore::Task *task)
@@ -387,7 +387,7 @@ KvError CloudFileGarbageCollector::Execute(const GcTask &task)
                 }
             });
 
-        object_store_->submit_q_.enqueue(delete_task.release());
+        object_store_->submit_q_.enqueue(&delete_tasks.back());
     }
 
     // wait for all delete task completed

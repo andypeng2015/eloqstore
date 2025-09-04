@@ -1,5 +1,8 @@
 #pragma once
 
+#include <curl/curl.h>
+#include <jsoncpp/json/json.h>
+
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -9,10 +12,6 @@
 #include "error.h"
 #include "kv_options.h"
 #include "types.h"
-#ifdef USE_RCLONE_HTTP_API
-#include <curl/curl.h>
-#include <jsoncpp/json/json.h>
-#endif
 
 // https://github.com/cameron314/concurrentqueue/issues/280
 #undef BLOCK_SIZE

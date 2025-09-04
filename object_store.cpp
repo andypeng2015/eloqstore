@@ -81,7 +81,7 @@ void ObjectStore::WorkLoop()
     std::array<Task *, 128> tasks;
     // the max concurrent requests to rclone,it need not be too many,
     // because the rclone can not proccess much request
-    const int max_concurrent_requests = 60;
+    const int max_concurrent_requests = 20;
     auto dequeue_tasks = [this, &tasks]() -> int
     {
         size_t ntasks = submit_q_.try_dequeue_bulk(tasks.data(), tasks.size());
@@ -139,7 +139,7 @@ ObjectStore::AsyncHttpManager::AsyncHttpManager(const std::string &daemon_url)
     }
 
     // set the max connections
-    curl_multi_setopt(multi_handle_, CURLMOPT_MAXCONNECTS, 10L);
+    curl_multi_setopt(multi_handle_, CURLMOPT_MAXCONNECTS, 20L);
 }
 
 ObjectStore::AsyncHttpManager::~AsyncHttpManager()
@@ -412,11 +412,6 @@ void ObjectStore::AsyncHttpManager::ProcessCompletedRequests()
                 task->error_ = KvError::CloudErr;
             }
 
-            if (task->callback_)
-            {
-                task->callback_(task);
-            }
-
             // clean resources
             curl_multi_remove_handle(multi_handle_, easy);
 
@@ -424,7 +419,12 @@ void ObjectStore::AsyncHttpManager::ProcessCompletedRequests()
 
             curl_easy_cleanup(easy);
             active_requests_.erase(task->request_id_);
-            delete task;
+
+            // we think clean task done ,so the callback can be called
+            if (task->callback_)
+            {
+                task->callback_(task);
+            }
         }
     }
 }
@@ -521,8 +521,6 @@ void ObjectStore::AsyncHttpManager::Cleanup()
 
         // clean cURL easy handle
         curl_easy_cleanup(active_req.easy_handle);
-
-        delete active_req.task;
     }
     active_requests_.clear();
 }

@@ -1950,25 +1950,18 @@ KvError CloudStoreMgr::DownloadFile(const TableIdent &tbl_id, FileId file_id)
 {
     std::string filename = ToFilename(file_id);
 
-    // the task will be deleted inside object_store, so it should be save the
-    // result when callback
-    KvError result = KvError::NoError;
-    auto async_task = new ObjectStore::DownloadTask(
+    ObjectStore::DownloadTask download_task(
         this,
         ThdTask(),
         &tbl_id,
         filename,
-        [this, &result](ObjectStore::Task *task)
-        {
-            result = task->error_;
-            obj_complete_q_.enqueue(task->kv_task_);
-        });
-
-    obj_store_->submit_q_.enqueue(async_task);
+        [this](ObjectStore::Task *task)
+        { obj_complete_q_.enqueue(task->kv_task_); });
+    obj_store_->submit_q_.enqueue(&download_task);
     ThdTask()->status_ = TaskStatus::Blocked;
     ThdTask()->Yield();
 
-    return result;
+    return download_task.error_;
 }
 
 KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
@@ -1979,24 +1972,19 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
         return KvError::NoError;
     }
 
-    KvError result = KvError::NoError;
-    auto async_task =
-        new ObjectStore::UploadTask(this,
-                                    ThdTask(),
-                                    &tbl_id,
-                                    std::move(filenames),
-                                    [this, &result](ObjectStore::Task *task)
-                                    {
-                                        // save the result before enqueue,task
-                                        // will be deleted after this callback
-                                        result = task->error_;
-                                        obj_complete_q_.enqueue(task->kv_task_);
-                                    });
-    obj_store_->submit_q_.enqueue(async_task);
+    ObjectStore::UploadTask upload_task(
+        this,
+        ThdTask(),
+        &tbl_id,
+        std::move(filenames),
+        [this](ObjectStore::Task *task)
+        { obj_complete_q_.enqueue(task->kv_task_); });
+
+    obj_store_->submit_q_.enqueue(&upload_task);
     ThdTask()->status_ = TaskStatus::Blocked;
     ThdTask()->Yield();
 
-    return result;
+    return upload_task.error_;
 }
 
 TaskType CloudStoreMgr::FileCleaner::Type() const
