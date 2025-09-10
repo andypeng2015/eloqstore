@@ -45,70 +45,39 @@ public:
     };
 
     explicit FileGarbageCollector(const KvOptions *opts) : options_(opts){};
-    virtual ~FileGarbageCollector() = default;
-    void Start(uint16_t n_workers);
+    ~FileGarbageCollector();
+
+    // Local mode methods (using thread pool)
+    void StartLocalThreadPool(uint16_t n_workers);
     void Stop();
     bool AddTask(TableIdent tbl_id,
                  uint64_t ts,
                  FileId max_file_id,
                  std::unordered_set<FileId> retained_files);
 
-    virtual KvError Execute(const GcTask &task) = 0;
+    // Cloud mode method (coroutine-based)
+    KvError ExecuteCloudGC(const TableIdent &tbl_id,
+                           uint64_t mapping_ts,
+                           FileId max_file_id,
+                           const std::unordered_set<FileId> &retained_files,
+                           class CloudStoreMgr *cloud_mgr);
 
-protected:
+private:
     const KvOptions *options_;
 
-    virtual void WorkerRoutine() = 0;
-    virtual const char *GetCollectorName() const = 0;
+    // Local mode implementation
+    KvError ExecuteLocalGC(const GcTask &task);
+    void WorkerRoutine();
 
+    // Cloud mode implementation
+    KvError ProcessManifestFiles(const std::string &table_path,
+                                 uint64_t mapping_ts,
+                                 std::unordered_set<FileId> &all_retained_files,
+                                 ObjectStore *object_store);
+
+    // Thread pool for local mode
     std::vector<std::thread> workers_;
     moodycamel::BlockingConcurrentQueue<GcTask> tasks_;
-};
-
-class LocalFileGarbageCollector : public FileGarbageCollector
-{
-public:
-    explicit LocalFileGarbageCollector(const KvOptions *options)
-        : FileGarbageCollector(options)
-    {
-    }
-    ~LocalFileGarbageCollector() override;
-
-    KvError Execute(const GcTask &task) override;
-
-private:
-    void WorkerRoutine() override;
-    const char *GetCollectorName() const override
-    {
-        return "local file garbage collector";
-    }
-};
-
-class CloudFileGarbageCollector : public FileGarbageCollector
-{
-public:
-    CloudFileGarbageCollector(const KvOptions *options,
-                              ObjectStore *object_store)
-        : FileGarbageCollector(options), object_store_(object_store)
-    {
-    }
-    ~CloudFileGarbageCollector() override;
-
-    KvError Execute(const GcTask &task) override;
-
-private:
-    void WorkerRoutine() override;
-    const char *GetCollectorName() const override
-    {
-        return "cloud file garbage collector";
-    }
-    KvError ExecuteCloudGC(const GcTask &task);
-    KvError ProcessManifestFiles(
-        const std::string &table_path,
-        uint64_t mapping_ts,
-        std::unordered_set<FileId> &all_retained_files);
-
-    ObjectStore *object_store_;
 };
 
 }  // namespace eloqstore

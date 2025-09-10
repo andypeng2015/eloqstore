@@ -99,18 +99,25 @@ KvError EloqStore::Start()
     // Start threads.
     stopped_.store(false, std::memory_order_relaxed);
 
-    if (options_.data_append_mode && options_.cloud_store_path.empty())
+    if (options_.data_append_mode)
     {
-        if (options_.num_gc_threads > 0)
+        // Initialize file garbage collector for both local and cloud modes
+        if (file_gc_ == nullptr)
         {
-            if (file_gc_ == nullptr)
-            {
-                LOG(INFO) << "local file gc started";
-                file_gc_ =
-                    std::make_unique<LocalFileGarbageCollector>(&options_);
-            }
-            file_gc_->Start(options_.num_gc_threads);
+            file_gc_ = std::make_unique<FileGarbageCollector>(&options_);
         }
+
+        // Only start thread pool in local mode
+        if (options_.cloud_store_path.empty() && options_.num_gc_threads > 0)
+        {
+            LOG(INFO) << "local file gc thread pool started";
+            file_gc_->StartLocalThreadPool(options_.num_gc_threads);
+        }
+        else if (!options_.cloud_store_path.empty())
+        {
+            LOG(INFO) << "file gc initialized for cloud mode";
+        }
+
         if (options_.num_retained_archives > 0 &&
             options_.archive_interval_secs > 0)
         {

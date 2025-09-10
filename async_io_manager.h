@@ -362,6 +362,8 @@ public:
                           std::string_view snapshot,
                           uint64_t ts) override;
 
+    ObjectStore* GetObjectStore() { return obj_store_.get(); }
+
 private:
     int CreateFile(LruFD::Ref dir_fd, FileId file_id) override;
     int OpenFile(const TableIdent &tbl_id,

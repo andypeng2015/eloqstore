@@ -42,7 +42,7 @@ bool ReadFileContent(fs::path path, std::string &result)
     file.read(result.data(), size);
     return true;
 }
-void FileGarbageCollector::Start(uint16_t n_workers)
+void FileGarbageCollector::StartLocalThreadPool(uint16_t n_workers)
 {
     assert(workers_.empty());
     workers_.reserve(n_workers);
@@ -50,8 +50,9 @@ void FileGarbageCollector::Start(uint16_t n_workers)
     {
         workers_.emplace_back(&FileGarbageCollector::WorkerRoutine, this);
     }
-    LOG(INFO) << GetCollectorName() << " started";
+    LOG(INFO) << "local file garbage collector started";
 }
+
 void FileGarbageCollector::Stop()
 {
     if (workers_.empty())
@@ -67,7 +68,7 @@ void FileGarbageCollector::Stop()
         w.join();
     }
     workers_.clear();
-    LOG(INFO) << GetCollectorName() << " stopped";
+    LOG(INFO) << "local file garbage collector stopped";
 }
 
 bool FileGarbageCollector::AddTask(TableIdent tbl_id,
@@ -78,12 +79,13 @@ bool FileGarbageCollector::AddTask(TableIdent tbl_id,
     return tasks_.enqueue(
         GcTask(std::move(tbl_id), ts, max_file_id, std::move(retained_files)));
 }
-LocalFileGarbageCollector::~LocalFileGarbageCollector()
+
+FileGarbageCollector::~FileGarbageCollector()
 {
     Stop();
 }
 
-void LocalFileGarbageCollector::WorkerRoutine()
+void FileGarbageCollector::WorkerRoutine()
 {
     while (true)
     {
@@ -94,7 +96,7 @@ void LocalFileGarbageCollector::WorkerRoutine()
             break;
         }
 
-        KvError err = Execute(req);
+        KvError err = ExecuteLocalGC(req);
         if (err != KvError::NoError)
         {
             LOG(ERROR) << "Local GC failed for table " << req.tbl_id_.ToString()
@@ -102,7 +104,7 @@ void LocalFileGarbageCollector::WorkerRoutine()
         }
     }
 }
-KvError LocalFileGarbageCollector::Execute(const GcTask &task)
+KvError FileGarbageCollector::ExecuteLocalGC(const GcTask &task)
 {
     namespace fs = std::filesystem;
 
@@ -211,103 +213,69 @@ KvError LocalFileGarbageCollector::Execute(const GcTask &task)
     }
     return KvError::NoError;
 }
-CloudFileGarbageCollector::~CloudFileGarbageCollector()
+KvError FileGarbageCollector::ExecuteCloudGC(
+    const TableIdent &tbl_id,
+    uint64_t mapping_ts,
+    FileId max_file_id,
+    const std::unordered_set<FileId> &retained_files,
+    CloudStoreMgr *cloud_mgr)
 {
-    Stop();
-}
+    LOG(INFO) << "Starting cloud GC for table " << tbl_id.ToString()
+              << " with mapping_ts " << mapping_ts;
 
-void CloudFileGarbageCollector::WorkerRoutine()
-{
-    while (true)
-    {
-        GcTask req;
-        tasks_.wait_dequeue(req);
-        if (req.IsStopSignal())
-        {
-            break;
-        }
-        KvError err = Execute(req);
-        if (err != KvError::NoError)
-        {
-            LOG(ERROR) << "Cloud GC failed for table " << req.tbl_id_.ToString()
-                       << ", error: " << static_cast<int>(err);
-        }
-    }
-}
-KvError CloudFileGarbageCollector::Execute(const GcTask &task)
-{
-    std::string table_path = task.tbl_id_.ToString();
-
-    std::mutex mtx;
-    std::condition_variable cv;
-    bool list_completed = false;
-    bool delete_completed = false;
-    KvError list_error = KvError::NoError;
+    std::string table_path = tbl_id.ToString();
     std::vector<std::string> cloud_files;
+    KvTask *current_task = ThdTask();
 
-    ObjectStore::ListTask list_task(
-        options_,
-        table_path,
-        &cloud_files,
-        [&](ObjectStore::Task *task)
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            list_error = task->error_;
+    ObjectStore::ListTask list_task(options_,
+                                    table_path,
+                                    &cloud_files,
+                                    [current_task](ObjectStore::Task *task)
+                                    { current_task->Resume(); });
 
-            if (list_error == KvError::NoError)
-            {
-                try
-                {
-                    Json::Value response;
-                    Json::Reader reader;
-                    if (reader.parse(task->response_data_, response))
-                    {
-                        if (response.isMember("list") &&
-                            response["list"].isArray())
-                        {
-                            for (const auto &item : response["list"])
-                            {
-                                if (item.isMember("Name") &&
-                                    item["Name"].isString())
-                                {
-                                    cloud_files.push_back(
-                                        item["Name"].asString());
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        LOG(ERROR) << "Failed to parse JSON response: "
-                                   << task->response_data_;
-                        list_error = KvError::Corrupted;
-                    }
-                }
-                catch (const std::exception &e)
-                {
-                    LOG(ERROR) << "JSON parsing exception: " << e.what();
-                    list_error = KvError::Corrupted;
-                }
-            }
+    cloud_mgr->GetObjectStore()->GetHttpManager()->SubmitRequest(&list_task);
+    current_task->status_ = TaskStatus::Blocked;
+    current_task->Yield();
 
-            list_completed = true;
-            cv.notify_one();
-        });
-    object_store_->submit_q_.enqueue(&list_task);
-
-    {
-        std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock, [&] { return list_completed; });
-    }
-
-    if (list_error != KvError::NoError)
+    if (list_task.error_ != KvError::NoError)
     {
         LOG(ERROR) << "Failed to list cloud files for table " << table_path
-                   << ", error: " << static_cast<int>(list_error);
-        return list_error;
+                   << ", error: " << static_cast<int>(list_task.error_);
+        return list_task.error_;
     }
 
-    // make sure the file should be deleted
+    // Parse response and get cloud files
+    try
+    {
+        Json::Value response;
+        Json::Reader reader;
+        if (reader.parse(list_task.response_data_, response))
+        {
+            if (response.isMember("list") && response["list"].isArray())
+            {
+                for (const auto &item : response["list"])
+                {
+                    if (item.isMember("Name") && item["Name"].isString())
+                    {
+                        cloud_files.push_back(item["Name"].asString());
+                    }
+                }
+            }
+        }
+        else
+        {
+            LOG(ERROR) << "Failed to parse JSON response: "
+                       << list_task.response_data_;
+            return KvError::Corrupted;
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOG(ERROR) << "JSON parsing exception: " << e.what();
+        return KvError::Corrupted;
+    }
+
+    // Determine files to delete
     std::vector<std::string> files_to_delete;
 
     for (const std::string &file_name : cloud_files)
@@ -327,11 +295,10 @@ KvError CloudFileGarbageCollector::Execute(const GcTask &task)
             if (!ret.second.empty())
             {
                 uint64_t ts = std::stoull(ret.second.data());
-                if (ts <= task.mapping_ts_)
+                if (ts <= mapping_ts)
                 {
                     // TODO:
-                    // 这里需要更复杂的逻辑来确定哪些manifest文件应该被删除
-                    // 暂时跳过manifest文件的删除
+                    // 暂时跳过manifest文件的删除,和归档文件的解析
                     continue;
                 }
             }
@@ -340,8 +307,7 @@ KvError CloudFileGarbageCollector::Execute(const GcTask &task)
         {
             // check whether the data file in retained_files
             FileId file_id = std::stoull(ret.second.data());
-            if (file_id < task.max_file_id_ &&
-                !task.retained_files_.contains(file_id))
+            if (file_id < max_file_id && !retained_files.contains(file_id))
             {
                 should_delete = true;
             }
@@ -353,54 +319,70 @@ KvError CloudFileGarbageCollector::Execute(const GcTask &task)
         }
     }
 
-    // remove the need not file
-    std::atomic<int> pending_deletes(files_to_delete.size());
-    KvError final_error = KvError::NoError;
-
     if (files_to_delete.empty())
     {
         LOG(INFO) << "No files to delete for table " << table_path;
         return KvError::NoError;
     }
-    std::vector<ObjectStore::DeleteTask> delete_tasks;
+
+    LOG(INFO) << "Deleting " << files_to_delete.size()
+              << " files from cloud storage";
+
+    // Submit all delete tasks using submit + yield pattern
+    std::atomic<int> pending_deletes(files_to_delete.size());
+    std::atomic<bool> has_error(false);
+    KvError delete_error = KvError::NoError;
+
+    // Store delete tasks to manage their lifecycle
+    std::vector<std::unique_ptr<ObjectStore::DeleteTask>> delete_tasks;
     delete_tasks.reserve(files_to_delete.size());
+
     for (const std::string &file_path : files_to_delete)
     {
-        delete_tasks.emplace_back(
+        auto delete_task = std::make_unique<ObjectStore::DeleteTask>(
             options_,
             file_path,
-            [&, file_path](ObjectStore::Task *task)
+            [&pending_deletes,
+             &has_error,
+             &delete_error,
+             current_task,
+             file_path](ObjectStore::Task *task)
             {
-                if (task->error_ != KvError::NoError)
+                if (task->error_ != KvError::NoError &&
+                    !has_error.exchange(true))
                 {
                     LOG(ERROR) << "Failed to delete cloud file: " << file_path
                                << ", error: " << static_cast<int>(task->error_);
-                    final_error = task->error_;  // record the error and delete
-                                                 // the other file
+                    delete_error = task->error_;
                 }
-                // decrease the pending delete count
-                if (--pending_deletes == 0)
+
+                // If this is the last delete to complete, resume the main task
+                if (pending_deletes.fetch_sub(1) == 1)
                 {
-                    std::lock_guard<std::mutex> lock(mtx);
-                    delete_completed = true;
-                    cv.notify_one();
+                    current_task->Resume();
                 }
+
+                // Note: task will be automatically cleaned up by unique_ptr
             });
 
-        object_store_->submit_q_.enqueue(&delete_tasks.back());
+        cloud_mgr->GetObjectStore()->GetHttpManager()->SubmitRequest(
+            delete_task.get());
+        delete_tasks.push_back(std::move(delete_task));
     }
 
-    // wait for all delete task completed
+    // Block and yield until all deletes complete
+    current_task->status_ = TaskStatus::Blocked;
+    current_task->Yield();
+
+    if (has_error)
     {
-        std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock,
-                [&]
-                {
-                    LOG(INFO) << "delete_completed: " << delete_completed;
-                    return delete_completed;
-                });
+        LOG(ERROR) << "Some delete operations failed: "
+                   << static_cast<int>(delete_error);
+        return delete_error;
     }
 
-    return final_error;
+    LOG(INFO) << "Successfully deleted " << files_to_delete.size()
+              << " files from cloud storage";
+    return KvError::NoError;
 }
 }  // namespace eloqstore
