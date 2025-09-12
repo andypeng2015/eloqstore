@@ -526,7 +526,7 @@ KvError ToKvError(int err_no)
     case -ENOSPC:
         return KvError::OutOfSpace;
     default:
-        LOG(ERROR) << "ToKvError: " << err_no;
+        LOG(FATAL) << "ToKvError: " << err_no;
         return KvError::IoFail;
     }
 }
@@ -1599,6 +1599,7 @@ CloudStoreMgr::CloudStoreMgr(const KvOptions *opts, uint32_t fd_limit)
     lru_file_head_.next_ = &lru_file_tail_;
     lru_file_tail_.prev_ = &lru_file_head_;
     obj_store_ = std::make_unique<ObjectStore>(opts);
+    per_shard_limit_ = opts->local_space_limit / opts->num_threads;
 }
 
 void CloudStoreMgr::Start()
@@ -1894,14 +1895,14 @@ void CloudStoreMgr::EnqueClosedFile(FileKey key)
     lru_file_head_.EnqueNext(&it->second);
 }
 
-bool CloudStoreMgr ::HasEvictableFile() const
+bool CloudStoreMgr::HasEvictableFile() const
 {
     return lru_file_tail_.prev_ != &lru_file_head_;
 }
 
 int CloudStoreMgr::ReserveCacheSpace(size_t size)
 {
-    while (used_local_space_ + size > options_->local_space_limit)
+    while (used_local_space_ + size > per_shard_limit_)
     {
         if (!HasEvictableFile())
         {

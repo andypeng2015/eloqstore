@@ -3,10 +3,8 @@
 #include <jsoncpp/json/json.h>
 
 #include <boost/algorithm/string/predicate.hpp>
-#include <condition_variable>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <unordered_set>
 #include <vector>
 
@@ -213,21 +211,19 @@ KvError FileGarbageCollector::ExecuteLocalGC(const GcTask &task)
     }
     return KvError::NoError;
 }
-KvError FileGarbageCollector::ExecuteCloudGC(
-    const TableIdent &tbl_id,
-    uint64_t mapping_ts,
-    FileId max_file_id,
-    const std::unordered_set<FileId> &retained_files,
-    CloudStoreMgr *cloud_mgr)
-{
-    LOG(INFO) << "Starting cloud GC for table " << tbl_id.ToString()
-              << " with mapping_ts " << mapping_ts;
 
+// Helper functions for cloud GC optimization
+KvError FileGarbageCollector::ListCloudFiles(
+    const TableIdent &tbl_id,
+    std::vector<std::string> &cloud_files,
+    CloudStoreMgr *cloud_mgr,
+    const KvOptions *options)
+{
     std::string table_path = tbl_id.ToString();
-    std::vector<std::string> cloud_files;
     KvTask *current_task = ThdTask();
 
-    ObjectStore::ListTask list_task(options_,
+    // List all files in cloud.
+    ObjectStore::ListTask list_task(options,
                                     table_path,
                                     &cloud_files,
                                     [current_task](ObjectStore::Task *task)
@@ -244,7 +240,7 @@ KvError FileGarbageCollector::ExecuteCloudGC(
         return list_task.error_;
     }
 
-    // Parse response and get cloud files
+    // Parse the JSON response.
     try
     {
         Json::Value response;
@@ -253,6 +249,7 @@ KvError FileGarbageCollector::ExecuteCloudGC(
         {
             if (response.isMember("list") && response["list"].isArray())
             {
+                cloud_files.clear();
                 for (const auto &item : response["list"])
                 {
                     if (item.isMember("Name") && item["Name"].isString())
@@ -275,72 +272,119 @@ KvError FileGarbageCollector::ExecuteCloudGC(
         return KvError::Corrupted;
     }
 
-    // Determine files to delete
-    std::vector<std::string> files_to_delete;
+    return KvError::NoError;
+}
+
+void FileGarbageCollector::ClassifyFiles(
+    const std::vector<std::string> &cloud_files,
+    std::vector<std::string> &archive_files,
+    std::vector<uint64_t> &archive_timestamps,
+    std::vector<std::string> &data_files)
+{
+    archive_files.clear();
+    archive_timestamps.clear();
+    data_files.clear();
 
     for (const std::string &file_name : cloud_files)
     {
-        // skip the tmp file
+        // Ignore temporary files.
         if (boost::algorithm::ends_with(file_name, TmpSuffix))
         {
             continue;
         }
 
+        // rclone list command returns the file name directly, no need to
+        // handle the path prefix.
         auto ret = ParseFileName(file_name);
-        bool should_delete = false;
 
         if (ret.first == FileNameManifest)
         {
-            // check whether out of range of number on manifest
-            if (!ret.second.empty())
+            // archive file: manifest_<timestamp>
+            // Only manifest files with timestamp are archive files.
+            std::string_view ts_str = ret.second;
+            if (!ts_str.empty())
             {
-                uint64_t ts = std::stoull(ret.second.data());
-                if (ts <= mapping_ts)
-                {
-                    // TODO:
-                    // 暂时跳过manifest文件的删除,和归档文件的解析
-                    continue;
-                }
+                uint64_t timestamp = std::stoull(std::string(ts_str));
+                archive_files.push_back(file_name);
+                archive_timestamps.push_back(timestamp);
             }
+            // Manifest files without timestamp are current manifest, ignore.
         }
         else if (ret.first == FileNameData)
         {
-            // check whether the data file in retained_files
-            FileId file_id = std::stoull(ret.second.data());
-            if (file_id < max_file_id && !retained_files.contains(file_id))
-            {
-                should_delete = true;
-            }
+            // data file: data_<file_id>
+            data_files.push_back(file_name);
         }
+        // Ignore other types of files.
+    }
+}
 
-        if (should_delete)
-        {
-            files_to_delete.push_back(table_path + "/" + file_name);
-        }
+KvError FileGarbageCollector::DownloadArchiveFile(
+    const TableIdent &tbl_id,
+    const std::string &archive_file,
+    std::string &content,
+    CloudStoreMgr *cloud_mgr,
+    const KvOptions *options)
+{
+    KvTask *current_task = ThdTask();
+
+    // Download the archive file.
+    ObjectStore::DownloadTask download_task(
+        cloud_mgr,
+        &tbl_id,
+        archive_file,
+        [current_task](ObjectStore::Task *task) { current_task->Resume(); });
+
+    cloud_mgr->GetObjectStore()->GetHttpManager()->SubmitRequest(
+        &download_task);
+    current_task->status_ = TaskStatus::Blocked;
+    current_task->Yield();
+
+    if (download_task.error_ != KvError::NoError)
+    {
+        LOG(ERROR) << "Failed to download archive file: " << archive_file
+                   << ", error: " << static_cast<int>(download_task.error_);
+        return download_task.error_;
     }
 
+    fs::path local_path = tbl_id.StorePath(options->store_path) / archive_file;
+    if (!ReadFileContent(local_path.string(), content))
+    {
+        LOG(ERROR) << "Failed to read downloaded archive file: " << local_path;
+        return KvError::IoFail;
+    }
+
+    // remove the temporary file.
+    fs::remove(local_path);
+
+    LOG(INFO) << "Successfully downloaded and read archive file: "
+              << archive_file;
+    return KvError::NoError;
+}
+
+KvError FileGarbageCollector::BatchDeleteCloudFiles(
+    const TableIdent &tbl_id,
+    const std::vector<std::string> &files_to_delete,
+    CloudStoreMgr *cloud_mgr,
+    const KvOptions *options)
+{
     if (files_to_delete.empty())
     {
-        LOG(INFO) << "No files to delete for table " << table_path;
         return KvError::NoError;
     }
 
-    LOG(INFO) << "Deleting " << files_to_delete.size()
-              << " files from cloud storage";
-
-    // Submit all delete tasks using submit + yield pattern
+    KvTask *current_task = ThdTask();
     std::atomic<int> pending_deletes(files_to_delete.size());
     std::atomic<bool> has_error(false);
     KvError delete_error = KvError::NoError;
 
-    // Store delete tasks to manage their lifecycle
     std::vector<std::unique_ptr<ObjectStore::DeleteTask>> delete_tasks;
     delete_tasks.reserve(files_to_delete.size());
 
     for (const std::string &file_path : files_to_delete)
     {
         auto delete_task = std::make_unique<ObjectStore::DeleteTask>(
-            options_,
+            options,
             file_path,
             [&pending_deletes,
              &has_error,
@@ -351,18 +395,15 @@ KvError FileGarbageCollector::ExecuteCloudGC(
                 if (task->error_ != KvError::NoError &&
                     !has_error.exchange(true))
                 {
-                    LOG(ERROR) << "Failed to delete cloud file: " << file_path
-                               << ", error: " << static_cast<int>(task->error_);
                     delete_error = task->error_;
+                    LOG(ERROR) << "Failed to delete file " << file_path << ": "
+                               << ErrorString(task->error_);
                 }
 
-                // If this is the last delete to complete, resume the main task
                 if (pending_deletes.fetch_sub(1) == 1)
                 {
                     current_task->Resume();
                 }
-
-                // Note: task will be automatically cleaned up by unique_ptr
             });
 
         cloud_mgr->GetObjectStore()->GetHttpManager()->SubmitRequest(
@@ -370,19 +411,200 @@ KvError FileGarbageCollector::ExecuteCloudGC(
         delete_tasks.push_back(std::move(delete_task));
     }
 
-    // Block and yield until all deletes complete
     current_task->status_ = TaskStatus::Blocked;
     current_task->Yield();
 
-    if (has_error)
+    return has_error ? delete_error : KvError::NoError;
+}
+
+FileId FileGarbageCollector::ParseArchiveForMaxFileId(
+    const std::string &archive_content)
+{
+    MemStoreMgr::Manifest manifest(archive_content);
+    Replayer replayer(options_);
+
+    KvError err = replayer.Replay(&manifest);
+    if (err != KvError::NoError)
     {
-        LOG(ERROR) << "Some delete operations failed: "
-                   << static_cast<int>(delete_error);
-        return delete_error;
+        if (err == KvError::Corrupted)
+        {
+            LOG(ERROR) << "Found corrupted archive content";
+            return 0;  // Corrupted archive, ignore.
+        }
+        LOG(ERROR) << "Failed to replay archive: " << static_cast<int>(err);
+        return 0;
     }
 
-    LOG(INFO) << "Successfully deleted " << files_to_delete.size()
-              << " files from cloud storage";
+    // Find the maximum file ID from the mapping table.
+    FileId max_file_id = 0;
+    const uint8_t pages_per_file_shift = options_->pages_per_file_shift;
+
+    for (uint64_t val : replayer.mapping_tbl_)
+    {
+        if (MappingSnapshot::IsFilePageId(val))
+        {
+            FilePageId fp_id = MappingSnapshot::DecodeId(val);
+            FileId file_id = fp_id >> pages_per_file_shift;
+            if (file_id > max_file_id)
+            {
+                max_file_id = file_id;
+            }
+        }
+    }
+
+    return max_file_id;
+}
+
+KvError FileGarbageCollector::GetOrUpdateArchivedMaxFileId(
+    const TableIdent &tbl_id,
+    const std::vector<std::string> &archive_files,
+    const std::vector<uint64_t> &archive_timestamps,
+    uint64_t mapping_ts,
+    FileId &archived_max_file_id,
+    CloudStoreMgr *cloud_mgr)
+{
+    // 1. check cached max file id.
+    auto &cached_max_ids = cloud_mgr->archived_max_file_ids_;
+    auto it = cached_max_ids.find(tbl_id);
+    if (it != cached_max_ids.end())
+    {
+        archived_max_file_id = it->second;
+        return KvError::NoError;
+    }
+
+    // 2. find the latest archive file (timestamp <= mapping_ts).
+    // mapping_ts is the current timestamp, ensure only completed archive files
+    // are processed.
+    std::string latest_archive;
+    uint64_t latest_ts = 0;
+    for (size_t i = 0; i < archive_files.size(); ++i)
+    {
+        uint64_t ts = archive_timestamps[i];
+        if (ts <= mapping_ts && ts > latest_ts)
+        {
+            latest_ts = ts;
+            latest_archive = archive_files[i];
+        }
+    }
+
+    if (latest_archive.empty())
+    {
+        // No available archive file, use default value.
+        archived_max_file_id = 0;
+        cached_max_ids[tbl_id] = archived_max_file_id;
+        return KvError::NoError;
+    }
+
+    // 3. download the latest archive file.
+    std::string archive_content;
+    KvError download_err = DownloadArchiveFile(tbl_id,
+                                               latest_archive,
+                                               archive_content,
+                                               cloud_mgr,
+                                               cloud_mgr->options_);
+    if (download_err != KvError::NoError)
+    {
+        return download_err;
+    }
+
+    // 4. parse the archive file to get the maximum file ID.
+    archived_max_file_id = ParseArchiveForMaxFileId(archive_content);
+
+    // 6. cache the result.
+    cached_max_ids[tbl_id] = archived_max_file_id;
+
+    return KvError::NoError;
+}
+
+KvError FileGarbageCollector::DeleteUnreferencedDataFiles(
+    const TableIdent &tbl_id,
+    const std::vector<std::string> &data_files,
+    FileId max_file_id,
+    const std::unordered_set<FileId> &retained_files,
+    FileId archived_max_file_id,
+    CloudStoreMgr *cloud_mgr)
+{
+    std::vector<std::string> files_to_delete;
+
+    for (const std::string &file_name : data_files)
+    {
+        auto ret = ParseFileName(file_name);
+        if (ret.first != FileNameData)
+        {
+            continue;
+        }
+
+        FileId file_id = std::stoull(ret.second.data());
+
+        // Only delete files that meet the following conditions:
+        // 1. File ID < max_file_id (not the current writing file)
+        // 2. File ID > archived_max_file_id (greater than the archived max file
+        // ID)
+        // 3. Not in retained_files (files not needed in the current version)
+        if (file_id < max_file_id && file_id > archived_max_file_id &&
+            !retained_files.contains(file_id))
+        {
+            std::string remote_path = tbl_id.ToString() + "/" + file_name;
+            files_to_delete.push_back(remote_path);
+        }
+    }
+
+    if (files_to_delete.empty())
+    {
+        return KvError::NoError;
+    }
+
+    // Batch delete cloud files.
+    return BatchDeleteCloudFiles(
+        tbl_id, files_to_delete, cloud_mgr, cloud_mgr->options_);
+}
+
+KvError FileGarbageCollector::ExecuteCloudGC(
+    const TableIdent &tbl_id,
+    uint64_t mapping_ts,
+    FileId max_file_id,
+    const std::unordered_set<FileId> &retained_files,
+    CloudStoreMgr *cloud_mgr)
+{
+    // 1. list all files in cloud.
+    std::vector<std::string> cloud_files;
+    KvError err = ListCloudFiles(tbl_id, cloud_files, cloud_mgr, options_);
+    if (err != KvError::NoError)
+    {
+        return err;
+    }
+
+    // 2. classify files.
+    std::vector<std::string> archive_files;
+    std::vector<uint64_t> archive_timestamps;
+    std::vector<std::string> data_files;
+    ClassifyFiles(cloud_files, archive_files, archive_timestamps, data_files);
+
+    // 3. get or update archived max file id.
+    FileId archived_max_file_id = 0;
+    err = GetOrUpdateArchivedMaxFileId(tbl_id,
+                                       archive_files,
+                                       archive_timestamps,
+                                       mapping_ts,
+                                       archived_max_file_id,
+                                       cloud_mgr);
+    if (err != KvError::NoError)
+    {
+        return err;
+    }
+
+    // 4. delete unreferenced data files.
+    err = DeleteUnreferencedDataFiles(tbl_id,
+                                      data_files,
+                                      max_file_id,
+                                      retained_files,
+                                      archived_max_file_id,
+                                      cloud_mgr);
+    if (err != KvError::NoError)
+    {
+        return err;
+    }
+
     return KvError::NoError;
 }
 }  // namespace eloqstore

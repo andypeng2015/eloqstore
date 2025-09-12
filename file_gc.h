@@ -75,6 +75,40 @@ private:
                                  std::unordered_set<FileId> &all_retained_files,
                                  ObjectStore *object_store);
 
+    KvError ListCloudFiles(const TableIdent &tbl_id,
+                           std::vector<std::string> &cloud_files,
+                           class CloudStoreMgr *cloud_mgr,
+                           const KvOptions *options);
+    void ClassifyFiles(const std::vector<std::string> &cloud_files,
+                       std::vector<std::string> &archive_files,
+                       std::vector<uint64_t> &archive_timestamps,
+                       std::vector<std::string> &data_files);
+    KvError DownloadArchiveFile(const TableIdent &tbl_id,
+                                const std::string &archive_file,
+                                std::string &content,
+                                class CloudStoreMgr *cloud_mgr,
+                                const KvOptions *options);
+    KvError BatchDeleteCloudFiles(
+        const TableIdent &tbl_id,
+        const std::vector<std::string> &files_to_delete,
+        class CloudStoreMgr *cloud_mgr,
+        const KvOptions *options);
+    FileId ParseArchiveForMaxFileId(const std::string &archive_content);
+    KvError GetOrUpdateArchivedMaxFileId(
+        const TableIdent &tbl_id,
+        const std::vector<std::string> &archive_files,
+        const std::vector<uint64_t> &archive_timestamps,
+        uint64_t mapping_ts,
+        FileId &archived_max_file_id,
+        class CloudStoreMgr *cloud_mgr);
+    KvError DeleteUnreferencedDataFiles(
+        const TableIdent &tbl_id,
+        const std::vector<std::string> &data_files,
+        FileId max_file_id,
+        const std::unordered_set<FileId> &retained_files,
+        FileId archived_max_file_id,
+        class CloudStoreMgr *cloud_mgr);
+
     // Thread pool for local mode
     std::vector<std::thread> workers_;
     moodycamel::BlockingConcurrentQueue<GcTask> tasks_;

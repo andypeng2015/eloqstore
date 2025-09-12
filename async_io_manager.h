@@ -95,6 +95,8 @@ public:
     virtual void CleanTable(const TableIdent &tbl_id) = 0;
 
     const KvOptions *options_;
+
+    std::unordered_map<TableIdent, FileId> archived_max_file_ids_;
 };
 
 KvError ToKvError(int err_no);
@@ -362,7 +364,10 @@ public:
                           std::string_view snapshot,
                           uint64_t ts) override;
 
-    ObjectStore* GetObjectStore() { return obj_store_.get(); }
+    ObjectStore *GetObjectStore()
+    {
+        return obj_store_.get();
+    }
 
 private:
     int CreateFile(LruFD::Ref dir_fd, FileId file_id) override;
@@ -419,6 +424,7 @@ private:
     CachedFile lru_file_head_;
     CachedFile lru_file_tail_;
     size_t used_local_space_{0};
+    size_t per_shard_limit_{0};
 
     /**
      * @brief A background task to evict cached files when local space is full.
