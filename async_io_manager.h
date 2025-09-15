@@ -357,6 +357,7 @@ public:
     void Start() override;
     bool IsIdle() override;
     void Stop() override;
+    void Submit() override;
     void PollComplete() override;
     KvError SwitchManifest(const TableIdent &tbl_id,
                            std::string_view snapshot) override;

@@ -6,15 +6,24 @@
 #include <filesystem>
 
 #include "async_io_manager.h"
+#include "task.h"
 namespace eloqstore
 {
 namespace fs = std::filesystem;
 std::atomic<uint64_t> ObjectStore::Task::next_request_id_{1};
-ObjectStore::ObjectStore(const KvOptions *options) : options_(options)
+
+void ObjectStore::Task::FinishIo()
+{
+    if (inflight_io_.fetch_sub(1) == 1 && kv_task_)
+    {
+        kv_task_->Resume();
+    }
+}
+ObjectStore::ObjectStore(AsyncIoManager *io_mgr)
 {
     curl_global_init(CURL_GLOBAL_DEFAULT);
     async_http_mgr_ =
-        std::make_unique<AsyncHttpManager>("http://127.0.0.1:5572");
+        std::make_unique<AsyncHttpManager>("http://127.0.0.1:5572", io_mgr);
 }
 
 ObjectStore::~ObjectStore()
@@ -22,8 +31,9 @@ ObjectStore::~ObjectStore()
     curl_global_cleanup();
 }
 
-AsyncHttpManager::AsyncHttpManager(const std::string &daemon_url)
-    : daemon_url_(daemon_url)
+AsyncHttpManager::AsyncHttpManager(const std::string &daemon_url,
+                                   AsyncIoManager *io_mgr)
+    : daemon_url_(daemon_url), io_mgr_(io_mgr)
 {
     multi_handle_ = curl_multi_init();
     if (!multi_handle_)
@@ -43,6 +53,11 @@ AsyncHttpManager::~AsyncHttpManager()
         curl_multi_cleanup(multi_handle_);
     }
 }
+void AsyncHttpManager::PerformRequests()
+{
+    curl_multi_perform(multi_handle_, &running_handles_);
+}
+
 void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)
 {
     CURL *easy = curl_easy_init();
@@ -50,10 +65,7 @@ void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)
     {
         LOG(ERROR) << "Failed to initialize cURL easy handle";
         task->error_ = KvError::CloudErr;
-        if (task->callback_)
-        {
-            task->callback_(task);
-        }
+        task->FinishIo();
         return;
     }
 
@@ -95,12 +107,12 @@ void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)
                    << curl_multi_strerror(mres);
         curl_easy_cleanup(easy);
         task->error_ = KvError::CloudErr;
-        if (task->callback_)
-        {
-            task->callback_(task);
-        }
+        task->FinishIo();
         return;
     }
+
+    // increment inflight_io_ when request is successfully submitted
+    task->inflight_io_.fetch_add(1);
 
     // record the active request
     active_requests_[task->request_id_] = {task, easy};
@@ -109,12 +121,11 @@ void AsyncHttpManager::SetupDownloadRequest(ObjectStore::DownloadTask *task,
                                             CURL *easy)
 {
     Json::Value request;
-    request["srcFs"] = task->io_mgr_->options_->cloud_store_path + "/" +
-                       task->tbl_id_->ToString();
+    request["srcFs"] =
+        io_mgr_->options_->cloud_store_path + "/" + task->tbl_id_->ToString();
     request["srcRemote"] = task->filename_;
 
-    fs::path dir_path =
-        task->tbl_id_->StorePath(task->io_mgr_->options_->store_path);
+    fs::path dir_path = task->tbl_id_->StorePath(io_mgr_->options_->store_path);
     request["dstFs"] = dir_path.string();
     request["dstRemote"] = task->filename_;
 
@@ -137,8 +148,7 @@ void AsyncHttpManager::SetupDownloadRequest(ObjectStore::DownloadTask *task,
 void AsyncHttpManager::SetupMultipartUpload(ObjectStore::UploadTask *task,
                                             CURL *easy)
 {
-    fs::path dir_path =
-        task->tbl_id_->StorePath(task->io_mgr_->options_->store_path);
+    fs::path dir_path = task->tbl_id_->StorePath(io_mgr_->options_->store_path);
 
     // use the new MIME API
     curl_mime *mime = curl_mime_init(easy);
@@ -154,8 +164,8 @@ void AsyncHttpManager::SetupMultipartUpload(ObjectStore::UploadTask *task,
         }
     }
 
-    std::string fs_param = task->io_mgr_->options_->cloud_store_path + "/" +
-                           task->tbl_id_->ToString();
+    std::string fs_param =
+        io_mgr_->options_->cloud_store_path + "/" + task->tbl_id_->ToString();
     std::string url =
         daemon_url_ + "/operations/uploadfile?fs=" + fs_param + "&remote=";
 
@@ -168,7 +178,7 @@ void AsyncHttpManager::SetupMultipartUpload(ObjectStore::UploadTask *task,
 void AsyncHttpManager::SetupListRequest(ObjectStore::ListTask *task, CURL *easy)
 {
     Json::Value request;
-    request["fs"] = task->options_->cloud_store_path;
+    request["fs"] = io_mgr_->options_->cloud_store_path;
     request["remote"] = task->remote_path_;
     request["opt"] = Json::Value(Json::objectValue);
     request["opt"]["recurse"] = false;
@@ -192,9 +202,16 @@ void AsyncHttpManager::SetupListRequest(ObjectStore::ListTask *task, CURL *easy)
 void AsyncHttpManager::SetupDeleteRequest(ObjectStore::DeleteTask *task,
                                           CURL *easy)
 {
+    // Process single file based on current_index_
+    if (task->current_index_ >= task->file_paths_.size())
+    {
+        LOG(ERROR) << "DeleteTask current_index_ out of range";
+        return;
+    }
+
     Json::Value request;
-    request["fs"] = task->options_->cloud_store_path;
-    request["remote"] = task->file_path_;  // 只删除第一个
+    request["fs"] = io_mgr_->options_->cloud_store_path;
+    request["remote"] = task->file_paths_[task->current_index_];
 
     Json::StreamWriterBuilder builder;
     task->json_data_ = Json::writeString(builder, request);
@@ -214,8 +231,10 @@ void AsyncHttpManager::SetupDeleteRequest(ObjectStore::DeleteTask *task,
 
 void AsyncHttpManager::ProcessCompletedRequests()
 {
-    int running_handles;
-    curl_multi_perform(multi_handle_, &running_handles);
+    if (IsIdle())
+    {
+        return;
+    }
 
     CURLMsg *msg;
     int msgs_left;
@@ -315,11 +334,8 @@ void AsyncHttpManager::ProcessCompletedRequests()
             curl_easy_cleanup(easy);
             active_requests_.erase(task->request_id_);
 
-            // we think clean task done ,so the callback can be called
-            if (task->callback_)
-            {
-                task->callback_(task);
-            }
+            // we think clean task done, so finish the IO
+            task->FinishIo();
         }
     }
 }

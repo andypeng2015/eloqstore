@@ -223,11 +223,10 @@ KvError FileGarbageCollector::ListCloudFiles(
     KvTask *current_task = ThdTask();
 
     // List all files in cloud.
-    ObjectStore::ListTask list_task(options,
-                                    table_path,
-                                    &cloud_files,
-                                    [current_task](ObjectStore::Task *task)
-                                    { current_task->Resume(); });
+    ObjectStore::ListTask list_task(table_path, &cloud_files);
+
+    // Set KvTask pointer and initialize inflight_io_
+    list_task.SetKvTask(current_task);
 
     cloud_mgr->GetObjectStore()->GetHttpManager()->SubmitRequest(&list_task);
     current_task->status_ = TaskStatus::Blocked;
@@ -329,11 +328,10 @@ KvError FileGarbageCollector::DownloadArchiveFile(
     KvTask *current_task = ThdTask();
 
     // Download the archive file.
-    ObjectStore::DownloadTask download_task(
-        cloud_mgr,
-        &tbl_id,
-        archive_file,
-        [current_task](ObjectStore::Task *task) { current_task->Resume(); });
+    ObjectStore::DownloadTask download_task(&tbl_id, archive_file);
+
+    // Set KvTask pointer and initialize inflight_io_
+    download_task.SetKvTask(current_task);
 
     cloud_mgr->GetObjectStore()->GetHttpManager()->SubmitRequest(
         &download_task);
@@ -360,61 +358,6 @@ KvError FileGarbageCollector::DownloadArchiveFile(
     LOG(INFO) << "Successfully downloaded and read archive file: "
               << archive_file;
     return KvError::NoError;
-}
-
-KvError FileGarbageCollector::BatchDeleteCloudFiles(
-    const TableIdent &tbl_id,
-    const std::vector<std::string> &files_to_delete,
-    CloudStoreMgr *cloud_mgr,
-    const KvOptions *options)
-{
-    if (files_to_delete.empty())
-    {
-        return KvError::NoError;
-    }
-
-    KvTask *current_task = ThdTask();
-    std::atomic<int> pending_deletes(files_to_delete.size());
-    std::atomic<bool> has_error(false);
-    KvError delete_error = KvError::NoError;
-
-    std::vector<std::unique_ptr<ObjectStore::DeleteTask>> delete_tasks;
-    delete_tasks.reserve(files_to_delete.size());
-
-    for (const std::string &file_path : files_to_delete)
-    {
-        auto delete_task = std::make_unique<ObjectStore::DeleteTask>(
-            options,
-            file_path,
-            [&pending_deletes,
-             &has_error,
-             &delete_error,
-             current_task,
-             file_path](ObjectStore::Task *task)
-            {
-                if (task->error_ != KvError::NoError &&
-                    !has_error.exchange(true))
-                {
-                    delete_error = task->error_;
-                    LOG(ERROR) << "Failed to delete file " << file_path << ": "
-                               << ErrorString(task->error_);
-                }
-
-                if (pending_deletes.fetch_sub(1) == 1)
-                {
-                    current_task->Resume();
-                }
-            });
-
-        cloud_mgr->GetObjectStore()->GetHttpManager()->SubmitRequest(
-            delete_task.get());
-        delete_tasks.push_back(std::move(delete_task));
-    }
-
-    current_task->status_ = TaskStatus::Blocked;
-    current_task->Yield();
-
-    return has_error ? delete_error : KvError::NoError;
 }
 
 FileId FileGarbageCollector::ParseArchiveForMaxFileId(
@@ -554,9 +497,36 @@ KvError FileGarbageCollector::DeleteUnreferencedDataFiles(
         return KvError::NoError;
     }
 
-    // Batch delete cloud files.
-    return BatchDeleteCloudFiles(
-        tbl_id, files_to_delete, cloud_mgr, cloud_mgr->options_);
+    // Delete cloud files directly
+    KvTask *current_task = ThdTask();
+
+    // Create delete task for all files
+    auto delete_task =
+        std::make_unique<ObjectStore::DeleteTask>(files_to_delete);
+
+    // Set KvTask pointer
+    delete_task->SetKvTask(current_task);
+
+    // Submit each file separately by updating current_index_
+    for (size_t i = 0; i < delete_task->file_paths_.size(); ++i)
+    {
+        delete_task->current_index_ = i;
+        cloud_mgr->GetObjectStore()->GetHttpManager()->SubmitRequest(
+            delete_task.get());
+    }
+
+    current_task->status_ = TaskStatus::Blocked;
+    current_task->Yield();
+
+    // Check for errors after all tasks complete
+    if (delete_task->error_ != KvError::NoError)
+    {
+        LOG(ERROR) << "Failed to delete files: "
+                   << ErrorString(delete_task->error_);
+        return delete_task->error_;
+    }
+
+    return KvError::NoError;
 }
 
 KvError FileGarbageCollector::ExecuteCloudGC(

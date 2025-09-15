@@ -88,11 +88,7 @@ private:
                                 std::string &content,
                                 class CloudStoreMgr *cloud_mgr,
                                 const KvOptions *options);
-    KvError BatchDeleteCloudFiles(
-        const TableIdent &tbl_id,
-        const std::vector<std::string> &files_to_delete,
-        class CloudStoreMgr *cloud_mgr,
-        const KvOptions *options);
+
     FileId ParseArchiveForMaxFileId(const std::string &archive_content);
     KvError GetOrUpdateArchivedMaxFileId(
         const TableIdent &tbl_id,

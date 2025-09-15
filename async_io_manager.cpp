@@ -526,7 +526,7 @@ KvError ToKvError(int err_no)
     case -ENOSPC:
         return KvError::OutOfSpace;
     default:
-        LOG(FATAL) << "ToKvError: " << err_no;
+        LOG(ERROR) << "ToKvError: " << err_no;
         return KvError::IoFail;
     }
 }
@@ -1598,7 +1598,7 @@ CloudStoreMgr::CloudStoreMgr(const KvOptions *opts, uint32_t fd_limit)
 {
     lru_file_head_.next_ = &lru_file_tail_;
     lru_file_tail_.prev_ = &lru_file_head_;
-    obj_store_ = std::make_unique<ObjectStore>(opts);
+    obj_store_ = std::make_unique<ObjectStore>(this);
     per_shard_limit_ = opts->local_space_limit / opts->num_threads;
 }
 
@@ -1621,6 +1621,13 @@ bool CloudStoreMgr::IsIdle()
 void CloudStoreMgr::Stop()
 {
     file_cleaner_.Shutdown();
+}
+
+void CloudStoreMgr::Submit()
+{
+    obj_store_->GetHttpManager()->PerformRequests();
+
+    IouringMgr::Submit();
 }
 
 void CloudStoreMgr::PollComplete()
@@ -1925,11 +1932,10 @@ KvError CloudStoreMgr::DownloadFile(const TableIdent &tbl_id, FileId file_id)
     KvTask *current_task = ThdTask();
     std::string filename = ToFilename(file_id);
 
-    ObjectStore::DownloadTask download_task(
-        this,
-        &tbl_id,
-        filename,
-        [current_task](ObjectStore::Task *task) { current_task->Resume(); });
+    ObjectStore::DownloadTask download_task(&tbl_id, filename);
+
+    // Set KvTask pointer and initialize inflight_io_
+    download_task.SetKvTask(current_task);
 
     obj_store_->GetHttpManager()->SubmitRequest(&download_task);
     current_task->status_ = TaskStatus::Blocked;
@@ -1948,11 +1954,10 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
 
     KvTask *current_task = ThdTask();
 
-    ObjectStore::UploadTask upload_task(this,
-                                        &tbl_id,
-                                        std::move(filenames),
-                                        [current_task](ObjectStore::Task *task)
-                                        { current_task->Resume(); });
+    ObjectStore::UploadTask upload_task(&tbl_id, std::move(filenames));
+
+    // Set KvTask pointer and initialize inflight_io_
+    upload_task.SetKvTask(current_task);
 
     obj_store_->GetHttpManager()->SubmitRequest(&upload_task);
     current_task->status_ = TaskStatus::Blocked;
