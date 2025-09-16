@@ -164,10 +164,11 @@ impl PageBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::DataPage;
+    use crate::page::{DataPage, DataPageBuilder};
 
     #[test]
     fn test_page_builder() {
+        // Test the basic PageBuilder functionality
         let mut builder = PageBuilder::new(4096);
 
         // Add some entries
@@ -184,11 +185,35 @@ mod tests {
         // Build page
         let page = builder.build().unwrap();
         assert!(page.verify_checksum());
+    }
 
-        // TODO: PageBuilder and DataPage use different formats
-        // The test for reading back the page is disabled until formats are unified
-        // let data_page = DataPage::from_page(0, page);
-        // assert_eq!(data_page.entry_count(), 10);
+    #[test]
+    fn test_data_page_builder_compatibility() {
+        // Test DataPageBuilder creates pages that DataPage can read
+        let mut builder = DataPageBuilder::new(4096);
+
+        // Add some entries
+        for i in 0..10 {
+            let key = format!("key_{:04}", i);
+            let value = format!("value_{}", i);
+            let added = builder.add(
+                key.as_bytes(),
+                value.as_bytes(),
+                i as u64,     // timestamp
+                None,         // no expiry
+                false,        // not overflow
+            );
+            assert!(added, "Failed to add entry {}", i);
+        }
+
+        assert!(!builder.is_empty());
+
+        // Build page
+        let data_page = builder.finish(0);
+
+        // Verify we can read it back
+        assert_eq!(data_page.entry_count(), 10);
+        assert_eq!(data_page.restart_count(), 1); // Should have at least one restart point
     }
 
     #[test]

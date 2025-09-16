@@ -13,7 +13,8 @@ using namespace eloqstore::test;
 class ScanTaskTestFixture : public TestFixture {
 public:
     ScanTaskTestFixture() {
-        table_ = GetTable();
+        InitStoreWithDefaults();
+        table_ = CreateTestTable("scan_test");
         InitTestData();
     }
 
@@ -24,13 +25,8 @@ public:
             std::string value = gen_.GenerateValue(100);
             test_data_[key] = value;
 
-            // Write to store
-            auto write_req = std::make_unique<BatchWriteRequest>();
-            std::vector<WriteDataEntry> batch;
-            batch.emplace_back(key, value, 0, WriteOp::Put);
-            write_req->SetArgs(table_, std::move(batch));
-
-            auto err = GetStore()->ExecSync(write_req.get());
+            // Use the TestFixture's WriteSync method
+            KvError err = WriteSync(table_, key, value);
             REQUIRE(err == KvError::NoError);
         }
     }
@@ -38,21 +34,9 @@ public:
     KvError ScanRange(const std::string& start_key,
                       const std::string& end_key,
                       std::vector<KvEntry>& results,
-                      size_t limit = SIZE_MAX) {
-        auto scan_req = std::make_unique<ScanRequest>();
-        scan_req->SetArgs(table_, start_key, end_key, true);
-
-        auto err = GetStore()->ExecSync(scan_req.get());
-        if (err == KvError::NoError) {
-            auto entries = scan_req->Entries();
-            size_t count = 0;
-            for (const auto& entry : entries) {
-                if (count >= limit) break;
-                results.push_back(entry);
-                count++;
-            }
-        }
-        return err;
+                      uint32_t limit = 100) {
+        // Use the TestFixture's ScanSync method
+        return ScanSync(table_, start_key, end_key, results, limit);
     }
 
 protected:
@@ -71,15 +55,9 @@ TEST_CASE_METHOD(ScanTaskTestFixture, "ScanTask_BasicScan", "[scan][task][unit]"
         if (!results.empty()) {
             // Should return results in order
             for (size_t i = 1; i < results.size(); ++i) {
-                REQUIRE(results[i-1].key < results[i].key);
+                REQUIRE(results[i-1].key_ < results[i].key_);
             }
         }
-    }
-
-    SECTION("Reverse scan placeholder") {
-        // Reverse scan not directly supported via ScanRequest
-        // Would need to be implemented separately if needed
-        REQUIRE(true); // Placeholder
     }
 
     SECTION("Range scan") {
@@ -93,13 +71,13 @@ TEST_CASE_METHOD(ScanTaskTestFixture, "ScanTask_BasicScan", "[scan][task][unit]"
 
         // Verify all results are within range
         for (const auto& entry : results) {
-            REQUIRE(entry.key >= start_key);
-            REQUIRE(entry.key < end_key);
+            REQUIRE(entry.key_ >= start_key);
+            REQUIRE(entry.key_ < end_key);
         }
     }
 
     SECTION("Limited scan") {
-        size_t limit = 10;
+        uint32_t limit = 10;
         std::vector<KvEntry> results;
         KvError err = ScanRange("", "~", results, limit);
 
@@ -134,7 +112,7 @@ TEST_CASE_METHOD(ScanTaskTestFixture, "ScanTask_EdgeCases", "[scan][task][edge]"
 
         if (err == KvError::NoError && !results.empty()) {
             REQUIRE(results.size() == 1);
-            REQUIRE(results[0].key == key);
+            REQUIRE(results[0].key_ == key);
         }
     }
 
@@ -161,39 +139,32 @@ TEST_CASE_METHOD(ScanTaskTestFixture, "ScanTask_Pagination", "[scan][task][pagin
     SECTION("Page-based scan") {
         std::string next_key = "";
         std::vector<KvEntry> all_results;
-        size_t page_size = 10;
+        uint32_t page_size = 10;
 
         while (true) {
-            auto scan_req = std::make_unique<ScanRequest>();
-            scan_req->SetArgs(table_, next_key, "~", true);
-
-            auto err = GetStore()->ExecSync(scan_req.get());
+            std::vector<KvEntry> page_results;
+            KvError err = ScanRange(next_key, "~", page_results, page_size);
             REQUIRE(err == KvError::NoError);
 
-            auto entries = scan_req->Entries();
-            if (entries.empty()) break;
+            if (page_results.empty()) break;
 
-            size_t count = 0;
-            for (const auto& entry : entries) {
-                if (count >= page_size) break;
+            for (const auto& entry : page_results) {
                 all_results.push_back(entry);
-                next_key = std::string(entry.key);
-                count++;
             }
 
-            if (count < page_size || !scan_req->HasRemaining()) {
-                break;
-            }
+            // Move to next page
+            next_key = page_results.back().key_;
+            // Skip the last key by adding a null byte
+            next_key.push_back('\0');
 
-            // Move to next key for pagination
-            if (!next_key.empty()) {
-                next_key.push_back('\0');  // Ensure we skip the current key
+            if (page_results.size() < page_size) {
+                break;  // Last page
             }
         }
 
         // Verify we got all data in order
         for (size_t i = 1; i < all_results.size(); ++i) {
-            REQUIRE(all_results[i-1].key < all_results[i].key);
+            REQUIRE(all_results[i-1].key_ < all_results[i].key_);
         }
     }
 }
@@ -204,13 +175,7 @@ TEST_CASE_METHOD(ScanTaskTestFixture, "ScanTask_Performance", "[scan][task][perf
         for (int i = 100; i < 1000; ++i) {
             std::string key = gen_.GenerateSequentialKey(i);
             std::string value = gen_.GenerateValue(100);
-
-            auto write_req = std::make_unique<BatchWriteRequest>();
-            std::vector<WriteDataEntry> batch;
-            batch.emplace_back(key, value, 0, WriteOp::Put);
-            write_req->SetArgs(table_, std::move(batch));
-
-            GetStore()->ExecSync(write_req.get());
+            WriteSync(table_, key, value);
         }
 
         Timer timer;
@@ -242,10 +207,7 @@ TEST_CASE_METHOD(ScanTaskTestFixture, "ScanTask_Concurrent", "[scan][task][concu
                 std::string start = gen_.GenerateSequentialKey(i * 20);
                 std::string end = gen_.GenerateSequentialKey((i + 1) * 20);
 
-                auto scan_req = std::make_unique<ScanRequest>();
-                scan_req->SetArgs(table_, start, end, true);
-
-                auto err = GetStore()->ExecSync(scan_req.get());
+                KvError err = ScanSync(table_, start, end, results);
 
                 if (err == KvError::NoError) {
                     success_count++;
@@ -274,12 +236,7 @@ TEST_CASE_METHOD(ScanTaskTestFixture, "ScanTask_Concurrent", "[scan][task][concu
                 std::string key = gen_.GenerateSequentialKey(key_num++);
                 std::string value = gen_.GenerateValue(50);
 
-                auto write_req = std::make_unique<BatchWriteRequest>();
-                std::vector<WriteDataEntry> batch;
-                batch.emplace_back(key, value, 0, WriteOp::Put);
-                write_req->SetArgs(table_, std::move(batch));
-
-                GetStore()->ExecSync(write_req.get());
+                WriteSync(table_, key, value);
                 writes_done++;
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -289,10 +246,7 @@ TEST_CASE_METHOD(ScanTaskTestFixture, "ScanTask_Concurrent", "[scan][task][concu
         // Perform scans while writing
         for (int i = 0; i < 10; ++i) {
             std::vector<KvEntry> results;
-            auto scan_req = std::make_unique<ScanRequest>();
-            scan_req->SetArgs(table_, "", "~", true);
-
-            auto err = GetStore()->ExecSync(scan_req.get());
+            KvError err = ScanSync(table_, "", "~", results);
             REQUIRE(err == KvError::NoError);
 
             std::this_thread::sleep_for(std::chrono::milliseconds(10));

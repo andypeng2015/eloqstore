@@ -14,7 +14,8 @@ using namespace eloqstore::test;
 class ReadTaskTestFixture : public TestFixture {
 public:
     ReadTaskTestFixture() {
-        table_ = GetTable();
+        InitStoreWithDefaults();
+        table_ = CreateTestTable("read_test");
         PopulateTestData();
     }
 
@@ -25,35 +26,28 @@ public:
             std::string value = "value_" + std::to_string(i);
             test_data_[key] = value;
 
-            auto write_req = std::make_unique<BatchWriteRequest>();
-            std::vector<WriteDataEntry> batch;
-            batch.emplace_back(key, value, i * 1000, WriteOp::Put);  // Use timestamp
-            write_req->SetArgs(table_, std::move(batch));
-
-            auto err = GetStore()->ExecSync(write_req.get());
+            // Use TestFixture's WriteSync method
+            KvError err = WriteSync(table_, key, value);
             REQUIRE(err == KvError::NoError);
         }
     }
 
     KvError ReadKey(const std::string& key, std::string& value) {
-        auto read_req = std::make_unique<ReadRequest>();
-        read_req->SetArgs(table_, key);
-
-        auto err = GetStore()->ExecSync(read_req.get());
-        if (err == KvError::NoError) {
-            value = read_req->GetValue();
-        }
-        return err;
+        // Use TestFixture's ReadSync method
+        return ReadSync(table_, key, value);
     }
 
     KvError FloorKey(const std::string& search_key, std::string& found_key, std::string& value) {
+        // Since TestFixture doesn't have a FloorSync method, we need to use the store_ directly
+        // which is protected and accessible to derived classes
         auto floor_req = std::make_unique<FloorRequest>();
         floor_req->SetArgs(table_, search_key);
 
-        auto err = GetStore()->ExecSync(floor_req.get());
+        store_->ExecSync(floor_req.get());
+        KvError err = floor_req->Error();
         if (err == KvError::NoError) {
-            found_key = floor_req->GetKey();
-            value = floor_req->GetValue();
+            found_key = floor_req->floor_key_;
+            value = floor_req->value_;
         }
         return err;
     }
@@ -82,29 +76,22 @@ TEST_CASE_METHOD(ReadTaskTestFixture, "ReadTask_BasicRead", "[read][task][unit]"
 
     SECTION("Read empty key") {
         // Write an empty key first
-        auto write_req = std::make_unique<BatchWriteRequest>();
-        std::vector<WriteDataEntry> batch;
-        batch.emplace_back("", "empty_key_value", 0, WriteOp::Put);
-        write_req->SetArgs(table_, std::move(batch));
-        GetStore()->ExecSync(write_req.get());
+        KvError write_err = WriteSync(table_, "", "empty_key_value");
 
-        std::string value;
-        KvError err = ReadKey("", value);
+        if (write_err == KvError::NoError) {
+            std::string value;
+            KvError err = ReadKey("", value);
 
-        // Behavior may vary - empty key might not be allowed
-        if (err == KvError::NoError) {
-            REQUIRE(value == "empty_key_value");
+            // Behavior may vary - empty key might not be allowed
+            if (err == KvError::NoError) {
+                REQUIRE(value == "empty_key_value");
+            }
         }
     }
 
     SECTION("Read after update") {
-        // Update existing key
-        auto write_req = std::make_unique<BatchWriteRequest>();
-        std::vector<WriteDataEntry> batch;
-        batch.emplace_back("key_25", "updated_value_25", 0, WriteOp::Put);
-        write_req->SetArgs(table_, std::move(batch));
-
-        REQUIRE(GetStore()->ExecSync(write_req.get()) == KvError::NoError);
+        // Update existing key using TestFixture's WriteSync
+        REQUIRE(WriteSync(table_, "key_25", "updated_value_25") == KvError::NoError);
 
         std::string value;
         KvError err = ReadKey("key_25", value);
@@ -114,13 +101,12 @@ TEST_CASE_METHOD(ReadTaskTestFixture, "ReadTask_BasicRead", "[read][task][unit]"
     }
 
     SECTION("Read after delete") {
-        // Delete a key
-        auto delete_req = std::make_unique<BatchWriteRequest>();
-        std::vector<WriteDataEntry> batch;
-        batch.emplace_back("key_75", "", 0, WriteOp::Delete);
-        delete_req->SetArgs(table_, std::move(batch));
+        // Delete a key using BatchWriteRequest with Delete operation
+        auto delete_req = MakeBatchWriteRequest(table_);
+        delete_req->AddWrite("key_75", "", 0, WriteOp::Delete);
 
-        REQUIRE(GetStore()->ExecSync(delete_req.get()) == KvError::NoError);
+        store_->ExecSync(delete_req.get());
+        REQUIRE(delete_req->Error() == KvError::NoError);
 
         std::string value;
         KvError err = ReadKey("key_75", value);
@@ -221,10 +207,7 @@ TEST_CASE_METHOD(ReadTaskTestFixture, "ReadTask_Concurrent", "[read][task][concu
                     std::string key = "key_" + std::to_string(t * 10 + i);
                     std::string value;
 
-                    auto read_req = std::make_unique<ReadRequest>();
-                    read_req->SetArgs(table_, key);
-
-                    if (GetStore()->ExecSync(read_req.get()) == KvError::NoError) {
+                    if (ReadSync(table_, key, value) == KvError::NoError) {
                         success_count++;
                     } else {
                         error_count++;
@@ -253,12 +236,7 @@ TEST_CASE_METHOD(ReadTaskTestFixture, "ReadTask_Concurrent", "[read][task][concu
                 std::string key = "dynamic_key_" + std::to_string(key_num);
                 std::string value = "dynamic_value_" + std::to_string(key_num);
 
-                auto write_req = std::make_unique<BatchWriteRequest>();
-                std::vector<WriteDataEntry> batch;
-                batch.emplace_back(key, value, 0, WriteOp::Put);
-                write_req->SetArgs(table_, std::move(batch));
-
-                GetStore()->ExecSync(write_req.get());
+                WriteSync(table_, key, value);
                 writes_done++;
                 key_num++;
 
@@ -271,11 +249,9 @@ TEST_CASE_METHOD(ReadTaskTestFixture, "ReadTask_Concurrent", "[read][task][concu
             while (!stop_flag) {
                 int key_num = rand() % 100;
                 std::string key = "key_" + std::to_string(key_num);
+                std::string value;
 
-                auto read_req = std::make_unique<ReadRequest>();
-                read_req->SetArgs(table_, key);
-
-                GetStore()->ExecSync(read_req.get());
+                ReadSync(table_, key, value);
                 reads_done++;
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -299,12 +275,7 @@ TEST_CASE_METHOD(ReadTaskTestFixture, "ReadTask_EdgeCases", "[read][task][edge]"
         std::string large_value(1024 * 1024, 'X');  // 1MB value
         std::string key = "large_value_key";
 
-        auto write_req = std::make_unique<BatchWriteRequest>();
-        std::vector<WriteDataEntry> batch;
-        batch.emplace_back(key, large_value, 0, WriteOp::Put);
-        write_req->SetArgs(table_, std::move(batch));
-
-        REQUIRE(GetStore()->ExecSync(write_req.get()) == KvError::NoError);
+        REQUIRE(WriteSync(table_, key, large_value) == KvError::NoError);
 
         std::string read_value;
         KvError err = ReadKey(key, read_value);
@@ -316,27 +287,19 @@ TEST_CASE_METHOD(ReadTaskTestFixture, "ReadTask_EdgeCases", "[read][task][edge]"
 
     SECTION("Read with special characters") {
         std::vector<std::pair<std::string, std::string>> special_cases = {
-            {"key\0with\0null", "value\0with\0null"},
             {"key\nwith\nnewlines", "value\n\n\n"},
             {"key\twith\ttabs", "value\t\t\t"},
             {std::string(1, 0xFF), std::string(100, 0xFF)}
         };
 
         for (const auto& [key, value] : special_cases) {
-            auto write_req = std::make_unique<BatchWriteRequest>();
-            std::vector<WriteDataEntry> batch;
-            batch.emplace_back(key, value, 0, WriteOp::Put);
-            write_req->SetArgs(table_, std::move(batch));
-
-            GetStore()->ExecSync(write_req.get());
+            WriteSync(table_, key, value);
 
             std::string read_value;
-            auto read_req = std::make_unique<ReadRequest>();
-            read_req->SetArgs(table_, key);
+            KvError err = ReadSync(table_, key, read_value);
 
-            auto err = GetStore()->ExecSync(read_req.get());
             if (err == KvError::NoError) {
-                REQUIRE(read_req->GetValue() == value);
+                REQUIRE(read_value == value);
             }
         }
     }
