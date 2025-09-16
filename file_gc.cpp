@@ -346,14 +346,15 @@ KvError FileGarbageCollector::DownloadArchiveFile(
     }
 
     fs::path local_path = tbl_id.StorePath(options->store_path) / archive_file;
-    if (!ReadFileContent(local_path.string(), content))
-    {
-        LOG(ERROR) << "Failed to read downloaded archive file: " << local_path;
-        return KvError::IoFail;
-    }
 
-    // remove the temporary file.
-    fs::remove(local_path);
+    KvError err =
+        cloud_mgr->ReadArchiveFileAndDelete(local_path.string(), content);
+    if (err != KvError::NoError)
+    {
+        LOG(ERROR) << "Failed to read archive file: " << local_path
+                   << ", error: " << static_cast<int>(err);
+        return err;
+    }
 
     LOG(INFO) << "Successfully downloaded and read archive file: "
               << archive_file;

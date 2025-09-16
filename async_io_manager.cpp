@@ -1966,6 +1966,106 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
     return upload_task.error_;
 }
 
+KvError CloudStoreMgr::ReadArchiveFileAndDelete(const std::string &file_path,
+                                                std::string &content)
+{
+    KvTask *current_task = ThdTask();
+
+    // Step 1: Async open file
+    current_task->inflight_io_++;
+    io_uring_sqe *open_sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_openat(open_sqe, AT_FDCWD, file_path.c_str(), O_RDONLY, 0);
+
+    int fd = current_task->WaitIoResult();
+
+    if (fd < 0)
+    {
+        LOG(ERROR) << "Failed to open file: " << file_path << ", error: " << fd;
+        return ToKvError(fd);
+    }
+
+    // Step 2: Get file size
+    struct stat file_stat;
+    if (stat(file_path.c_str(), &file_stat) != 0)
+    {
+        io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+        io_uring_prep_close(sqe, fd);
+        int res = current_task->WaitIoResult();
+        if (res < 0)
+        {
+            LOG(ERROR) << "Failed to close file: " << file_path
+                       << ", error: " << res;
+        }
+        LOG(ERROR) << "Failed to get file size: " << file_path;
+        return KvError::IoFail;
+    }
+
+    size_t file_size = file_stat.st_size;
+    content.resize(file_size);
+
+    // Step 3: Async read file content
+    current_task->inflight_io_++;
+    io_uring_sqe *read_sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_read(read_sqe, fd, content.data(), file_size, 0);
+
+    int read_res = current_task->WaitIoResult();
+    if (read_res < 0)
+    {
+        io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+        io_uring_prep_close(sqe, fd);
+        int res = current_task->WaitIoResult();
+        if (res < 0)
+        {
+            LOG(ERROR) << "Failed to close file: " << file_path
+                       << ", error: " << res;
+        }
+        LOG(ERROR) << "Failed to read file: " << file_path
+                   << ", error: " << read_res;
+        return ToKvError(read_res);
+    }
+
+    if (static_cast<size_t>(read_res) != file_size)
+    {
+        io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+        io_uring_prep_close(sqe, fd);
+        int res = current_task->WaitIoResult();
+        if (res < 0)
+        {
+            LOG(ERROR) << "Failed to close file: " << file_path
+                       << ", error: " << res;
+        }
+        LOG(ERROR) << "Partial read: expected " << file_size << ", got "
+                   << read_res;
+        return KvError::IoFail;
+    }
+
+    // Step 4: Close file
+    io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_close(sqe, fd);
+    int res = current_task->WaitIoResult();
+    if (res < 0)
+    {
+        LOG(ERROR) << "Failed to close file: " << file_path
+                   << ", error: " << res;
+    }
+
+    // Step 5: Async unlink file
+    current_task->inflight_io_++;
+    io_uring_sqe *unlink_sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_unlinkat(unlink_sqe, AT_FDCWD, file_path.c_str(), 0);
+
+    int unlink_res = current_task->WaitIoResult();
+
+    if (unlink_res < 0)
+    {
+        LOG(WARNING) << "Failed to unlink file: " << file_path
+                     << ", error: " << unlink_res;
+        // Don't return error for unlink failure, as we already got the content
+    }
+
+    return KvError::NoError;
+}
+
 TaskType CloudStoreMgr::FileCleaner::Type() const
 {
     return TaskType::EvictFile;

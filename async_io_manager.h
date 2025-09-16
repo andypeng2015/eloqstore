@@ -370,6 +370,9 @@ public:
         return obj_store_.get();
     }
 
+    KvError ReadArchiveFileAndDelete(const std::string &file_path,
+                                     std::string &content);
+
 private:
     int CreateFile(LruFD::Ref dir_fd, FileId file_id) override;
     int OpenFile(const TableIdent &tbl_id,
