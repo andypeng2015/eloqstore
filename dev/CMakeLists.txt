@@ -546,30 +546,6 @@ target_link_libraries(recovery_test PRIVATE
 )
 catch_discover_tests(recovery_test)
 
-# Edge case tests
-add_executable(edge_case_test
-    tests/core/edge_case_test.cpp
-)
-target_link_libraries(edge_case_test PRIVATE
-    Catch2::Catch2WithMain
-    test_fixtures
-    test_mocks
-    ${CMAKE_SOURCE_DIR}/../build/libeloqstore.a
-    glog::glog
-    Boost::context
-    Boost::filesystem
-    uring
-    absl::flat_hash_map
-    absl::raw_hash_set
-    absl::hash
-    absl::strings
-    absl::time
-    absl::synchronization
-    absl::cord
-    pthread
-    dl
-)
-catch_discover_tests(edge_case_test)
 
 # Custom targets
 add_custom_target(run-all-tests

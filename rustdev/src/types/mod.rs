@@ -16,8 +16,8 @@ pub type PageId = u32;
 /// Maximum valid page ID
 pub const MAX_PAGE_ID: PageId = u32::MAX;
 
-// Re-export FilePageId and its constant
-mod file_page_id;
+// FilePageId module and re-exports
+pub mod file_page_id;
 pub use file_page_id::{FilePageId, MAX_FILE_PAGE_ID};
 
 /// File identifier

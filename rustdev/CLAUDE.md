@@ -6,7 +6,7 @@
 **C++ Code**: Located in `../` (read-only reference)
 
 ## 🎯 Current Priority Tasks
-1. **Clean up codebase** - Remove old task files, consolidate types
+1. ✅ ~~**Clean up codebase**~~ - Completed: Removed old files, consolidated types
 2. **Implement Store core** - Port `eloq_store.cpp`
 3. **Fix task TODOs** - Complete read/write page lookup logic
 4. **Port shard system** - Implement coroutine scheduling from `shard.cpp`
@@ -15,7 +15,7 @@
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Types & Errors | ✅ Done | Need consolidation |
+| Types & Errors | ✅ Done | Consolidated and organized |
 | Page System | ✅ Done | Working |
 | I/O Backend | ✅ Done | Abstraction layer created |
 | Index System | ✅ Done | IndexPageManager complete |
@@ -26,22 +26,10 @@
 
 ## 🔧 Immediate Actions Needed
 
-### Remove These Files
-```
-src/task/read.rs
-src/task/write.rs
-src/task/scan.rs
-src/task/background.rs
-```
-
 ### Fix These Files
-- `src/task/read_v2.rs` - Line 56-58, 153-159 (TODO: page lookup)
-- `src/task/write_v2.rs` - Line 136-137, 303-305 (TODO: page allocation)
-- `src/store/mod.rs` - Implement actual store logic
-
-### Consolidate
-- Move `src/types.rs` → `src/types/mod.rs`
-- Clarify `src/error.rs` vs `src/api/error.rs`
+- `src/task/read.rs` - Line 56-58, 153-159 (TODO: page lookup)
+- `src/task/write.rs` - Line 136-137, 303-305 (TODO: page allocation)
+- `src/store/mod.rs` - Implement actual store logic from `eloq_store.cpp`
 
 ## 📚 C++ Reference Map
 
