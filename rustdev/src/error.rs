@@ -90,9 +90,56 @@ pub enum Error {
     /// Generic internal error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// Not implemented
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// KV error codes matching C++ KvError enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvError {
+    NoError = 0,
+    NotFound = 1,
+    Corruption = 2,
+    NotSupported = 3,
+    InvalidArgument = 4,
+    IoError = 5,
+    MergeInProgress = 6,
+    Incomplete = 7,
+    ShutdownInProgress = 8,
+    TimedOut = 9,
+    Aborted = 10,
+    Busy = 11,
+    Expired = 12,
+    TryAgain = 13,
+    OutOfMemory = 14,
+    OutOfRange = 15,
+    NoSpace = 16,
+}
+
+impl From<KvError> for Error {
+    fn from(err: KvError) -> Self {
+        match err {
+            KvError::NoError => Error::Internal("NoError converted to Error".into()),
+            KvError::NotFound => Error::NotFound,
+            KvError::Corruption => Error::Corruption("Unknown".into()),
+            KvError::NotSupported => Error::NotSupported("Unknown".into()),
+            KvError::InvalidArgument => Error::InvalidArgument("Unknown".into()),
+            KvError::IoError => Error::Io(io::Error::new(io::ErrorKind::Other, "Unknown")),
+            KvError::ShutdownInProgress => Error::ShuttingDown,
+            KvError::TimedOut => Error::Timeout,
+            KvError::Aborted => Error::Cancelled,
+            KvError::Busy => Error::WouldBlock,
+            KvError::TryAgain => Error::WouldBlock,
+            KvError::OutOfMemory => Error::OutOfMemory,
+            KvError::NoSpace => Error::StorageFull,
+            _ => Error::Internal(format!("KvError {:?}", err)),
+        }
+    }
+}
 
 impl Error {
     pub fn is_retryable(&self) -> bool {

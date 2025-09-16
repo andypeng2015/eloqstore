@@ -41,6 +41,7 @@ pub enum ValueLenBit {
 /// |data blob|restart array(N*2B)|restart num(2B)|padding bytes|
 /// +---------+-------------------+---------------+-------------+
 /// ```
+#[derive(Debug)]
 pub struct DataPage {
     /// Page ID
     page_id: PageId,

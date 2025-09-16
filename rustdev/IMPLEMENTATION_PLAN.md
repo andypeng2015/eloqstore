@@ -38,6 +38,14 @@ This document outlines a comprehensive plan to rewrite EloqStore from C++ to Rus
 
 ## 2. Directory Structure
 
+### Current Issues Found:
+- ❌ **Duplicate types**: `src/types.rs` (5556 lines) exists alongside `src/types/file_page_id.rs`
+- ❌ **Obsolete files**: Old task implementations still exist but commented out
+- ❌ **Missing core**: `src/store/` only has minimal stub implementation
+- ❌ **Inconsistent I/O**: Multiple I/O abstractions without clear integration
+- ❌ **Incomplete tasks**: Read/write tasks have TODO placeholders
+
+### Intended Structure:
 ```
 eloqstore-rs/
 ├── Cargo.toml
@@ -305,56 +313,78 @@ bindgen = "0.70"  # If FFI needed
 
 ## 5. Implementation Roadmap
 
-### Phase 1: Foundation (Weeks 1-2)
-- [ ] Set up Rust project structure
-- [ ] Implement basic types and errors
-- [ ] Create configuration system
-- [ ] Implement page structures and encoding
-- [ ] Set up testing framework
+### Phase 1: Foundation ✅ COMPLETED
+- [x] Set up Rust project structure
+- [x] Implement basic types and errors
+- [x] Create configuration system (`src/config/kv_options.rs`)
+- [x] Implement page structures and encoding
+- [x] Set up testing framework
 
-### Phase 2: Core Storage (Weeks 3-4)
-- [ ] Implement data page with restart points
-- [ ] Create page builder and iterator
-- [ ] Implement overflow page handling
-- [ ] Build page mapper (logical to physical)
-- [ ] Create basic file I/O manager
+### Phase 2: Core Storage ✅ MOSTLY COMPLETE
+- [x] Implement data page with restart points (`src/page/data_page.rs`)
+- [x] Create page builder and iterator (`src/page/data_page_builder.rs`)
+- [x] Implement overflow page handling (`src/page/overflow_page.rs`)
+- [x] Build page mapper (logical to physical) (`src/page/page_mapper.rs`)
+- [x] Create basic file I/O manager (`src/storage/async_file_manager.rs`)
 
-### Phase 3: Async I/O (Weeks 5-6)
-- [ ] Integrate tokio-uring for io_uring
-- [ ] Implement buffer ring management
-- [ ] Create async file operations
-- [ ] Build batch I/O operations
-- [ ] Add I/O completion handling
+### Phase 3: Async I/O ✅ COMPLETED (WITH ABSTRACTION)
+- [x] ~~Integrate tokio-uring for io_uring~~ Created I/O abstraction layer instead
+- [x] Implement buffer ring management (`src/io/backend/`)
+- [x] Create async file operations
+- [x] Build batch I/O operations
+- [x] Add I/O completion handling
 
-### Phase 4: Task System (Weeks 7-8)
-- [ ] Design task trait system
-- [ ] Implement read task
-- [ ] Implement write/batch write tasks
+### Phase 4: Task System 🚧 IN PROGRESS
+- [x] Design task trait system (`src/task/traits.rs`)
+- [🚧] Implement read task (`src/task/read_v2.rs` - has TODOs)
+- [🚧] Implement write/batch write tasks (`src/task/write_v2.rs` - has TODOs)
 - [ ] Create scan task with iterators
 - [ ] Build background tasks (compaction, GC)
 
-### Phase 5: Shard System (Weeks 9-10)
-- [ ] Implement shard worker threads
+### Phase 5: Shard System 🔴 TODO
+- [x] Basic shard structure (`src/shard/shard.rs`)
+- [ ] Implement shard worker threads (port from C++ coroutines)
 - [ ] Create work distribution system
 - [ ] Build request routing
 - [ ] Add task scheduling
 - [ ] Implement backpressure mechanisms
 
-### Phase 6: Index Management (Weeks 11-12)
-- [ ] Design in-memory index structure
-- [ ] Implement index page management
-- [ ] Create index caching layer
+### Phase 6: Index Management ✅ MOSTLY COMPLETE
+- [x] Design in-memory index structure (`src/index/index_page.rs`)
+- [x] Implement index page management (`src/index/index_page_manager.rs`)
+- [x] Create index caching layer (LRU in IndexPageManager)
 - [ ] Add bloom filters
 - [ ] Build index persistence
 
-### Phase 7: Advanced Features (Weeks 13-14)
+### Phase 7: Store Core Implementation 🔴 HIGH PRIORITY
+- [ ] Implement EloqStore main interface (`src/store/eloq_store.rs`)
+- [ ] Port request routing from C++
+- [ ] Implement shard management
+- [ ] Add lifecycle management (init, start, stop)
+- [ ] Complete store builder pattern
+
+### Phase 8: Fix Task Implementations 🔴 HIGH PRIORITY
+- [ ] Complete read task logic (remove TODOs)
+- [ ] Complete write task page allocation
+- [ ] Implement proper delete logic
+- [ ] Add proper page lookup using PageMapper
+- [ ] Test task execution
+
+### Phase 9: Code Cleanup 🔴 NEEDED
+- [ ] Remove obsolete task files (read.rs, write.rs, scan.rs, background.rs)
+- [ ] Consolidate src/types.rs into src/types/mod.rs
+- [ ] Clarify error module separation
+- [ ] Remove duplicate implementations
+- [ ] Fix all remaining TODOs
+
+### Phase 10: Advanced Features 🔵 LATER
 - [ ] Add cloud storage support
 - [ ] Implement append-mode optimizations
 - [ ] Create archive management
 - [ ] Add compression support
 - [ ] Build manifest handling
 
-### Phase 8: Testing and Optimization (Weeks 15-16)
+### Phase 11: Testing and Optimization 🔵 LATER
 - [ ] Comprehensive unit tests
 - [ ] Integration testing suite
 - [ ] Stress testing framework
@@ -362,7 +392,7 @@ bindgen = "0.70"  # If FFI needed
 - [ ] Memory leak detection
 - [ ] Fuzzing implementation
 
-### Phase 9: Documentation and Polish (Week 17)
+### Phase 12: Documentation and Polish 🔵 LATER
 - [ ] API documentation
 - [ ] Usage examples
 - [ ] Performance tuning guide

@@ -1,0 +1,30 @@
+# LeakSanitizer suppressions for EloqStore tests
+#
+# Format: leak:<pattern>
+# where pattern can be a function name or source file
+
+# Boost.Context - Known to have some allocations that appear as leaks
+leak:boost::context::
+
+# glog - Global initialization that's not freed
+leak:google::InitGoogleLogging
+leak:google::LogMessage
+
+# io_uring - Kernel interface allocations
+leak:io_uring_queue_init
+leak:io_uring_register_buffers
+
+# Thread-local storage in tests
+leak:__tls_get_addr
+
+# Catch2 test framework - Global registries
+leak:Catch::
+leak:Catch2::
+
+# OpenSSL initialization
+leak:OPENSSL_init_crypto
+leak:CRYPTO_malloc
+
+# System libraries
+leak:_dl_init
+leak:pthread_once

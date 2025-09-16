@@ -18,7 +18,7 @@ pub struct PageMapping {
 }
 
 /// Snapshot of page mappings at a point in time
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MappingSnapshot {
     /// Page mappings indexed by logical page ID
     mappings: Arc<BTreeMap<PageId, PageMapping>>,
@@ -78,6 +78,14 @@ impl MappingSnapshot {
         self.mappings.contains_key(&page_id)
     }
 
+    /// Convert logical page ID to file page ID (following C++ ToFilePage)
+    pub fn to_file_page(&self, page_id: PageId) -> crate::Result<FilePageId> {
+        self.mappings
+            .get(&page_id)
+            .map(|m| m.file_page_id)
+            .ok_or_else(|| crate::error::Error::NotFound)
+    }
+
     /// Get total number of pages
     pub fn len(&self) -> usize {
         self.mappings.len()
@@ -90,31 +98,32 @@ impl MappingSnapshot {
 }
 
 /// Page mapper manages logical to physical page mappings
+#[derive(Debug, Clone)]
 pub struct PageMapper {
     /// Current mappings
-    mappings: RwLock<BTreeMap<PageId, PageMapping>>,
+    mappings: Arc<RwLock<BTreeMap<PageId, PageMapping>>>,
     /// Next available logical page ID
-    next_page_id: RwLock<PageId>,
-    /// Next available file page ID
-    next_file_page_id: RwLock<FilePageId>,
+    next_page_id: Arc<RwLock<PageId>>,
+    /// Next available file page ID (as raw u64)
+    next_file_page_id: Arc<RwLock<u64>>,
     /// Current file ID
-    current_file_id: RwLock<FileId>,
+    current_file_id: Arc<RwLock<FileId>>,
     /// Version counter for snapshots
-    version_counter: RwLock<u64>,
+    version_counter: Arc<RwLock<u64>>,
     /// File page allocations by file ID
-    file_allocations: RwLock<HashMap<FileId, Vec<FilePageId>>>,
+    file_allocations: Arc<RwLock<HashMap<FileId, Vec<FilePageId>>>>,
 }
 
 impl PageMapper {
     /// Create a new page mapper
     pub fn new() -> Self {
         Self {
-            mappings: RwLock::new(BTreeMap::new()),
-            next_page_id: RwLock::new(0),
-            next_file_page_id: RwLock::new(0),
-            current_file_id: RwLock::new(0),
-            version_counter: RwLock::new(0),
-            file_allocations: RwLock::new(HashMap::new()),
+            mappings: Arc::new(RwLock::new(BTreeMap::new())),
+            next_page_id: Arc::new(RwLock::new(0)),
+            next_file_page_id: Arc::new(RwLock::new(0)),
+            current_file_id: Arc::new(RwLock::new(0)),
+            version_counter: Arc::new(RwLock::new(0)),
+            file_allocations: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -135,11 +144,11 @@ impl PageMapper {
     pub fn allocate_file_page(&self) -> Result<FilePageId> {
         let mut next_id = self.next_file_page_id.write().unwrap();
 
-        if *next_id == MAX_FILE_PAGE_ID {
+        if *next_id >= MAX_FILE_PAGE_ID.raw() {
             return Err(Error::StorageFull);
         }
 
-        let file_page_id = *next_id;
+        let file_page_id = FilePageId::from_raw(*next_id);
         *next_id += 1;
 
         // Track allocation in current file

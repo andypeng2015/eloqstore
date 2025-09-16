@@ -1,0 +1,138 @@
+# Valgrind suppressions file for EloqStore tests
+#
+# This file contains suppressions for known false positives and
+# third-party library issues that we cannot fix.
+
+# Boost.Context suppressions
+{
+   boost_context_make_fcontext
+   Memcheck:Leak
+   fun:*
+   ...
+   fun:*make_fcontext*
+}
+
+{
+   boost_context_jump_fcontext
+   Memcheck:Leak
+   fun:*
+   ...
+   fun:*jump_fcontext*
+}
+
+# glog suppressions
+{
+   glog_initialization
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:*google*InitGoogleLogging*
+}
+
+{
+   glog_vlog
+   Memcheck:Leak
+   fun:*
+   ...
+   fun:*google*VLOG*
+}
+
+# io_uring suppressions
+{
+   io_uring_queue_init
+   Memcheck:Leak
+   fun:calloc
+   fun:io_uring_queue_init*
+}
+
+{
+   io_uring_mmap
+   Memcheck:Param
+   mmap(length)
+   fun:mmap
+   fun:io_uring_queue_mmap
+}
+
+# pthread suppressions for thread-local storage
+{
+   pthread_tls
+   Memcheck:Leak
+   fun:calloc
+   fun:allocate_dtv
+   fun:pthread_create@@GLIBC_*
+}
+
+{
+   pthread_once
+   Memcheck:Leak
+   fun:malloc
+   fun:pthread_once
+}
+
+# Standard library suppressions
+{
+   std_locale
+   Memcheck:Leak
+   fun:*
+   ...
+   fun:*locale*
+}
+
+{
+   std_thread
+   Memcheck:Leak
+   fun:*
+   ...
+   obj:*/libstdc++.so.*
+   fun:*thread*
+}
+
+# OpenSSL suppressions (for SHA256 in data integrity tests)
+{
+   openssl_init
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:OPENSSL_init_crypto
+}
+
+{
+   openssl_sha256
+   Memcheck:Leak
+   fun:*
+   ...
+   fun:SHA256*
+}
+
+# Catch2 test framework suppressions
+{
+   catch2_registry
+   Memcheck:Leak
+   fun:*
+   ...
+   fun:*Catch*Registry*
+}
+
+{
+   catch2_singleton
+   Memcheck:Leak
+   fun:*
+   ...
+   fun:*Catch*singleton*
+}
+
+# System library suppressions
+{
+   dl_init
+   Memcheck:Leak
+   fun:*
+   ...
+   fun:_dl_init
+}
+
+{
+   ld_preload
+   Memcheck:Leak
+   fun:*
+   obj:*/ld-*.so
+}

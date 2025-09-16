@@ -29,8 +29,12 @@ pub enum TaskPriority {
 pub enum TaskType {
     /// Read operation
     Read,
+    /// Batch read operation
+    BatchRead,
     /// Write operation
     Write,
+    /// Delete operation
+    Delete,
     /// Batch write operation
     BatchWrite,
     /// Scan operation
@@ -46,6 +50,7 @@ pub enum TaskType {
 }
 
 /// Task execution context
+#[derive(Clone)]
 pub struct TaskContext {
     /// Task ID
     pub task_id: u64,
@@ -59,13 +64,29 @@ pub struct TaskContext {
     pub cancel_token: tokio_util::sync::CancellationToken,
 }
 
+impl Default for TaskContext {
+    fn default() -> Self {
+        Self {
+            task_id: 0,
+            table: TableIdent::default(),
+            priority: TaskPriority::Normal,
+            timeout: None,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+}
+
 /// Result of task execution
 #[derive(Debug)]
 pub enum TaskResult {
     /// Read result
     Read(Option<Bytes>),
+    /// Batch read result
+    BatchRead(Vec<Option<Bytes>>),
     /// Write result
     Write(()),
+    /// Delete result (true if deleted)
+    Delete(bool),
     /// Scan result with key-value pairs
     Scan(Vec<(Bytes, Bytes)>),
     /// Batch write result with number of written items
@@ -84,20 +105,35 @@ pub trait Task: Send + Sync + Debug {
     fn priority(&self) -> TaskPriority;
 
     /// Execute the task
-    async fn execute(&mut self, context: TaskContext) -> Result<TaskResult>;
+    async fn execute(&self, context: &TaskContext) -> Result<TaskResult>;
 
     /// Cancel the task
-    fn cancel(&mut self);
+    fn cancel(&mut self) {
+        // Default implementation - no-op
+    }
 
     /// Check if task is cancelable
     fn is_cancelable(&self) -> bool {
         true
     }
 
+    /// Check if this task can be merged with another
+    fn can_merge(&self, other: &dyn Task) -> bool {
+        false
+    }
+
+    /// Merge another task into this one
+    fn merge(&mut self, other: Box<dyn Task>) -> Result<()> {
+        Err(crate::error::Error::InvalidState("Task merging not supported".into()))
+    }
+
     /// Estimate task cost (for scheduling)
-    fn estimate_cost(&self) -> usize {
+    fn estimated_cost(&self) -> usize {
         1
     }
+
+    /// Get the task as Any for downcasting
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Task factory for creating tasks

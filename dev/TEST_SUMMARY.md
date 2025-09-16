@@ -6,26 +6,31 @@ This document provides a comprehensive summary of all tests implemented for the 
 
 ## Test Coverage Statistics
 
-- **Total Test Files**: 20+
+- **Total Test Files**: 35
 - **Total Test Cases**: 500+
 - **Components Covered**: 15 major systems
-- **Test Categories**: Unit, Integration, Stress, Benchmark, Edge Cases
+- **Test Categories**: Core, Integration, Stress, Performance, Fault Injection, Data Integrity, Persistence
 
 ## Test Organization
 
 ```
 dev/
 ├── tests/
-│   ├── core/           # Core data structure tests
-│   ├── io/             # I/O and async operations tests
-│   ├── task/           # Task system tests
-│   ├── shard/          # Shard and scheduling tests
-│   ├── storage/        # Storage layer tests
-│   └── utils/          # Utility function tests
-├── integration/        # End-to-end integration tests
-├── edge_cases/        # Boundary and edge case tests
-├── stress/            # Concurrency and stress tests
-└── fixtures/          # Test fixtures and helpers
+│   ├── core/           # Core data structure and edge case tests (12 files)
+│   ├── fault/          # Fault injection tests (1 file)
+│   ├── integration/    # Integration and async tests (4 files)
+│   ├── integrity/      # Data integrity verification tests (1 file)
+│   ├── io/             # Async I/O tests (1 file)
+│   ├── performance/    # Performance benchmarks (1 file)
+│   ├── persistence/    # Recovery and persistence tests (1 file)
+│   ├── shard/          # Shard system tests (1 file)
+│   ├── storage/        # Storage layer tests (1 file)
+│   ├── stress/         # Stress and concurrency tests (2 files)
+│   ├── task/           # Task system tests (4 files)
+│   └── utils/          # Utility function tests (3 files)
+├── fixtures/          # Test fixtures and helpers
+├── mocks/             # Mock implementations
+└── scripts/           # Test runner and analysis scripts
 ```
 
 ## Component Test Coverage
@@ -237,8 +242,10 @@ dev/
 
 ### All Tests
 ```bash
-cd build
-ctest --test-dir dev/
+cd dev/build
+ctest --output-on-failure
+# or
+make run-all-tests
 ```
 
 ### Specific Category
@@ -255,13 +262,21 @@ ctest --test-dir dev/ -L benchmark
 
 ### With Coverage
 ```bash
-./dev/run_tests.sh -c
+cd dev
+./scripts/generate_coverage.sh --html --summary
 ```
 
 ### With Sanitizers
 ```bash
-./dev/run_tests.sh -a  # Address Sanitizer
-./dev/run_tests.sh -t  # Thread Sanitizer
+cd dev
+./scripts/run_with_asan.sh    # Address Sanitizer
+./scripts/run_with_valgrind.sh # Memory leak detection
+```
+
+### CI Test Runner
+```bash
+cd dev
+./scripts/ci_test.sh --with-stress --with-coverage
 ```
 
 ## Test Metrics

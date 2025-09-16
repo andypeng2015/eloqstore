@@ -60,7 +60,7 @@ impl PageHeader {
 }
 
 /// A page in the storage system
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Page {
     /// Page data
     data: Bytes,
@@ -75,6 +75,14 @@ impl Page {
         Self {
             data: data.freeze(),
             size,
+        }
+    }
+
+    /// Create an empty page
+    pub fn empty() -> Self {
+        Self {
+            data: Bytes::new(),
+            size: 0,
         }
     }
 

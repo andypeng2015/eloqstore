@@ -1,5 +1,9 @@
 //! Configuration management for EloqStore
 
+mod kv_options;
+
+pub use kv_options::KvOptions;
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

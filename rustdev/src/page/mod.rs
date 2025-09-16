@@ -9,7 +9,7 @@ pub mod page_pool;
 pub mod page_cache;
 pub mod page_builder;
 
-pub use page::{Page, PageHeader};
+pub use page::{Page, PageHeader, HEADER_SIZE};
 pub use data_page::{DataPage, DataPageIterator};
 pub use data_page_builder::DataPageBuilder;
 pub use overflow_page::{OverflowPage, OverflowChainBuilder, OverflowChainReader};

@@ -179,7 +179,7 @@ impl TaskScheduler {
 
                 // Execute task
                 let start_time = Instant::now();
-                let result = tokio::time::timeout(timeout, task.task.execute(context)).await;
+                let result = tokio::time::timeout(timeout, task.task.execute(&context)).await;
 
                 let duration = start_time.elapsed();
 

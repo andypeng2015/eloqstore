@@ -9,20 +9,25 @@ All development will be contained within the `dev/` directory:
 ```
 dev/
 ├── build/              # Build directory for dev tests
-├── tests/              # Unit tests
+├── tests/              # All test files organized by category
 │   ├── core/          # Core data structure tests
+│   ├── fault/         # Fault injection tests
+│   ├── integration/   # Integration tests
+│   ├── integrity/     # Data integrity tests
 │   ├── io/            # Async I/O tests
+│   ├── performance/   # Performance benchmarks
+│   ├── persistence/   # Recovery and persistence tests
+│   ├── shard/         # Shard system tests
 │   ├── storage/       # Storage layer tests
-│   ├── tasks/         # Task management tests
-│   ├── sharding/      # Shard system tests
+│   ├── stress/        # Stress and concurrency tests
+│   ├── task/          # Task management tests
 │   └── utils/         # Utility function tests
-├── integration/        # Integration tests
-├── stress/            # Stress and performance tests
-├── edge_cases/        # Edge case specific tests
-├── fixtures/          # Test fixtures and data
+├── fixtures/          # Test fixtures and data generators
 ├── mocks/            # Mock objects for testing
+├── scripts/          # Test runner and analysis scripts
 ├── CMakeLists.txt    # Build configuration
-└── run_tests.sh      # Test runner script
+├── test_config.ini   # Test configuration
+└── run_tests.sh      # Main test runner script
 ```
 
 ## Phase 1: Foundation Setup (Week 1)

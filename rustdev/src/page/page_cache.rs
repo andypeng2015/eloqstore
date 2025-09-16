@@ -36,6 +36,7 @@ impl Default for PageCacheConfig {
 }
 
 /// Cached page entry
+#[derive(Debug)]
 struct CachedPage {
     /// Page data
     page: Arc<DataPage>,
@@ -48,6 +49,7 @@ struct CachedPage {
 }
 
 /// Page cache implementation
+#[derive(Debug)]
 pub struct PageCache {
     /// Configuration
     config: PageCacheConfig,

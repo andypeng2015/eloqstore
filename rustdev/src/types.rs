@@ -16,11 +16,9 @@ pub type PageId = u32;
 /// Maximum valid page ID
 pub const MAX_PAGE_ID: PageId = u32::MAX;
 
-/// File page identifier (64-bit)
-pub type FilePageId = u64;
-
-/// Maximum valid file page ID
-pub const MAX_FILE_PAGE_ID: FilePageId = u64::MAX;
+// Re-export FilePageId and its constant
+mod file_page_id;
+pub use file_page_id::{FilePageId, MAX_FILE_PAGE_ID};
 
 /// File identifier
 pub type FileId = u64;

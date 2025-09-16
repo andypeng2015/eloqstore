@@ -93,18 +93,17 @@ include(Catch)
 
 # Core tests
 set(CORE_TESTS
-    simple_test
-    coding_simple_test
-    async_simple_test
-    #coding_test  # Disabled - needs more fixes
-    #page_test
-    #data_page_test
-    #index_page_test
-    #overflow_page_test
-    #data_page_builder_test
-    #comparator_test
-    #types_test
-    #page_mapper_test
+    coding_test
+    comparator_test
+    data_page_builder_test
+    data_page_test
+    edge_case_test
+    index_page_test
+    overflow_page_test
+    page_mapper_test
+    page_test
+    types_test
+    boundary_values_test
 )
 
 foreach(test ${CORE_TESTS})
@@ -166,6 +165,9 @@ endforeach()
 # Storage tests
 set(STORAGE_TESTS
     file_gc_test
+    manifest_test
+    cloud_storage_test
+    archive_mode_test
 )
 
 foreach(test ${STORAGE_TESTS})
@@ -198,6 +200,7 @@ set(TASK_TESTS
     read_task_test
     scan_task_test
     batch_write_task_test
+    background_write_test
 )
 
 foreach(test ${TASK_TESTS})
@@ -285,11 +288,13 @@ foreach(test ${UTILS_TESTS})
 endforeach()
 
 # Integration tests
-add_executable(integration_test
-    integration/basic_operations_test.cpp
-    integration/workflow_test.cpp
+add_executable(basic_operations_test
+    tests/integration/basic_operations_test.cpp
 )
-target_link_libraries(integration_test PRIVATE
+add_executable(workflow_test
+    tests/integration/workflow_test.cpp
+)
+target_link_libraries(basic_operations_test PRIVATE
     Catch2::Catch2WithMain
     test_fixtures
     ${CMAKE_SOURCE_DIR}/../build/libeloqstore.a
@@ -307,7 +312,27 @@ target_link_libraries(integration_test PRIVATE
     pthread
     dl
 )
-catch_discover_tests(integration_test)
+catch_discover_tests(basic_operations_test)
+
+target_link_libraries(workflow_test PRIVATE
+    Catch2::Catch2WithMain
+    test_fixtures
+    ${CMAKE_SOURCE_DIR}/../build/libeloqstore.a
+    glog::glog
+    Boost::context
+    Boost::filesystem
+    uring
+    absl::flat_hash_map
+    absl::raw_hash_set
+    absl::hash
+    absl::strings
+    absl::time
+    absl::synchronization
+    absl::cord
+    pthread
+    dl
+)
+catch_discover_tests(workflow_test)
 
 # Async tests
 add_executable(async_ops_test
@@ -359,14 +384,14 @@ target_link_libraries(async_pattern_test PRIVATE
 catch_discover_tests(async_pattern_test)
 
 # Stress tests
-add_executable(stress_test
-    stress/concurrent_operations_test.cpp
+add_executable(concurrent_test
+    tests/stress/concurrent_test.cpp
 )
 
 add_executable(randomized_stress_test
     tests/stress/randomized_stress_test.cpp
 )
-target_link_libraries(stress_test PRIVATE
+target_link_libraries(concurrent_test PRIVATE
     Catch2::Catch2WithMain
     test_fixtures
     ${CMAKE_SOURCE_DIR}/../build/libeloqstore.a
@@ -384,7 +409,7 @@ target_link_libraries(stress_test PRIVATE
     pthread
     dl
 )
-catch_discover_tests(stress_test)
+catch_discover_tests(concurrent_test)
 
 target_link_libraries(randomized_stress_test PRIVATE
     Catch2::Catch2
@@ -407,9 +432,123 @@ target_link_libraries(randomized_stress_test PRIVATE
     dl
 )
 
+# Performance tests
+add_executable(benchmark_test
+    tests/performance/benchmark_test.cpp
+)
+target_link_libraries(benchmark_test PRIVATE
+    Catch2::Catch2WithMain
+    test_fixtures
+    -Wl,--whole-archive
+    ${CMAKE_SOURCE_DIR}/../build/libeloqstore.a
+    -Wl,--no-whole-archive
+    Boost::context
+    Boost::filesystem
+    uring
+    glog::glog
+    absl::flat_hash_map
+    absl::raw_hash_set
+    absl::hash
+    absl::strings
+    absl::time
+    absl::synchronization
+    absl::cord
+    pthread
+    dl
+)
+catch_discover_tests(benchmark_test)
+
+# Fault injection tests
+add_library(fault_injector STATIC
+    fixtures/fault_injector.cpp
+)
+target_link_libraries(fault_injector PUBLIC
+    glog::glog
+    Threads::Threads
+)
+
+add_executable(fault_injection_test
+    tests/fault/fault_injection_test.cpp
+)
+target_link_libraries(fault_injection_test PRIVATE
+    Catch2::Catch2WithMain
+    test_fixtures
+    fault_injector
+    -Wl,--whole-archive
+    ${CMAKE_SOURCE_DIR}/../build/libeloqstore.a
+    -Wl,--no-whole-archive
+    Boost::context
+    Boost::filesystem
+    uring
+    glog::glog
+    absl::flat_hash_map
+    absl::raw_hash_set
+    absl::hash
+    absl::strings
+    absl::time
+    absl::synchronization
+    absl::cord
+    pthread
+    dl
+)
+catch_discover_tests(fault_injection_test)
+
+# Data integrity tests
+add_executable(data_integrity_test
+    tests/integrity/data_integrity_test.cpp
+)
+target_link_libraries(data_integrity_test PRIVATE
+    Catch2::Catch2WithMain
+    test_fixtures
+    -Wl,--whole-archive
+    ${CMAKE_SOURCE_DIR}/../build/libeloqstore.a
+    -Wl,--no-whole-archive
+    Boost::context
+    Boost::filesystem
+    uring
+    glog::glog
+    absl::flat_hash_map
+    absl::raw_hash_set
+    absl::hash
+    absl::strings
+    absl::time
+    absl::synchronization
+    absl::cord
+    pthread
+    dl
+    crypto  # For SHA256
+)
+catch_discover_tests(data_integrity_test)
+
+# Persistence and recovery tests
+add_executable(recovery_test
+    tests/persistence/recovery_test.cpp
+)
+target_link_libraries(recovery_test PRIVATE
+    Catch2::Catch2WithMain
+    test_fixtures
+    -Wl,--whole-archive
+    ${CMAKE_SOURCE_DIR}/../build/libeloqstore.a
+    -Wl,--no-whole-archive
+    Boost::context
+    Boost::filesystem
+    uring
+    glog::glog
+    absl::flat_hash_map
+    absl::raw_hash_set
+    absl::hash
+    absl::strings
+    absl::time
+    absl::synchronization
+    absl::cord
+    pthread
+    dl
+)
+catch_discover_tests(recovery_test)
+
 # Edge case tests
 add_executable(edge_case_test
-    edge_cases/boundary_values_test.cpp
+    tests/core/edge_case_test.cpp
 )
 target_link_libraries(edge_case_test PRIVATE
     Catch2::Catch2WithMain
@@ -436,7 +575,9 @@ catch_discover_tests(edge_case_test)
 add_custom_target(run-all-tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
     DEPENDS ${CORE_TESTS} ${IO_TESTS} ${STORAGE_TESTS} ${TASK_TESTS}
-            ${SHARDING_TESTS} ${UTILS_TESTS} integration_test stress_test edge_case_test
+            ${SHARDING_TESTS} ${UTILS_TESTS} basic_operations_test workflow_test
+            async_ops_test async_pattern_test concurrent_test randomized_stress_test
+            fault_injection_test data_integrity_test recovery_test
 )
 
 add_custom_target(coverage-report

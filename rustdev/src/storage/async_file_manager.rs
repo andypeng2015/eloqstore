@@ -46,6 +46,16 @@ struct AsyncFileHandle {
     metadata: AsyncFileMetadata,
 }
 
+impl std::fmt::Debug for AsyncFileHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncFileHandle")
+            .field("file_id", &self.file_id)
+            .field("handle", &"<dyn FileHandle>")
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
 impl AsyncFileHandle {
     /// Read a page at the given offset
     async fn read_page(&self, page_offset: u64, page_size: usize) -> Result<Page> {
@@ -107,6 +117,17 @@ pub struct AsyncFileManager {
     next_file_id: Arc<RwLock<FileId>>,
     /// Maximum open files
     max_open_files: usize,
+}
+
+impl std::fmt::Debug for AsyncFileManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncFileManager")
+            .field("base_dir", &self.base_dir)
+            .field("page_size", &self.page_size)
+            .field("backend", &"<dyn IoBackend>")
+            .field("max_open_files", &self.max_open_files)
+            .finish()
+    }
 }
 
 impl AsyncFileManager {
