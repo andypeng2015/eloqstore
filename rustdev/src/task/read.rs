@@ -259,9 +259,11 @@ mod tests {
         file_manager.init().await.unwrap();
 
         // Create a read task
+        let table_id = TableIdent::new("test", 1);
         let key = Bytes::from("test_key");
         let task = ReadTask::new(
             key.clone(),
+            table_id,
             page_cache,
             page_mapper,
             file_manager,

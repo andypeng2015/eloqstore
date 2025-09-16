@@ -378,7 +378,7 @@ mod tests {
 
             let mapping = PageMapping {
                 page_id: 10,
-                file_page_id: 100,
+                file_page_id: FilePageId::from_raw(100),
                 file_id: 1,
             };
             writer.write_mapping(&mapping).unwrap();
@@ -406,7 +406,7 @@ mod tests {
         match &entries[1] {
             ManifestEntry::PageMapping { page_id, file_page_id, .. } => {
                 assert_eq!(*page_id, 10);
-                assert_eq!(*file_page_id, 100);
+                assert_eq!(file_page_id.raw(), 100);
             }
             _ => panic!("Expected PageMapping entry"),
         }
@@ -422,7 +422,7 @@ mod tests {
         for i in 0..10 {
             mappings.insert(i, PageMapping {
                 page_id: i,
-                file_page_id: i as FilePageId * 10,
+                file_page_id: FilePageId::from_raw((i * 10) as u64),
                 file_id: 1,
             });
         }
@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(reconstructed.len(), snapshot.len());
 
         for i in 0..10 {
-            assert_eq!(reconstructed.get(i), Some(i as FilePageId * 10));
+            assert_eq!(reconstructed.get(i), Some(FilePageId::from_raw((i * 10) as u64)));
         }
     }
 }

@@ -562,8 +562,13 @@ impl DataPage {
 
     /// Get entry count
     pub fn entry_count(&self) -> usize {
-        // TODO: Implement actual count
-        0
+        // Count entries by iterating through the page
+        let mut count = 0;
+        let mut iter = DataPageIterator::new(self);
+        while iter.next().is_some() {
+            count += 1;
+        }
+        count
     }
 
     /// Get used space
