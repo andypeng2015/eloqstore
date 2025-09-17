@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
-use crate::config::KvOptions;
+use crate::config::{Config, KvOptions};
 use crate::error::Error;
 use crate::Result;
 use crate::types::TableIdent;
@@ -51,8 +51,32 @@ pub struct Store {
 }
 
 impl Store {
+    /// Create a new Store from Config
+    pub async fn new(config: Config) -> Result<Self> {
+        // For now, we'll just create a default KvOptions
+        // Later we can implement proper mapping from Config to KvOptions
+        let mut options = KvOptions::default();
+
+        // Map basic config to options
+        options.num_threads = config.runtime.num_shards as usize;
+        options.data_dirs = config.storage.data_dirs.clone();
+        options.data_page_size = config.storage.page_size;
+        options.data_append_mode = config.storage.append_mode;
+
+        Self::with_options(options)
+    }
+
+    /// Create a new Store from a directory path
+    pub async fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let mut options = KvOptions::default();
+        options.data_dirs = vec![path.as_ref().to_path_buf()];
+        let mut store = Self::with_options(options)?;
+        store.start().await?;
+        Ok(store)
+    }
+
     /// Create a new Store with default options
-    pub fn new() -> Result<Self> {
+    pub fn new_default() -> Result<Self> {
         Self::with_options(KvOptions::default())
     }
 
@@ -203,8 +227,18 @@ impl Store {
         self.get_async_internal(table, key).await
     }
 
+    /// Get a value by key (async) - alternative name for stress test
+    pub async fn async_get(&self, table: &str, key: impl Into<Bytes>) -> Result<Option<Bytes>> {
+        self.get_async_internal(table, key).await
+    }
+
     /// Set a key-value pair (async)
     pub async fn set_async(&self, table: &str, key: impl Into<Bytes>, value: impl Into<Bytes>) -> Result<()> {
+        self.set_async_internal(table, key, value).await
+    }
+
+    /// Set a key-value pair (async) - alternative name for stress test
+    pub async fn async_set(&self, table: &str, key: impl Into<Bytes>, value: impl Into<Bytes>) -> Result<()> {
         self.set_async_internal(table, key, value).await
     }
 
@@ -213,13 +247,28 @@ impl Store {
         self.delete_async_internal(table, key).await
     }
 
+    /// Delete a key (async) - alternative name for stress test
+    pub async fn async_delete(&self, table: &str, key: impl Into<Bytes>) -> Result<()> {
+        self.delete_async_internal(table, key).await
+    }
+
     /// Get multiple values by keys (async)
     pub async fn batch_get_async(&self, table: &str, keys: Vec<impl Into<Bytes>>) -> Result<Vec<Option<Bytes>>> {
         self.batch_get_async_internal(table, keys).await
     }
 
+    /// Get multiple values by keys (async) - alternative name for stress test
+    pub async fn async_batch_get(&self, table: &str, keys: Vec<impl Into<Bytes>>) -> Result<Vec<Option<Bytes>>> {
+        self.batch_get_async_internal(table, keys).await
+    }
+
     /// Set multiple key-value pairs (async)
     pub async fn batch_set_async(&self, table: &str, kvs: Vec<(impl Into<Bytes>, impl Into<Bytes>)>) -> Result<()> {
+        self.batch_set_async_internal(table, kvs).await
+    }
+
+    /// Set multiple key-value pairs (async) - alternative name for stress test
+    pub async fn async_batch_set(&self, table: &str, kvs: Vec<(impl Into<Bytes>, impl Into<Bytes>)>) -> Result<()> {
         self.batch_set_async_internal(table, kvs).await
     }
 
@@ -233,6 +282,11 @@ impl Store {
         self.scan_async_internal(table, start_key, end_key, limit).await
     }
 
+    /// Simple scan from a start key with limit (async) - for stress test
+    pub async fn async_scan(&self, table: &str, start_key: impl Into<Bytes>, limit: usize) -> Result<Vec<(Bytes, Bytes)>> {
+        self.scan_async_internal(table, start_key, None::<Bytes>, Some(limit)).await
+    }
+
     /// Check if a key exists (async)
     pub async fn exists_async(&self, table: &str, key: impl Into<Bytes>) -> Result<bool> {
         Ok(self.get_async(table, key).await?.is_some())
@@ -241,7 +295,7 @@ impl Store {
     // ========== Promise-style Asynchronous Operations (Return AsyncResult) ==========
 
     /// Get a value by key (async, returns promise)
-    pub fn async_get(&self, table: &str, key: impl Into<Bytes>) -> AsyncResult<Option<Bytes>> {
+    pub fn promise_get(&self, table: &str, key: impl Into<Bytes>) -> AsyncResult<Option<Bytes>> {
         let (tx, rx) = oneshot::channel();
         let store = self.store.clone();
         let table = table.to_string();
@@ -256,7 +310,7 @@ impl Store {
     }
 
     /// Set a key-value pair (async, returns promise)
-    pub fn async_set(&self, table: &str, key: impl Into<Bytes>, value: impl Into<Bytes>) -> AsyncResult<()> {
+    pub fn promise_set(&self, table: &str, key: impl Into<Bytes>, value: impl Into<Bytes>) -> AsyncResult<()> {
         let (tx, rx) = oneshot::channel();
         let store = self.store.clone();
         let table = table.to_string();
@@ -272,7 +326,7 @@ impl Store {
     }
 
     /// Delete a key (async, returns promise)
-    pub fn async_delete(&self, table: &str, key: impl Into<Bytes>) -> AsyncResult<()> {
+    pub fn promise_delete(&self, table: &str, key: impl Into<Bytes>) -> AsyncResult<()> {
         let (tx, rx) = oneshot::channel();
         let store = self.store.clone();
         let table = table.to_string();
@@ -287,7 +341,7 @@ impl Store {
     }
 
     /// Get multiple values (async, returns promise)
-    pub fn async_batch_get(&self, table: &str, keys: Vec<impl Into<Bytes>>) -> AsyncResult<Vec<Option<Bytes>>> {
+    pub fn promise_batch_get(&self, table: &str, keys: Vec<impl Into<Bytes>>) -> AsyncResult<Vec<Option<Bytes>>> {
         let (tx, rx) = oneshot::channel();
         let store = self.store.clone();
         let table = table.to_string();
@@ -302,7 +356,7 @@ impl Store {
     }
 
     /// Set multiple key-value pairs (async, returns promise)
-    pub fn async_batch_set(&self, table: &str, kvs: Vec<(impl Into<Bytes>, impl Into<Bytes>)>) -> AsyncResult<()> {
+    pub fn promise_batch_set(&self, table: &str, kvs: Vec<(impl Into<Bytes>, impl Into<Bytes>)>) -> AsyncResult<()> {
         let (tx, rx) = oneshot::channel();
         let store = self.store.clone();
         let table = table.to_string();

@@ -170,7 +170,7 @@ impl TaskScheduler {
 
                 // Create context
                 let context = TaskContext {
-                    shard_id: 0, // TODO: get from scheduler
+                    shard_id: 0, // Scheduler is generic, not tied to shards (C++ has shard_id_ in Shard)
                     options: std::sync::Arc::new(crate::config::KvOptions::default()),
                 };
 

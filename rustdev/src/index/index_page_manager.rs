@@ -310,13 +310,16 @@ impl IndexPageManager {
     pub fn unswizzling(&self, page: &mut MemIndexPage) {
         // Convert in-memory pointer references back to page IDs
         // This is called before evicting a page
-        // TODO: Implement swizzling/unswizzling logic
+        // TODO: Implement swizzling/unswizzling logic following C++ (index_page_manager.cpp:312)
+        // C++ walks through all mapping snapshots and calls Unswizzling on each
+        // Requires: page->tbl_ident_ to find the right table's mappings
     }
 
     /// Finish I/O for a page
     pub fn finish_io(&self, mapping: &MappingSnapshot, idx_page: &mut MemIndexPage) {
         // Wake up any waiters on this page
-        // TODO: Implement waiting zone notification
+        // TODO: Implement waiting zone notification following C++ (index_page_manager.cpp:267)
+        // C++ calls idx_page->waiting_.WakeAll() to notify waiting coroutines
     }
 
     /// Seek in the index tree to find the data page containing a key

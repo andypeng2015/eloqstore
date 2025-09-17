@@ -54,14 +54,34 @@ impl FileHandle {
         let file_metadata = file.metadata()?;
         let size = file_metadata.len();
 
+        // Get actual timestamps from filesystem metadata
+        let fs_metadata = std::fs::metadata(&path).unwrap_or_else(|_| {
+            // If we can't get metadata, use current time
+            std::fs::File::open(&path).ok()
+                .and_then(|f| f.metadata().ok())
+                .unwrap_or_else(|| std::fs::metadata(".").unwrap())
+        });
+
+        let created_at = fs_metadata.created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let modified_at = fs_metadata.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
         let metadata = FileMetadata {
             file_id,
             path,
             size,
             page_count: size / page_size as u64,
             page_size,
-            created_at: 0, // TODO: Get actual timestamps
-            modified_at: 0,
+            created_at,
+            modified_at,
         };
 
         Ok(Self {

@@ -222,6 +222,24 @@ pub struct BatchWriteTask {
 }
 
 impl BatchWriteTask {
+    /// Abort the write task and clean up resources (following C++ Abort)
+    fn abort(&mut self) {
+        // Unpin all index pages in the stack
+        while let Some(mut entry) = self.stack.pop() {
+            if let Some(ref idx_page) = entry.idx_page {
+                idx_page.unpin();
+            }
+        }
+
+        // Clear leaf triple pages
+        for page in &mut self.leaf_triple {
+            *page = None;
+        }
+
+        // Clear applying page
+        self.applying_page = None;
+    }
+
     /// Create a new batch write task
     pub fn new(
         entries: Vec<WriteDataEntry>,
@@ -284,7 +302,10 @@ impl BatchWriteTask {
         // If no changes, just return
         if stack_entry.changes.is_empty() {
             tracing::debug!("pop_stack: no changes, returning existing page_id");
-            // TODO: Unpin page if needed
+            // Unpin the index page if we have one
+            if let Some(ref idx_page) = stack_entry.idx_page {
+                idx_page.unpin();
+            }
             return Ok(stack_entry.idx_page.map(|p| p.get_page_id()));
         }
 
@@ -602,6 +623,7 @@ impl BatchWriteTask {
                     // Check if this index page points to leaf pages
                     if idx_page.is_pointing_to_leaf() {
                         // We've reached the leaf level
+                        println!("DEBUG: seek found leaf index, page_id={}", page_id);
                         stack_entry.is_leaf_index = true;
                         stack_entry.idx_page_iter = unsafe {
                             std::mem::transmute::<IndexPageIter<'_>, IndexPageIter<'static>>(iter)
@@ -709,7 +731,16 @@ impl BatchWriteTask {
     /// Load data page
     async fn load_data_page(&self, page_id: PageId) -> Result<DataPage> {
         // Get mapping and load from disk
-        let snapshot = self.page_mapper.snapshot();
+        // CRITICAL: Use the snapshot from COW metadata, not our empty page_mapper!
+        let snapshot = if let Some(ref cow_meta) = self.cow_meta {
+            if let Some(ref mapper) = cow_meta.mapper {
+                mapper.snapshot()
+            } else {
+                self.page_mapper.snapshot()
+            }
+        } else {
+            self.page_mapper.snapshot()
+        };
         if let Ok(file_page_id) = snapshot.to_file_page(page_id) {
             let page_data = self.file_manager
                 .read_page(file_page_id.file_id() as u64, file_page_id.page_offset())
@@ -937,18 +968,23 @@ impl BatchWriteTask {
     /// Load applying page (following C++ LoadApplyingPage)
     async fn load_applying_page(&mut self, page_id: PageId) -> Result<()> {
         assert!(page_id != PageId::MAX);
+        println!("DEBUG: load_applying_page called with page_id={}", page_id);
 
         // Check if page is already in leaf_triple[1]
         if let Some(ref page) = self.leaf_triple[1] {
             if page.page_id() == page_id {
                 // Fast path: move it to applying_page
+                println!("DEBUG: Found page_id={} in leaf_triple[1], reusing it", page_id);
                 self.applying_page = self.leaf_triple[1].take();
                 return Ok(());
             }
         }
 
         // Load from disk
+        println!("DEBUG: Loading page_id={} from disk", page_id);
         let page = self.load_data_page(page_id).await?;
+        println!("DEBUG: Loaded page_id={} from disk, content_length={}",
+                page_id, page.content_length());
         self.applying_page = Some(page);
 
         // Shift link if needed
@@ -1282,7 +1318,8 @@ impl BatchWriteTask {
 
         // Add sorted entries to the page builder
         let mut any_added = false;
-        for entry in &page_entries {
+        let mut last_added_index = 0;
+        for (i, entry) in page_entries.iter().enumerate() {
             // Check if value would overflow
             let (value_to_add, is_overflow) = if self.is_overflow_kv(&entry.key, &entry.value) {
                 tracing::debug!("Detected overflow for key={}, value_size={}",
@@ -1309,11 +1346,19 @@ impl BatchWriteTask {
 
             if added {
                 any_added = true;
+                last_added_index = i;
             } else {
-                tracing::debug!("Page full while adding key={}, finishing current page",
-                    String::from_utf8_lossy(&entry.key));
-                // Page is full, we need to finish this page and continue on next iteration
-                // Don't break here, as we still need to finish the page below
+                tracing::debug!("Page full while adding key={}, need to handle remaining {} entries",
+                    String::from_utf8_lossy(&entry.key), page_entries.len() - i);
+                // Page is full - we need to handle remaining entries
+                // Adjust cidx to point to the first unprocessed entry
+                // Find the corresponding entry in self.entries
+                for j in start_cidx..*cidx {
+                    if self.entries[j].key == entry.key {
+                        *cidx = j;  // Reset to the unprocessed entry
+                        break;
+                    }
+                }
                 break;
             }
         }
@@ -1335,9 +1380,15 @@ impl BatchWriteTask {
             tracing::info!("Using page_key={:?} for index entry", String::from_utf8_lossy(&page_key));
 
             // Use finish_data_page which will add index entry
-            // IMPORTANT: In COW, we always create a new page when modifying!
-            // Don't reuse the existing page ID even if we loaded one.
-            let page_id = PageId::MAX;  // Always allocate new page for COW
+            // In COW, we reuse the page ID if we're modifying an existing page
+            // Only allocate a new page if this is truly a new page
+            let page_id = if let Some(ref page) = self.applying_page {
+                // Reusing existing page ID for in-place update
+                page.page_id()
+            } else {
+                // New page needed
+                PageId::MAX
+            };
 
             self.finish_data_page(page_key, page_id).await?;
             tracing::info!("finish_data_page completed, page should be written");
@@ -1487,8 +1538,15 @@ impl BatchWriteTask {
                 tracing::info!("Triggering compaction for table {:?}, amplify_factor={:.2}",
                     self.table_id, amplify_factor);
 
-                // TODO: Schedule compaction task
-                // For now, just trigger file GC
+                // Schedule compaction task
+                // In C++, this calls shard->AddPendingCompact(table_id) which:
+                // 1. Creates a CompactRequest for this table
+                // 2. Adds it to the pending_queues_ for sequential processing
+                // 3. The shard processes it as RequestType::Compact
+                // 4. This triggers BackgroundWrite::CompactDataFile()
+                //
+                // For now, we trigger file GC directly which performs similar cleanup
+                // but doesn't do the full data compaction that moves pages to new files.
                 self.trigger_file_gc();
             }
         }
@@ -1522,9 +1580,9 @@ impl BatchWriteTask {
             retained_files,
         );
 
-        // TODO: Submit task to file GC worker
-        // This would typically be sent to a global file GC instance
-        // For now, just log it
+        // TODO: Submit task to file GC worker (following C++ write_task.cpp:352)
+        // C++ calls: eloq_store->file_gc_->AddTask(tbl_ident_, ts, cur_file_id, retained_files)
+        // Need to access global file GC instance from here
         tracing::info!("Would submit GC task for table {:?} with {} retained files",
             self.table_id, gc_task.retained_files().len());
     }
@@ -1729,6 +1787,14 @@ impl BatchWriteTask {
     fn free_page(&mut self, page_id: PageId) {
         // Mark page as free in page mapper
         // Full implementation would handle page recycling
+    }
+}
+
+#[async_trait]
+impl Drop for BatchWriteTask {
+    fn drop(&mut self) {
+        // Ensure all pages are unpinned when the task is dropped
+        self.abort();
     }
 }
 

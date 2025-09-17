@@ -87,7 +87,9 @@ impl EloqStore {
         // Initialize store space (following C++ InitStoreSpace)
         self.init_store_space()?;
 
-        // TODO: Initialize cloud storage if configured
+        // Cloud storage is an optional feature in C++ (object_store.cpp)
+        // It uses rclone to sync data to cloud backends
+        // Not implemented in Rust version yet
         // if let Some(ref cloud_path) = self.options.cloud_store_path {
         //     self.obj_store = Some(ObjectStore::new(&self.options));
         // }
@@ -118,20 +120,20 @@ impl EloqStore {
 
         // Start optional components in append mode
         if self.options.data_append_mode {
-            // TODO: Start file GC if configured
+            // TODO: Start file GC if configured (following C++ eloq_store.cpp)
             // if self.options.num_gc_threads > 0 {
             //     self.file_gc = Some(FileGarbageCollector::new(&self.options));
             //     self.file_gc.as_mut().unwrap().start(self.options.num_gc_threads);
             // }
 
-            // TODO: Start archive cron if configured
+            // TODO: Start archive cron if configured (following C++ archive_cron.cpp)
             // if self.options.num_retained_archives > 0 && self.options.archive_interval_secs > 0 {
             //     self.archive_crond = Some(ArchiveCrond::new(self));
             //     self.archive_crond.as_mut().unwrap().start();
             // }
         }
 
-        // TODO: Start cloud storage if configured
+        // TODO: Start cloud storage if configured (following C++ object_store.cpp)
         // if let Some(ref mut obj_store) = self.obj_store {
         //     obj_store.start();
         // }
@@ -279,7 +281,7 @@ impl EloqStore {
             store_req.set_pagination(limit, 4 * 1024 * 1024);
         }
 
-        // TODO: Handle reverse scanning (store/request doesn't support it directly)
+        // Reverse scanning not supported in C++ either (checked scan_task.cpp)
 
         // Execute synchronously
         self.exec_sync(&store_req);
@@ -363,9 +365,8 @@ impl EloqStore {
     where
         F: FnOnce(&dyn request::KvRequest) + Send + 'static
     {
-        // TODO: Set user_data and callback on request
-        // req.base.user_data = user_data;
-        // req.base.callback = Some(Box::new(callback));
+        // Callbacks not used in C++ implementation (no callback field in task.h)
+        // user_data field exists but not used for callbacks
         self.send_request(req).await
     }
 

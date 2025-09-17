@@ -586,7 +586,7 @@ impl DataPage {
 
     /// Check if key-value can fit
     pub fn can_fit(&self, key: &[u8], value: &[u8]) -> bool {
-        // TODO: Implement size check
+        // Size check - C++ doesn't have explicit can_fit, checks inline during append
         let entry_size = 4 + key.len() + 4 + value.len();
         let current_size = HEADER_SIZE + self.content_length() as usize;
         current_size + entry_size < self.page.size() - 100

@@ -11,7 +11,9 @@ use tracing::{info, error, debug};
 
 use crate::types::{TableIdent, FileId, FilePageId};
 use crate::config::KvOptions;
-// use crate::storage::manifest::Manifest; // TODO: Implement manifest parsing
+// Manifest parsing is implemented in C++ (see replayer.cpp)
+// It reads the manifest buffer and extracts the mapping table
+// to determine which files are still referenced and should be retained
 use crate::Result;
 use crate::error::Error;
 
@@ -280,12 +282,13 @@ impl FileGarbageCollector {
         retained_files: &mut HashSet<FileId>,
         opts: &KvOptions,
     ) {
-        // This is a simplified version
-        // Real implementation would properly parse the manifest
-        // and extract file IDs from the mapping table
-
-        // For now, just mark as TODO
-        debug!("TODO: Extract retained files from manifest");
+        // TODO: Implement manifest parsing following C++ (replayer.cpp)
+        // The C++ implementation parses the manifest by:
+        // 1. Reading mapping entries (page_id -> file_page_id)
+        // 2. Checking if each value is a FilePageId using MappingSnapshot::IsFilePageId
+        // 3. Extracting file IDs from FilePageIds using bit shift
+        // This requires proper manifest deserialization
+        debug!("Manifest parsing not fully implemented - would extract retained files here");
     }
 }
 
