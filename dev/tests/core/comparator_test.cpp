@@ -106,16 +106,16 @@ TEST_CASE("Comparator_DefaultComparator_EdgeCases", "[comparator][unit][edge-cas
 
     SECTION("UTF-8 strings") {
         // UTF-8 strings should be compared byte-by-byte
-        std::string utf8_1 = u8"Hello 世界";
-        std::string utf8_2 = u8"Hello 世界";
-        std::string utf8_3 = u8"Hello 中国";
+        std::string utf8_1 = "Hello 世界";
+        std::string utf8_2 = "Hello 世界";
+        std::string utf8_3 = "Hello 中国";
 
         REQUIRE(comp->Compare(utf8_1, utf8_2) == 0);
         REQUIRE(comp->Compare(utf8_1, utf8_3) != 0);
 
         // UTF-8 ordering should be consistent
         std::vector<std::string> utf8_strings = {
-            u8"café", u8"caff", u8"😀", u8"😁", u8"中文", u8"日本語"
+            "café", "caff", "😀", "😁", "中文", "日本語"
         };
 
         std::sort(utf8_strings.begin(), utf8_strings.end(),
@@ -207,7 +207,7 @@ TEST_CASE("Comparator_DefaultComparator_Performance", "[comparator][benchmark]")
         timer.Stop();
 
         double ops_per_sec = iterations / timer.ElapsedSeconds();
-        LOG(INFO) << "Short string comparisons: " << ops_per_sec << " ops/sec";
+        // LOG(INFO) << "Short string comparisons: " << ops_per_sec << " ops/sec";
 
         // Should handle at least 1M comparisons per second
         REQUIRE(ops_per_sec > 1000000);
@@ -236,7 +236,7 @@ TEST_CASE("Comparator_DefaultComparator_Performance", "[comparator][benchmark]")
         timer.Stop();
 
         double ops_per_sec = iterations / timer.ElapsedSeconds();
-        LOG(INFO) << "Long string comparisons: " << ops_per_sec << " ops/sec";
+        // LOG(INFO) << "Long string comparisons: " << ops_per_sec << " ops/sec";
 
         // Should still be reasonably fast
         REQUIRE(ops_per_sec > 100000);
@@ -318,7 +318,7 @@ TEST_CASE("Comparator_CustomComparator", "[comparator][unit]") {
 
     class ReverseComparator : public Comparator {
     public:
-        int Compare(const Slice& a, const Slice& b) const override {
+        int Compare(std::string_view a, std::string_view b) const override {
             // Reverse order
             return -Comparator::DefaultComparator()->Compare(a, b);
         }

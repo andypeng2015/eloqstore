@@ -309,16 +309,15 @@ TEST_CASE("Coding_LengthPrefixedSlice", "[coding][unit]") {
             PutLengthPrefixedSlice(&dst, s);
         }
 
-        const char* ptr = dst.data();
-        const char* limit = dst.data() + dst.size();
+        std::string_view input(dst);
 
         for (const auto& expected : test_data) {
             std::string_view extracted;
-            REQUIRE(GetLengthPrefixedSlice(&ptr, limit, &extracted));
+            REQUIRE(GetLengthPrefixedSlice(&input, &extracted));
             REQUIRE(extracted == expected);
         }
 
-        REQUIRE(ptr == limit); // All data consumed
+        REQUIRE(input.empty()); // All data consumed
     }
 }
 
@@ -357,8 +356,8 @@ TEST_CASE("Coding_ErrorCases", "[coding][unit][error]") {
         // Don't add the actual data
 
         std::string_view extracted;
-        const char* ptr = dst.data();
-        bool result = GetLengthPrefixedSlice(&ptr, dst.data() + dst.size(), &extracted);
+        std::string_view input(dst);
+        bool result = GetLengthPrefixedSlice(&input, &extracted);
         REQUIRE(result == false);
     }
 
@@ -370,8 +369,8 @@ TEST_CASE("Coding_ErrorCases", "[coding][unit][error]") {
         // Try to extract with truncated buffer
         for (size_t len = 1; len < dst.size(); ++len) {
             std::string_view extracted;
-            const char* ptr = dst.data();
-            bool result = GetLengthPrefixedSlice(&ptr, dst.data() + len, &extracted);
+            std::string_view input(dst.data(), len);
+            bool result = GetLengthPrefixedSlice(&input, &extracted);
             if (len < dst.size()) {
                 REQUIRE(result == false);
             }

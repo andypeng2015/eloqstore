@@ -17,11 +17,24 @@ use crate::error::Error;
 
 use super::traits::{Task, TaskResult, TaskPriority, TaskType, TaskContext};
 
+/// Read operation type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOp {
+    /// Exact match
+    Exact,
+    /// Floor - find last key <= search key
+    Floor,
+    /// Ceiling - find first key >= search key
+    Ceiling,
+}
+
 /// Read task for fetching a single key
 #[derive(Clone, Debug)]
 pub struct ReadTask {
     /// Key to read
     key: Key,
+    /// Read operation type
+    op: ReadOp,
     /// Table identifier
     table_id: crate::types::TableIdent,
     /// Page cache
@@ -41,13 +54,48 @@ impl ReadTask {
         page_mapper: Arc<PageMapper>,
         file_manager: Arc<AsyncFileManager>,
     ) -> Self {
+        Self::with_op(key, ReadOp::Exact, table_id, page_cache, page_mapper, file_manager)
+    }
+
+    /// Create a new read task with operation type
+    pub fn with_op(
+        key: Key,
+        op: ReadOp,
+        table_id: crate::types::TableIdent,
+        page_cache: Arc<PageCache>,
+        page_mapper: Arc<PageMapper>,
+        file_manager: Arc<AsyncFileManager>,
+    ) -> Self {
         Self {
             key,
+            op,
             table_id,
             page_cache,
             page_mapper,
             file_manager,
         }
+    }
+
+    /// Create a floor read task (find last key <= search key)
+    pub fn floor(
+        key: Key,
+        table_id: crate::types::TableIdent,
+        page_cache: Arc<PageCache>,
+        page_mapper: Arc<PageMapper>,
+        file_manager: Arc<AsyncFileManager>,
+    ) -> Self {
+        Self::with_op(key, ReadOp::Floor, table_id, page_cache, page_mapper, file_manager)
+    }
+
+    /// Create a ceiling read task (find first key >= search key)
+    pub fn ceiling(
+        key: Key,
+        table_id: crate::types::TableIdent,
+        page_cache: Arc<PageCache>,
+        page_mapper: Arc<PageMapper>,
+        file_manager: Arc<AsyncFileManager>,
+    ) -> Self {
+        Self::with_op(key, ReadOp::Ceiling, table_id, page_cache, page_mapper, file_manager)
     }
 
     /// Find the page containing the key
@@ -91,6 +139,65 @@ impl ReadTask {
         }
 
         // No page found
+        Ok(None)
+    }
+
+    /// Find the last key <= search key (floor operation)
+    async fn find_floor_key(&self) -> Result<Option<Bytes>> {
+        let snapshot = self.page_mapper.snapshot();
+        let mut best_match: Option<(Key, Value)> = None;
+
+        // Iterate through pages to find floor
+        for page_id in 0..snapshot.max_page_id() {
+            if let Ok(file_page_id) = snapshot.to_file_page(page_id) {
+                match self.file_manager
+                    .read_page(file_page_id.file_id() as u64, file_page_id.page_offset())
+                    .await {
+                    Ok(page_data) => {
+                        let data_page = DataPage::from_page(page_id, page_data);
+                        let mut iter = crate::page::DataPageIterator::new(&data_page);
+
+                        // Use seek_floor to find the last key <= search key
+                        if iter.seek_floor(&self.key) {
+                            if let Some(value) = iter.value() {
+                                best_match = Some((iter.key().unwrap_or_default(), value));
+                            }
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        Ok(best_match.map(|(_, v)| v))
+    }
+
+    /// Find the first key >= search key (ceiling operation)
+    async fn find_ceiling_key(&self) -> Result<Option<Bytes>> {
+        let snapshot = self.page_mapper.snapshot();
+
+        // Iterate through pages to find ceiling
+        for page_id in 0..snapshot.max_page_id() {
+            if let Ok(file_page_id) = snapshot.to_file_page(page_id) {
+                match self.file_manager
+                    .read_page(file_page_id.file_id() as u64, file_page_id.page_offset())
+                    .await {
+                    Ok(page_data) => {
+                        let data_page = DataPage::from_page(page_id, page_data);
+                        let mut iter = crate::page::DataPageIterator::new(&data_page);
+
+                        // Use seek to find the first key >= search key
+                        if iter.seek(&self.key) {
+                            if let Some(value) = iter.value() {
+                                return Ok(Some(value));
+                            }
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+        }
+
         Ok(None)
     }
 }

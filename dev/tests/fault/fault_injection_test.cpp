@@ -2,6 +2,7 @@
 #include <thread>
 #include <chrono>
 #include <set>
+#include <iostream>
 #include "../../fixtures/test_fixtures.h"
 #include "../../fixtures/fault_injector.h"
 #include "../../fixtures/random_generator.h"

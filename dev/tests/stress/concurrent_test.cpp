@@ -6,13 +6,14 @@
 #include <vector>
 #include <barrier>
 
-#include "eloq_store.h"
-#include "batch_write_task.h"
-#include "read_task.h"
-#include "scan_task.h"
-#include "fixtures/test_fixtures.h"
-#include "fixtures/test_helpers.h"
-#include "fixtures/data_generator.h"
+#include "../../eloq_store.h"
+#include "../../batch_write_task.h"
+#include "../../read_task.h"
+#include "../../scan_task.h"
+#include "../../fixtures/test_fixtures.h"
+#include "../../fixtures/test_helpers.h"
+#include "../../fixtures/data_generator.h"
+#include "../../types.h"
 
 using namespace eloqstore;
 using namespace eloqstore::test;
@@ -53,26 +54,24 @@ TEST_CASE_METHOD(ConcurrentStressFixture, "Stress_MassiveConcurrentWrites", "[st
     TableIdent table = CreateTestTable("stress_write");
 
     auto writer = [this, &table, &total_writes, &failed_writes](int thread_id, std::atomic<bool>& stop) {
-        BatchWriteTask task;
         std::mt19937 rng(thread_id);
         DataGenerator local_gen(thread_id);
 
         while (!stop) {
             auto request = std::make_unique<BatchWriteRequest>();
-            request->table = table;
+            request->SetTableId(table);
 
             // Generate batch of writes
             int batch_size = 10 + (rng() % 90);  // 10-100 writes per batch
             for (int i = 0; i < batch_size; ++i) {
-                WriteOp op;
-                op.key = local_gen.GenerateRandomKey(10, 50);
-                op.value = local_gen.GenerateValue(100, 10000);
-                op.timestamp = CurrentTime();
-                request->ops.push_back(op);
+                std::string key = local_gen.GenerateRandomKey(10, 50);
+                std::string value = local_gen.GenerateValue(100 + (rng() % 9900));
+                uint64_t timestamp = 0;  // Use default timestamp
+                request->AddWrite(key, value, timestamp, WriteOp::Upsert);
             }
 
-            KvError err = task.Execute(request.get());
-            if (err == KvError::NoError) {
+            store_->ExecSync(request.get());
+            if (request->Error() == KvError::NoError) {
                 total_writes += batch_size;
             } else {
                 failed_writes += batch_size;
@@ -98,18 +97,16 @@ TEST_CASE_METHOD(ConcurrentStressFixture, "Stress_MixedReadWriteLoad", "[stress]
     TableIdent table = CreateTestTable("stress_mixed");
 
     // Pre-populate some data
-    BatchWriteTask init_task;
     auto init_req = std::make_unique<BatchWriteRequest>();
-    init_req->table = table;
+    init_req->SetTableId(table);
 
     for (int i = 0; i < 1000; ++i) {
-        WriteOp op;
-        op.key = "base_key_" + std::to_string(i);
-        op.value = gen_.GenerateValue(100);
-        op.timestamp = 1000;
-        init_req->ops.push_back(op);
+        std::string key = "base_key_" + std::to_string(i);
+        std::string value = gen_.GenerateValue(100);
+        uint64_t timestamp = 1000;
+        init_req->AddWrite(key, value, timestamp, WriteOp::Upsert);
     }
-    init_task.Execute(init_req.get());
+    store_->ExecSync(init_req.get());
 
     auto mixed_worker = [this, &table, &reads, &writes, &scans,
                         &read_hits, &write_success, &scan_success](int thread_id, std::atomic<bool>& stop) {
@@ -122,42 +119,42 @@ TEST_CASE_METHOD(ConcurrentStressFixture, "Stress_MixedReadWriteLoad", "[stress]
             int op_type = op_dist(rng);
 
             if (op_type < 50) {  // 50% reads
-                ReadTask read_task;
+                auto read_req = std::make_unique<ReadRequest>();
                 std::string key = "base_key_" + std::to_string(key_dist(rng));
-                std::string value;
-                uint64_t timestamp, expire_ts;
+                read_req->SetArgs(table, key);
 
                 reads++;
-                if (read_task.Read(table, key, value, timestamp, expire_ts) == KvError::NoError) {
+                store_->ExecSync(read_req.get());
+                if (read_req->Error() == KvError::NoError) {
                     read_hits++;
                 }
 
             } else if (op_type < 80) {  // 30% writes
-                BatchWriteTask write_task;
                 auto request = std::make_unique<BatchWriteRequest>();
-                request->table = table;
+                request->SetTableId(table);
 
-                WriteOp op;
-                op.key = "dynamic_" + std::to_string(key_dist(rng));
-                op.value = local_gen.GenerateValue(100);
-                op.timestamp = CurrentTime();
-                request->ops.push_back(op);
+                std::string key = "dynamic_" + std::to_string(key_dist(rng));
+                std::string value = local_gen.GenerateValue(100);
+                uint64_t timestamp = 0;  // Use default timestamp
+                request->AddWrite(key, value, timestamp, WriteOp::Upsert);
 
                 writes++;
-                if (write_task.Execute(request.get()) == KvError::NoError) {
+                store_->ExecSync(request.get());
+                if (request->Error() == KvError::NoError) {
                     write_success++;
                 }
 
             } else {  // 20% scans
-                ScanTask scan_task;
-                std::vector<std::pair<std::string, std::string>> results;
-
+                auto scan_req = std::make_unique<ScanRequest>();
                 int start = key_dist(rng);
                 std::string start_key = "base_key_" + std::to_string(start);
                 std::string end_key = "base_key_" + std::to_string(start + 10);
+                scan_req->SetArgs(table, start_key, end_key);
+                scan_req->SetPagination(20, SIZE_MAX);
 
                 scans++;
-                if (scan_task.Scan(table, start_key, end_key, 20, false, results) == KvError::NoError) {
+                store_->ExecSync(scan_req.get());
+                if (scan_req->Error() == KvError::NoError) {
                     scan_success++;
                 }
             }
@@ -198,23 +195,21 @@ TEST_CASE_METHOD(ConcurrentStressFixture, "Stress_HotKeyContention", "[stress][c
     }
 
     auto hot_key_worker = [this, &table, &hot_keys, &updates, &conflicts](int thread_id, std::atomic<bool>& stop) {
-        BatchWriteTask task;
         std::mt19937 rng(thread_id);
         std::uniform_int_distribution<int> key_dist(0, hot_keys.size() - 1);
 
         while (!stop) {
             auto request = std::make_unique<BatchWriteRequest>();
-            request->table = table;
+            request->SetTableId(table);
 
             // Update a hot key
-            WriteOp op;
-            op.key = hot_keys[key_dist(rng)];
-            op.value = "thread_" + std::to_string(thread_id) + "_ts_" + std::to_string(CurrentTime());
-            op.timestamp = CurrentTime();
-            request->ops.push_back(op);
+            std::string key = hot_keys[key_dist(rng)];
+            std::string value = "thread_" + std::to_string(thread_id) + "_ts_" + std::to_string(0);
+            uint64_t timestamp = 0;  // Use default timestamp
+            request->AddWrite(key, value, timestamp, WriteOp::Upsert);
 
-            KvError err = task.Execute(request.get());
-            if (err == KvError::NoError) {
+            store_->ExecSync(request.get());
+            if (request->Error() == KvError::NoError) {
                 updates++;
             } else {
                 conflicts++;
@@ -253,27 +248,26 @@ TEST_CASE_METHOD(ConcurrentStressFixture, "Stress_LargeValueHandling", "[stress]
         while (!stop) {
             if (op_dist(rng) == 0) {
                 // Write large value
-                BatchWriteTask write_task;
                 auto request = std::make_unique<BatchWriteRequest>();
-                request->table = table;
+                request->SetTableId(table);
 
-                WriteOp op;
-                op.key = "large_" + std::to_string(thread_id) + "_" + std::to_string(key_counter++);
-                op.value = local_gen.GenerateValue(size_dist(rng));
-                op.timestamp = CurrentTime();
-                request->ops.push_back(op);
+                std::string key = "large_" + std::to_string(thread_id) + "_" + std::to_string(key_counter++);
+                std::string value = local_gen.GenerateValue(size_dist(rng));
+                uint64_t timestamp = 0;  // Use default timestamp
+                request->AddWrite(key, value, timestamp, WriteOp::Upsert);
 
-                if (write_task.Execute(request.get()) == KvError::NoError) {
+                store_->ExecSync(request.get());
+                if (request->Error() == KvError::NoError) {
                     large_writes++;
                 }
             } else {
                 // Read large value
-                ReadTask read_task;
+                auto read_req = std::make_unique<ReadRequest>();
                 std::string key = "large_" + std::to_string(thread_id) + "_" + std::to_string(rng() % std::max(1, key_counter));
-                std::string value;
-                uint64_t timestamp, expire_ts;
+                read_req->SetArgs(table, key);
 
-                if (read_task.Read(table, key, value, timestamp, expire_ts) == KvError::NoError) {
+                store_->ExecSync(read_req.get());
+                if (read_req->Error() == KvError::NoError) {
                     large_reads++;
                 }
             }
@@ -309,19 +303,18 @@ TEST_CASE_METHOD(ConcurrentStressFixture, "Stress_RapidTableCreation", "[stress]
             tables_created++;
 
             // Perform operations on the table
-            BatchWriteTask write_task;
             auto request = std::make_unique<BatchWriteRequest>();
-            request->table = table;
+            request->SetTableId(table);
 
             for (int i = 0; i < 10; ++i) {
-                WriteOp op;
-                op.key = "key_" + std::to_string(i);
-                op.value = "value_" + std::to_string(i);
-                op.timestamp = CurrentTime();
-                request->ops.push_back(op);
+                std::string key = "key_" + std::to_string(i);
+                std::string value = "value_" + std::to_string(i);
+                uint64_t timestamp = 0;  // Use default timestamp
+                request->AddWrite(key, value, timestamp, WriteOp::Upsert);
             }
 
-            if (write_task.Execute(request.get()) == KvError::NoError) {
+            store_->ExecSync(request.get());
+            if (request->Error() == KvError::NoError) {
                 operations_performed += 10;
             }
 

@@ -4,14 +4,25 @@
 #include <thread>
 #include <atomic>
 #include "../../fixtures/test_fixtures.h"
+#include "../../fixtures/test_helpers.h"
+#include "../../eloq_store.h"
+#include "../../types.h"
 
+using namespace eloqstore;
 using namespace eloqstore::test;
 using namespace std::chrono_literals;
 
-TEST_CASE("AsyncPattern_IssueAndWait", "[integration][async]") {
-    TestFixture fixture;
-    TableIdent table = fixture.GetTable();
+class AsyncPatternTestFixture : public TestFixture {
+public:
+    AsyncPatternTestFixture() {
+        InitStoreWithDefaults();
+        table_ = CreateTestTable("async_test");
+    }
+protected:
+    TableIdent table_;
+};
 
+TEST_CASE_METHOD(AsyncPatternTestFixture, "AsyncPattern_IssueAndWait", "[integration][async]") {
     SECTION("Issue multiple async operations then wait") {
         const int num_writes = 50;
         std::vector<std::unique_ptr<BatchWriteRequest>> write_reqs;
@@ -22,12 +33,11 @@ TEST_CASE("AsyncPattern_IssueAndWait", "[integration][async]") {
             std::string key = std::string(10 - std::to_string(i).length(), '0') + std::to_string(i);
             std::string value = "value_" + std::to_string(i);
 
-            std::vector<WriteDataEntry> batch;
-            batch.emplace_back(key, value, 0, WriteOp::Put);
-            req->SetArgs(table, std::move(batch));
+            req->AddWrite(key, value, 0, WriteOp::Upsert);
+            req->SetTableId(table_);
 
             // Execute async
-            fixture.GetStore()->ExecAsyn(req.get());
+            store_->ExecAsyn(req.get());
             write_reqs.push_back(std::move(req));
         }
 
@@ -43,13 +53,13 @@ TEST_CASE("AsyncPattern_IssueAndWait", "[integration][async]") {
         for (int i = 0; i < num_writes; ++i) {
             auto read_req = std::make_unique<ReadRequest>();
             std::string key = std::string(10 - std::to_string(i).length(), '0') + std::to_string(i);
-            read_req->SetArgs(table, key);
+            read_req->SetArgs(table_, key);
 
-            auto err = fixture.GetStore()->ExecSync(read_req.get());
-            REQUIRE(err == KvError::NoError);
+            store_->ExecSync(read_req.get());
+            REQUIRE(read_req->Error() == KvError::NoError);
 
             std::string expected_value = "value_" + std::to_string(i);
-            REQUIRE(read_req->GetValue() == expected_value);
+            REQUIRE(read_req->value_ == expected_value);
         }
     }
 
@@ -60,22 +70,22 @@ TEST_CASE("AsyncPattern_IssueAndWait", "[integration][async]") {
             std::string key = "key_" + std::to_string(i);
             std::string value = "initial_" + std::to_string(i);
 
-            std::vector<WriteDataEntry> batch;
-            batch.emplace_back(key, value, 0, WriteOp::Put);
-            write_req->SetArgs(table, std::move(batch));
+            write_req->AddWrite(key, value, 0, WriteOp::Upsert);
+            write_req->SetTableId(table_);
 
-            REQUIRE(fixture.GetStore()->ExecSync(write_req.get()) == KvError::NoError);
+            store_->ExecSync(write_req.get());
+            REQUIRE(write_req->Error() == KvError::NoError);
         }
 
         // Now issue mixed async reads and writes
-        std::vector<std::unique_ptr<Request>> all_reqs;
+        std::vector<std::unique_ptr<KvRequest>> all_reqs;
 
         for (int i = 0; i < 40; ++i) {
             if (i % 2 == 0) {
                 // Async read
                 auto req = std::make_unique<ReadRequest>();
-                req->SetArgs(table, "key_" + std::to_string(i / 2));
-                fixture.GetStore()->ExecAsyn(req.get());
+                req->SetArgs(table_, "key_" + std::to_string(i / 2));
+                store_->ExecAsyn(req.get());
                 all_reqs.push_back(std::move(req));
             } else {
                 // Async update
@@ -83,11 +93,10 @@ TEST_CASE("AsyncPattern_IssueAndWait", "[integration][async]") {
                 std::string key = "key_" + std::to_string(i / 2);
                 std::string value = "updated_" + std::to_string(i);
 
-                std::vector<WriteDataEntry> batch;
-                batch.emplace_back(key, value, 0, WriteOp::Put);
-                req->SetArgs(table, std::move(batch));
+                req->AddWrite(key, value, 0, WriteOp::Upsert);
+                req->SetTableId(table_);
 
-                fixture.GetStore()->ExecAsyn(req.get());
+                store_->ExecAsyn(req.get());
                 all_reqs.push_back(std::move(req));
             }
         }
@@ -103,10 +112,7 @@ TEST_CASE("AsyncPattern_IssueAndWait", "[integration][async]") {
     }
 }
 
-TEST_CASE("AsyncPattern_Pipelining", "[integration][async]") {
-    TestFixture fixture;
-    TableIdent table = fixture.GetTable();
-
+TEST_CASE_METHOD(AsyncPatternTestFixture, "AsyncPattern_Pipelining", "[integration][async]") {
     SECTION("Pipeline writes with dependencies") {
         const int pipeline_depth = 10;
         const int operations_per_stage = 5;
@@ -120,11 +126,10 @@ TEST_CASE("AsyncPattern_Pipelining", "[integration][async]") {
                 std::string key = "stage_" + std::to_string(stage) + "_op_" + std::to_string(op);
                 std::string value = "value_s" + std::to_string(stage) + "_o" + std::to_string(op);
 
-                std::vector<WriteDataEntry> batch;
-                batch.emplace_back(key, value, 0, WriteOp::Put);
-                req->SetArgs(table, std::move(batch));
+                req->AddWrite(key, value, 0, WriteOp::Upsert);
+                req->SetTableId(table_);
 
-                fixture.GetStore()->ExecAsyn(req.get());
+                store_->ExecAsyn(req.get());
                 stage_reqs.push_back(std::move(req));
             }
 
@@ -142,9 +147,10 @@ TEST_CASE("AsyncPattern_Pipelining", "[integration][async]") {
             for (int op = 0; op < operations_per_stage; ++op) {
                 auto read_req = std::make_unique<ReadRequest>();
                 std::string key = "stage_" + std::to_string(stage) + "_op_" + std::to_string(op);
-                read_req->SetArgs(table, key);
+                read_req->SetArgs(table_, key);
 
-                REQUIRE(fixture.GetStore()->ExecSync(read_req.get()) == KvError::NoError);
+                store_->ExecSync(read_req.get());
+                REQUIRE(read_req->Error() == KvError::NoError);
             }
         }
     }

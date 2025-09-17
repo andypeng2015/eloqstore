@@ -2,16 +2,23 @@
 #include <atomic>
 #include <vector>
 #include <thread>
-#include "test_fixtures.h"
-#include "data_generator.h"
+#include "../../fixtures/test_fixtures.h"
+#include "../../fixtures/data_generator.h"
+#include "../../eloq_store.h"
+#include "../../types.h"
 
 using namespace eloqstore;
 using namespace eloqstore::test;
 
-TEST_CASE("AsyncOps_BasicReadWrite", "[async][integration]") {
-    TestFixture fixture;
-    fixture.InitStoreWithDefaults();
-    auto table = fixture.CreateTestTable("async_test");
+class AsyncOpsTestFixture : public TestFixture {
+public:
+    AsyncOpsTestFixture() {
+        InitStoreWithDefaults();
+    }
+};
+
+TEST_CASE_METHOD(AsyncOpsTestFixture, "AsyncOps_BasicReadWrite", "[async][integration]") {
+    auto table = CreateTestTable("async_test");
 
     SECTION("Async write followed by async read") {
         std::atomic<bool> write_done{false};
@@ -19,7 +26,7 @@ TEST_CASE("AsyncOps_BasicReadWrite", "[async][integration]") {
         std::string read_value;
 
         // Async write
-        fixture.WriteAsync(table, "key1", "value1", [&write_done](KvError err) {
+        WriteAsync(table, "key1", "value1", [&write_done](KvError err) {
             REQUIRE(err == KvError::NoError);
             write_done = true;
         });
@@ -30,7 +37,7 @@ TEST_CASE("AsyncOps_BasicReadWrite", "[async][integration]") {
         }
 
         // Async read
-        fixture.ReadAsync(table, "key1", [&read_done, &read_value](KvError err, const std::string& value) {
+        ReadAsync(table, "key1", [&read_done, &read_value](KvError err, const std::string& value) {
             REQUIRE(err == KvError::NoError);
             REQUIRE(value == "value1");
             read_value = value;
@@ -60,7 +67,7 @@ TEST_CASE("AsyncOps_BasicReadWrite", "[async][integration]") {
 
         // Issue all writes async
         for (int i = 0; i < num_writes; ++i) {
-            fixture.WriteAsync(table, keys[i], values[i], [&completed](KvError err) {
+            WriteAsync(table, keys[i], values[i], [&completed](KvError err) {
                 REQUIRE(err == KvError::NoError);
                 completed++;
             });
@@ -74,17 +81,15 @@ TEST_CASE("AsyncOps_BasicReadWrite", "[async][integration]") {
         // Verify all data with sync reads
         for (int i = 0; i < num_writes; ++i) {
             std::string read_value;
-            auto err = fixture.ReadSync(table, keys[i], read_value);
+            auto err = ReadSync(table, keys[i], read_value);
             REQUIRE(err == KvError::NoError);
             REQUIRE(read_value == values[i]);
         }
     }
 }
 
-TEST_CASE("AsyncOps_BatchOperations", "[async][integration]") {
-    TestFixture fixture;
-    fixture.InitStoreWithDefaults();
-    auto table = fixture.CreateTestTable("batch_async");
+TEST_CASE_METHOD(AsyncOpsTestFixture, "AsyncOps_BatchOperations", "[async][integration]") {
+    auto table = CreateTestTable("batch_async");
 
     SECTION("Issue multiple operations then wait") {
         // Create multiple requests
@@ -93,7 +98,7 @@ TEST_CASE("AsyncOps_BatchOperations", "[async][integration]") {
 
         // Create batch write requests
         for (int batch = 0; batch < 5; ++batch) {
-            auto req = fixture.MakeBatchWriteRequest(table);
+            auto req = MakeBatchWriteRequest(table);
             for (int i = 0; i < 10; ++i) {
                 std::string key = "batch" + std::to_string(batch) + "_key" + std::to_string(i);
                 std::string value = "value_" + std::to_string(batch * 10 + i);
@@ -105,28 +110,28 @@ TEST_CASE("AsyncOps_BatchOperations", "[async][integration]") {
         // Submit all writes async
         std::vector<KvRequest*> pending_requests;
         for (auto& req : write_reqs) {
-            fixture.store_->ExecAsyn(req.get(), 0, [](KvRequest* r) {
+            store_->ExecAsyn(req.get(), 0, [](KvRequest* r) {
                 REQUIRE(r->Error() == KvError::NoError);
             });
             pending_requests.push_back(req.get());
         }
 
         // Wait for all writes
-        fixture.WaitForRequests(pending_requests);
+        WaitForRequests(pending_requests);
         pending_requests.clear();
 
         // Now issue reads for verification
         for (int batch = 0; batch < 5; ++batch) {
             for (int i = 0; i < 10; ++i) {
                 std::string key = "batch" + std::to_string(batch) + "_key" + std::to_string(i);
-                auto req = fixture.MakeReadRequest(table, key);
+                auto req = MakeReadRequest(table, key);
                 read_reqs.push_back(std::move(req));
             }
         }
 
         // Submit all reads async
         for (auto& req : read_reqs) {
-            fixture.store_->ExecAsyn(req.get(), 0, [](KvRequest* r) {
+            store_->ExecAsyn(req.get(), 0, [](KvRequest* r) {
                 auto* read_req = static_cast<ReadRequest*>(r);
                 REQUIRE(read_req->Error() == KvError::NoError);
                 REQUIRE(!read_req->value_.empty());
@@ -135,27 +140,25 @@ TEST_CASE("AsyncOps_BatchOperations", "[async][integration]") {
         }
 
         // Wait for all reads
-        fixture.WaitForRequests(pending_requests);
+        WaitForRequests(pending_requests);
     }
 }
 
-TEST_CASE("AsyncOps_ScanOperations", "[async][integration]") {
-    TestFixture fixture;
-    fixture.InitStoreWithDefaults();
-    auto table = fixture.CreateTestTable("scan_async");
+TEST_CASE_METHOD(AsyncOpsTestFixture, "AsyncOps_ScanOperations", "[async][integration]") {
+    auto table = CreateTestTable("scan_async");
 
     SECTION("Async scan after writes") {
         // Write some data first
         for (int i = 0; i < 100; ++i) {
             std::string key = std::string(10 - std::to_string(i).length(), '0') + std::to_string(i);
-            fixture.WriteSync(table, key, "value" + std::to_string(i));
+            WriteSync(table, key, "value" + std::to_string(i));
         }
 
         // Async scan
         std::atomic<bool> scan_done{false};
         std::vector<KvEntry> scan_results;
 
-        fixture.ScanAsync(table, "00000010", "00000050",
+        ScanAsync(table, "00000010", "00000050",
             [&scan_done, &scan_results](KvError err, const std::vector<KvEntry>& results) {
                 REQUIRE(err == KvError::NoError);
                 scan_results = results;

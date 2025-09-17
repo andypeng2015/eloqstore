@@ -39,10 +39,14 @@ pub enum TaskType {
     BatchWrite,
     /// Scan operation
     Scan,
+    /// Background write task (compaction/archiving)
+    BackgroundWrite,
     /// Compaction task
     Compaction,
     /// Garbage collection
     GarbageCollection,
+    /// File garbage collection
+    FileGC,
     /// Flush task
     Flush,
     /// Checkpoint task
@@ -93,6 +97,8 @@ pub enum TaskResult {
     BatchWrite(usize),
     /// Background task result with statistics
     Background(Box<dyn Any + Send + Sync>),
+    /// File GC result
+    FileGC,
 }
 
 /// Core task trait

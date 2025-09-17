@@ -102,6 +102,10 @@ pub enum Error {
     /// I/O error wrapper (without auto From impl)
     #[error("I/O error: {0}")]
     IoError(std::io::Error),
+
+    /// End of file/iteration
+    #[error("End of file")]
+    Eof,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

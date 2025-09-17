@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <boost/filesystem.hpp>
+#include <fstream>
 #include <random>
 #include <thread>
 #include <chrono>
@@ -10,6 +11,9 @@
 
 #include "../../fixtures/test_fixtures.h"
 #include "../../fixtures/random_generator.h"
+#include "../../eloq_store.h"
+#include "../../types.h"
+#include "../../kv_options.h"
 
 namespace fs = boost::filesystem;
 
@@ -30,12 +34,11 @@ public:
             CleanDataDir();
         }
 
-        KvOptions opts;
-        opts.data_dir = data_dir_;
-        opts.sharding_number = 2;
-        opts.buffer_size = 1024 * 1024; // 1MB
-        opts.enable_direct_io = false;
-        opts.write_buffer_size = 512 * 1024; // 512KB
+        eloqstore::KvOptions opts;
+        opts.store_path = {data_dir_};
+        opts.num_threads = 2;
+        opts.buf_ring_size = 1024; // Buffer ring size
+        opts.index_buffer_pool_size = 512; // Index buffer pool size
 
         store_ = std::make_unique<eloqstore::EloqStore>(opts);
         store_->Start();
@@ -95,36 +98,38 @@ public:
         }
     }
 
-    bool WriteData(const TableIdent& table, const std::map<std::string, std::string>& data) {
-        auto req = std::make_unique<BatchWriteRequest>();
-        req->SetMaxTaskNum(1);
+    bool WriteData(const eloqstore::TableIdent& table, const std::map<std::string, std::string>& data) {
+        auto req = std::make_unique<eloqstore::BatchWriteRequest>();
+        req->SetTableId(table);
 
         for (const auto& [key, value] : data) {
-            req->AddWrite(key, value, 0, WriteOp::Put);
+            req->AddWrite(key, value, 0, eloqstore::WriteOp::Upsert);
         }
 
-        store_->ExecSync(req.get(), 0);
-        return req->Error() == KvError::kOk;
+        store_->ExecSync(req.get());
+        return req->Error() == eloqstore::KvError::NoError;
     }
 
-    std::map<std::string, std::string> ReadAllData(const TableIdent& table) {
+    std::map<std::string, std::string> ReadAllData(const eloqstore::TableIdent& table) {
         std::map<std::string, std::string> result;
 
-        auto req = std::make_unique<ScanRequest>(table, "", "");
-        req->SetLimit(UINT32_MAX);
+        auto req = std::make_unique<eloqstore::ScanRequest>();
+        req->SetArgs(table, "", "");
+        req->SetPagination(UINT32_MAX, SIZE_MAX);
 
-        store_->ExecSync(req.get(), 0);
+        store_->ExecSync(req.get());
 
-        if (req->Error() == KvError::kOk) {
-            for (const auto& kv : req->key_values_) {
-                result[kv.key] = kv.value;
+        if (req->Error() == eloqstore::KvError::NoError) {
+            auto entries = req->Entries();
+            for (const auto& kv : entries) {
+                result[kv.key_] = kv.value_;
             }
         }
 
         return result;
     }
 
-    bool VerifyData(const TableIdent& table, const std::map<std::string, std::string>& expected) {
+    bool VerifyData(const eloqstore::TableIdent& table, const std::map<std::string, std::string>& expected) {
         auto actual = ReadAllData(table);
 
         if (actual.size() != expected.size()) {
@@ -201,8 +206,8 @@ private:
 
 TEST_CASE("Recovery after clean shutdown", "[persistence]") {
     RecoveryTestFixture fixture;
-    TableIdent table{"test_table", 1};
-    RandomGenerator gen(42);
+    eloqstore::TableIdent table{"test_table", 1};
+    eloqstore::test::RandomGenerator gen(42);
 
     SECTION("Simple data persistence") {
         std::map<std::string, std::string> test_data;
@@ -262,8 +267,8 @@ TEST_CASE("Recovery after clean shutdown", "[persistence]") {
 
 TEST_CASE("Recovery after crash scenarios", "[persistence]") {
     RecoveryTestFixture fixture;
-    TableIdent table{"crash_table", 1};
-    RandomGenerator gen(43);
+    eloqstore::TableIdent table{"crash_table", 1};
+    eloqstore::test::RandomGenerator gen(43);
 
     SECTION("Crash during write operations") {
         std::map<std::string, std::string> persistent_data;
@@ -340,8 +345,8 @@ TEST_CASE("Recovery after crash scenarios", "[persistence]") {
 
 TEST_CASE("Recovery with corrupted files", "[persistence]") {
     RecoveryTestFixture fixture;
-    TableIdent table{"corrupt_table", 1};
-    RandomGenerator gen(44);
+    eloqstore::TableIdent table{"corrupt_table", 1};
+    eloqstore::test::RandomGenerator gen(44);
 
     SECTION("Corrupted data file recovery") {
         std::map<std::string, std::string> test_data;
@@ -393,8 +398,8 @@ TEST_CASE("Recovery with corrupted files", "[persistence]") {
 
 TEST_CASE("Recovery with incomplete operations", "[persistence]") {
     RecoveryTestFixture fixture;
-    TableIdent table{"incomplete_table", 1};
-    RandomGenerator gen(45);
+    eloqstore::TableIdent table{"incomplete_table", 1};
+    eloqstore::test::RandomGenerator gen(45);
 
     SECTION("Incomplete batch write recovery") {
         std::map<std::string, std::string> complete_data;
@@ -483,8 +488,8 @@ TEST_CASE("Recovery with incomplete operations", "[persistence]") {
 
 TEST_CASE("Long-term persistence stability", "[persistence][long]") {
     RecoveryTestFixture fixture;
-    TableIdent table{"stability_table", 1};
-    RandomGenerator gen(46);
+    eloqstore::TableIdent table{"stability_table", 1};
+    eloqstore::test::RandomGenerator gen(46);
 
     SECTION("Extended write-restart cycles") {
         std::map<std::string, std::string> all_data;

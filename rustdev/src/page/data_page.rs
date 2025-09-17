@@ -369,6 +369,21 @@ impl<'a> DataPageIterator<'a> {
         self.peek().map(|(_, v, _, _)| v)
     }
 
+    /// Get expiration timestamp
+    pub fn expire_ts(&self) -> Option<u64> {
+        self.peek().and_then(|(_, _, _, expire)| expire)
+    }
+
+    /// Get timestamp
+    pub fn timestamp(&self) -> u64 {
+        self.peek().map(|(_, _, ts, _)| ts).unwrap_or(0)
+    }
+
+    /// Check if has more entries
+    pub fn has_next(&self) -> bool {
+        self.current_pos < self.end_pos
+    }
+
     /// Check if current value is overflow
     pub fn is_overflow(&self) -> bool {
         if self.current_pos >= self.end_pos {

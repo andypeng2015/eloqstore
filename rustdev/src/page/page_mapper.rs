@@ -180,6 +180,31 @@ impl PageMapper {
         Ok(())
     }
 
+    /// Update mapping from manifest restore
+    pub fn update_mapping(&self, page_id: PageId, file_page_id: FilePageId) {
+        // Extract file_id from the file_page_id
+        let file_id = file_page_id.file_id();
+
+        let mapping = PageMapping {
+            page_id,
+            file_page_id,
+            file_id: file_id as u64,
+        };
+
+        let mut mappings = self.mappings.write().unwrap();
+        mappings.insert(page_id, mapping);
+
+        // Update next_page_id if needed
+        let mut next_id = self.next_page_id.write().unwrap();
+        if page_id >= *next_id {
+            *next_id = page_id + 1;
+        }
+
+        // Update version
+        let mut version = self.version_counter.write().unwrap();
+        *version += 1;
+    }
+
     /// Allocate and map a new page
     pub fn allocate_and_map(&self) -> Result<(PageId, FilePageId)> {
         let page_id = self.allocate_page()?;
