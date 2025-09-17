@@ -7,8 +7,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use bytes::Bytes;
 use tokio::sync::RwLock;
 
 use crate::types::{FileId, TableIdent};

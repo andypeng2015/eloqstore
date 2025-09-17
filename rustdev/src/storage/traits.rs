@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::Path;
 
-use crate::types::{FileId, FilePageId, TableIdent};
+use crate::types::{FileId, TableIdent};
 use crate::page::{Page, MappingSnapshot};
 use crate::Result;
 

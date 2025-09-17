@@ -1,9 +1,8 @@
 //! Encoding and decoding utilities for keys, values, and metadata
 
 use bytes::{BufMut, Bytes, BytesMut};
-use std::mem;
 
-use crate::types::{PageId, FilePageId, MAX_OVERFLOW_POINTERS};
+use crate::types::{PageId, MAX_OVERFLOW_POINTERS};
 use crate::Result;
 
 /// Encode a variable-length integer (varint)

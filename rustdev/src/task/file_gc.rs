@@ -10,11 +10,10 @@ use async_trait::async_trait;
 use tracing::{info, error, debug};
 
 use crate::types::{TableIdent, FileId, FilePageId};
-use crate::page::MappingSnapshot;
 use crate::config::KvOptions;
 // use crate::storage::manifest::Manifest; // TODO: Implement manifest parsing
 use crate::Result;
-use crate::error::{Error, KvError};
+use crate::error::Error;
 
 use super::traits::{Task, TaskResult, TaskPriority, TaskType, TaskContext};
 

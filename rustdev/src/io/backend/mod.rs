@@ -9,7 +9,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::types::FileId;
 use crate::page::Page;
 use crate::Result;
 

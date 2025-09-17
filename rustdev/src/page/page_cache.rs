@@ -1,16 +1,12 @@
 //! Page cache for in-memory page storage
 
 use std::sync::Arc;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 
 use crate::types::{Key, PageId};
-use crate::Result;
-use crate::error::Error;
 
 use super::DataPage;
 
@@ -94,7 +90,7 @@ impl PageCache {
         // Look up page ID from key index
         let page_id = self.key_index.get(key)?;
         let page_id = *page_id;
-        drop(page_id); // Drop the guard
+        // page_id is Copy, no need to explicitly drop
 
         // Get page by ID
         self.get_by_id(page_id).await

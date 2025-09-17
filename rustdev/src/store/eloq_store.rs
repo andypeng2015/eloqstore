@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::path::PathBuf;
 use std::os::unix::io::IntoRawFd;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::config::KvOptions;
@@ -278,7 +276,7 @@ impl EloqStore {
             // Open directory for O_PATH access (following C++)
             #[cfg(unix)]
             {
-                use std::os::unix::fs::OpenOptionsExt;
+                
                 use std::fs::OpenOptions;
 
                 let fd = OpenOptions::new()

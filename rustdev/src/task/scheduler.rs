@@ -1,19 +1,19 @@
 //! Task scheduler for managing task execution
 
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use std::cmp::Ordering as CmpOrdering;
 
-use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
+use tokio::sync::{oneshot, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::Result;
 use crate::error::Error;
 
-use super::traits::{Task, TaskResult, TaskPriority, TaskType, TaskContext, TaskStats};
+use super::traits::{Task, TaskResult, TaskPriority, TaskContext, TaskStats};
 
 /// Task handle for tracking execution
 pub struct TaskHandle {
@@ -164,7 +164,7 @@ impl TaskScheduler {
                 queue.pop()
             };
 
-            if let Some(mut task) = task {
+            if let Some(task) = task {
                 // Acquire permit
                 let _permit = semaphore.acquire().await.unwrap();
 
@@ -230,7 +230,7 @@ impl TaskScheduler {
     }
 
     /// Submit a task
-    pub async fn submit(&self, mut task: Box<dyn Task>) -> Result<TaskHandle> {
+    pub async fn submit(&self, task: Box<dyn Task>) -> Result<TaskHandle> {
         // Check queue size
         {
             let queue = self.queue.read().await;

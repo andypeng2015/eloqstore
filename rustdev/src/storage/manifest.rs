@@ -6,12 +6,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{Bytes, BytesMut};
 
 use crate::types::{PageId, FilePageId, TableIdent, MAX_PAGE_ID, MAX_FILE_PAGE_ID};
 use crate::page::MappingSnapshot;
 use crate::index::CowRootMeta;
-use crate::codec::encoding::{encode_varint, decode_varint, encode_varint_into};
+use crate::codec::encoding::{encode_varint, decode_varint};
 use crate::Result;
 use crate::error::Error;
 

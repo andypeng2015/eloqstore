@@ -6,19 +6,17 @@
 //! - Proper page allocation and COW semantics
 
 use std::sync::Arc;
-use std::collections::HashMap;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::types::{Key, Value, FileId, TableIdent, PageId};
-use crate::page::{DataPage, PageCache, Page, DataPageBuilder};
+use crate::types::{Key, Value, TableIdent, PageId};
+use crate::page::{DataPage, PageCache, DataPageBuilder};
 use crate::page::PageMapper;
 use crate::storage::AsyncFileManager;
-use crate::index::{IndexPageManager, CowRootMeta, MemIndexPage};
-use crate::codec::Comparator;
+use crate::index::{IndexPageManager, CowRootMeta};
 use crate::Result;
-use crate::error::{Error, KvError};
+use crate::error::Error;
 
 use super::traits::{Task, TaskResult, TaskPriority, TaskType, TaskContext};
 

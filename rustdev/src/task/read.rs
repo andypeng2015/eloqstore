@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::types::{Key, Value};
-use crate::page::{DataPage, PageCache, Page};
+use crate::page::{DataPage, PageCache};
 use crate::page::PageMapper;
 use crate::storage::AsyncFileManager;
 use crate::Result;
@@ -283,7 +283,7 @@ impl BatchReadTask {
         let mut results = Vec::with_capacity(self.keys.len());
 
         // Group keys by page for efficiency
-        let mut page_keys: std::collections::HashMap<u64, Vec<&Key>> = std::collections::HashMap::new();
+        let page_keys: std::collections::HashMap<u64, Vec<&Key>> = std::collections::HashMap::new();
 
         for key in &self.keys {
             // Check cache first

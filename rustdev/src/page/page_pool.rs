@@ -2,11 +2,10 @@
 
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use crossbeam::queue::ArrayQueue;
 
 use crate::page::Page;
-use crate::types::DEFAULT_PAGE_SIZE;
 
 /// Statistics for page pool
 #[derive(Debug, Clone, Default)]

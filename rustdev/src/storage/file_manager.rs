@@ -6,9 +6,9 @@ use std::io::{self, Read, Write, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 
-use crate::types::{FileId, FilePageId, TableIdent, DEFAULT_PAGE_SIZE};
+use crate::types::{FileId, TableIdent};
 use crate::page::Page;
 use crate::Result;
 use crate::error::Error;

@@ -306,7 +306,7 @@ impl PageMapper {
         let mut new_page_id = 0;
 
         // Reassign page IDs sequentially
-        for (_, mut mapping) in mappings.iter() {
+        for (_, mapping) in mappings.iter() {
             let mut new_mapping = mapping.clone();
             new_mapping.page_id = new_page_id;
             new_mappings.insert(new_page_id, new_mapping);

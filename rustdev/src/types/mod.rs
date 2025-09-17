@@ -1,7 +1,7 @@
 //! Core types used throughout EloqStore
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use bytes::Bytes;
 
 /// Key type

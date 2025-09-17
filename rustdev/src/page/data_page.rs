@@ -1,6 +1,6 @@
 //! Data page implementation with restart points for efficient binary search
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use std::cmp::Ordering;
 
 use crate::types::{PageId, PageType, MAX_PAGE_ID};

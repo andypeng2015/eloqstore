@@ -1,22 +1,20 @@
 //! Core shard implementation following C++ shard.cpp
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{RwLock, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::sync::{RwLock, mpsc};
 use bytes::Bytes;
 
 use crate::config::KvOptions;
-use crate::types::{Key, Value, TableIdent};
-use crate::task::{Task, TaskHandle, TaskScheduler};
+use crate::task::{Task, TaskScheduler};
 use crate::page::{PageCache, PageMapper};
 use crate::storage::{AsyncFileManager, ManifestData, ManifestFile};
 use crate::io::backend::{IoBackendFactory, IoBackendType};
 use crate::index::IndexPageManager;
 use crate::Result;
-use crate::error::{Error, KvError};
+use crate::error::KvError;
 
 /// Shard identifier
 pub type ShardId = usize;
@@ -241,7 +239,7 @@ impl Shard {
         tracing::info!("Shard {} starting", self.id);
 
         // Take the receiver
-        let mut rx = {
+        let rx = {
             let mut rx_lock = self.request_rx.write().await;
             rx_lock.take()
         };

@@ -6,12 +6,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::types::{Key, Value, TableIdent, PageId, FilePageId, MAX_PAGE_ID};
+use crate::types::{Key, Value, TableIdent, PageId, MAX_PAGE_ID};
 use crate::page::{DataPage, DataPageIterator, PageCache, PageMapper, MappingSnapshot};
 use crate::storage::AsyncFileManager;
 use crate::index::IndexPageManager;
 use crate::Result;
-use crate::error::{Error, KvError};
+use crate::error::Error;
 
 use super::traits::{Task, TaskResult, TaskPriority, TaskType, TaskContext};
 

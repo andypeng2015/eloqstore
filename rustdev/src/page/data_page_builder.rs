@@ -1,9 +1,8 @@
 //! Data page builder with restart points for efficient binary search
 
-use bytes::{BufMut, BytesMut};
-use std::cmp;
+use bytes::BytesMut;
 
-use crate::codec::encoding::{encode_varint_into, KvEncoder};
+use crate::codec::encoding::KvEncoder;
 use crate::types::{PageId, PageType, MAX_PAGE_ID};
 use super::page::{Page, HEADER_SIZE};
 use super::data_page::DataPage;

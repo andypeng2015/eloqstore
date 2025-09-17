@@ -4,14 +4,11 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bytes::{Bytes, BytesMut};
 
 use crate::config::KvOptions;
-use crate::types::{PageId, FilePageId, PageType, TableIdent, MAX_PAGE_ID, MAX_FILE_PAGE_ID};
+use crate::types::{PageId, FilePageId, TableIdent, MAX_PAGE_ID, MAX_FILE_PAGE_ID};
 use crate::page::{Page, HEADER_SIZE};
 use crate::codec::Comparator;
-use crate::Result;
-use crate::error::Error;
 
 /// Maximum index page size (64KB)
 pub const MAX_INDEX_PAGE_SIZE: usize = 1 << 16;

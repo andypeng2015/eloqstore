@@ -8,8 +8,8 @@ use std::ptr::NonNull;
 use crate::config::KvOptions;
 use crate::codec::Comparator;
 use crate::error::{Error, KvError};
-use crate::types::{PageId, FilePageId, TableIdent, MAX_PAGE_ID};
-use crate::page::{PageMapper, MappingSnapshot};
+use crate::types::{PageId, TableIdent, MAX_PAGE_ID};
+use crate::page::MappingSnapshot;
 use crate::storage::AsyncFileManager;
 use crate::Result;
 

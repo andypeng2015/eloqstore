@@ -2,14 +2,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::task::Waker;
 use parking_lot::Mutex;
 
 use crate::types::{TableIdent, Key, Value, KvEntry, WriteDataEntry};
-use crate::error::{Error, KvError};
-use crate::Result;
+use crate::error::KvError;
 
 /// Request type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

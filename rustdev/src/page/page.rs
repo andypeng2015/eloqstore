@@ -2,12 +2,9 @@
 
 use bytes::{Bytes, BytesMut, BufMut};
 use crc32c::crc32c;
-use std::mem;
-use std::ptr;
 use std::ops::{Index, IndexMut, Range};
 
 use crate::types::{PageId, PageType, DEFAULT_PAGE_SIZE};
-use crate::Result;
 
 /// Page header offsets
 pub const CHECKSUM_OFFSET: usize = 0;
@@ -71,7 +68,7 @@ pub struct Page {
 impl Page {
     /// Create a new empty page
     pub fn new(size: usize) -> Self {
-        let mut data = BytesMut::zeroed(size);
+        let data = BytesMut::zeroed(size);
         Self {
             data: data.freeze(),
             size,
@@ -106,7 +103,7 @@ impl Page {
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
         // Make the data unique if it's shared
         if !self.data.is_empty() {
-            let mut data = BytesMut::from(self.data.as_ref());
+            let data = BytesMut::from(self.data.as_ref());
             self.data = data.freeze();
         }
 

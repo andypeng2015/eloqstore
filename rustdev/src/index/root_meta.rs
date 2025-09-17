@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::oneshot;
 
-use crate::types::{PageId, FilePageId, TableIdent, MAX_PAGE_ID};
+use crate::types::{PageId, FilePageId, MAX_PAGE_ID};
 use crate::page::PageMapper;
 use crate::page::MappingSnapshot;
 use crate::Result;

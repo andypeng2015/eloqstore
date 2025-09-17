@@ -3,7 +3,6 @@
 //! Handles background operations like compaction and archiving
 
 use std::sync::Arc;
-use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::types::{TableIdent, PageId, FilePageId, MAX_PAGE_ID, MAX_FILE_PAGE_ID};
@@ -15,7 +14,6 @@ use crate::Result;
 use crate::error::{Error, KvError};
 
 use super::traits::{Task, TaskResult, TaskPriority, TaskType, TaskContext};
-use super::write::WriteTask;
 
 /// Background statistics
 #[derive(Debug, Clone)]

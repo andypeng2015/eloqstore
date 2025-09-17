@@ -3,7 +3,7 @@
 //! A Rust implementation of the EloqStore storage engine, providing
 //! high-performance key-value storage with async I/O using io_uring.
 
-#![warn(missing_docs)]
+// #![warn(missing_docs)]  // TODO: Add documentation later
 #![warn(rust_2018_idioms)]
 #![allow(dead_code)] // Temporary during development
 #![allow(unused_variables)] // Temporary during development

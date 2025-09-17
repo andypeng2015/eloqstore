@@ -1,8 +1,8 @@
 //! Page builder for constructing data pages
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 
-use crate::types::{Key, Value, PageId};
+use crate::types::{Key, Value};
 use crate::codec::encoding::KvEncoder;
 use crate::Result;
 use crate::error::Error;
@@ -92,7 +92,7 @@ impl PageBuilder {
     }
 
     /// Build the page
-    pub fn build(mut self) -> Result<Page> {
+    pub fn build(self) -> Result<Page> {
         if self.entries.is_empty() {
             return Err(Error::InvalidInput("Cannot build empty page".into()));
         }
@@ -106,7 +106,7 @@ impl PageBuilder {
         page.extend_from_slice(&vec![0u8; PageHeader::SIZE]);
 
         // Write entries
-        let mut encoder = KvEncoder::new();
+        let encoder = KvEncoder::new();
         let data_start = page.len();
 
         // Build entries in a temporary vector
