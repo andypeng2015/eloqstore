@@ -349,9 +349,186 @@ async fn main() -> Result<()> {
     }
 
     // ========================================
-    // 7. Final State Verification
+    // 7. Large Value Test (Overflow Handling)
     // ========================================
-    println!("\n7. Final State Verification:");
+    println!("\n7. Large Value Test (Testing Overflow Handling):");
+    {
+        // Create a large value that will trigger overflow
+        // Assuming page size is 4096, we need a value larger than ~4000 bytes
+        let large_value = "X".repeat(5000); // 5KB value
+
+        println!("   Creating large value of {} bytes", large_value.len());
+
+        // Write large value
+        let write_req = BatchWriteRequest {
+            table_id: table_id.clone(),
+            entries: vec![WriteEntry {
+                key: Key::from("large:key1"),
+                value: Value::from(large_value.clone()),
+                op: WriteOp::Upsert,
+                timestamp: 0,
+                expire_ts: None,
+            }],
+            sync: true,
+            timeout: None,
+        };
+
+        let result = store.batch_write(write_req).await?;
+        assert!(result.success, "Large value write should succeed");
+        println!("   ✓ Successfully wrote large value (overflow handling worked)");
+
+        // Read it back
+        let read_req = ReadRequest {
+            table_id: table_id.clone(),
+            key: Key::from("large:key1"),
+            timeout: None,
+        };
+
+        let result = store.read(read_req).await?;
+        assert!(result.value.is_some(), "Large value should be found");
+        let retrieved_value = result.value.unwrap();
+        assert_eq!(retrieved_value.len(), large_value.len(), "Retrieved value size should match");
+        assert_eq!(retrieved_value, Value::from(large_value), "Retrieved value should match original");
+        println!("   ✓ Successfully read back large value (all {} bytes match)", retrieved_value.len());
+
+        // Test multiple large values
+        println!("\n   Testing multiple large values:");
+        let large_value2 = "Y".repeat(6000); // 6KB value
+        let large_value3 = "Z".repeat(4500); // 4.5KB value
+
+        let entries = vec![
+            WriteEntry {
+                key: Key::from("large:key2"),
+                value: Value::from(large_value2.clone()),
+                op: WriteOp::Upsert,
+                timestamp: 0,
+                expire_ts: None,
+            },
+            WriteEntry {
+                key: Key::from("large:key3"),
+                value: Value::from(large_value3.clone()),
+                op: WriteOp::Upsert,
+                timestamp: 0,
+                expire_ts: None,
+            },
+        ];
+
+        let write_req = BatchWriteRequest {
+            table_id: table_id.clone(),
+            entries,
+            sync: true,
+            timeout: None,
+        };
+
+        let result = store.batch_write(write_req).await?;
+        assert!(result.success);
+        println!("   ✓ Wrote multiple large values (6000 and 4500 bytes)");
+
+        // Verify all large values
+        for (key, expected_char, size) in [
+            ("large:key2", 'Y', 6000),
+            ("large:key3", 'Z', 4500),
+        ] {
+            let read_req = ReadRequest {
+                table_id: table_id.clone(),
+                key: Key::from(key),
+                timeout: None,
+            };
+
+            let result = store.read(read_req).await?;
+            assert!(result.value.is_some());
+            let value = result.value.unwrap();
+            assert_eq!(value.len(), size);
+            // Check first and last bytes to ensure correctness
+            assert_eq!(value[0] as char, expected_char);
+            assert_eq!(value[size - 1] as char, expected_char);
+            println!("   ✓ Verified {}: {} bytes correct", key, size);
+        }
+
+        // Test scan with large values
+        println!("\n   Testing scan with large values:");
+        let scan_req = ScanRequest {
+            table_id: table_id.clone(),
+            start_key: Key::from("large:"),
+            end_key: Some(Key::from("large:~")),
+            limit: Some(10),
+            reverse: false,
+            timeout: None,
+        };
+
+        let result = store.scan(scan_req).await?;
+        assert_eq!(result.entries.len(), 3, "Should find 3 large entries");
+
+        // Verify scanned large values
+        for (i, (key, value)) in result.entries.iter().enumerate() {
+            let key_str = String::from_utf8_lossy(key.as_ref());
+            println!("   ✓ Scanned {}: {} bytes", key_str, value.len());
+            assert!(value.len() >= 4500, "All large values should be >= 4500 bytes");
+        }
+
+        // Test update of large value
+        println!("\n   Testing update of large value:");
+        let updated_value = "U".repeat(5500); // 5.5KB
+
+        let write_req = BatchWriteRequest {
+            table_id: table_id.clone(),
+            entries: vec![WriteEntry {
+                key: Key::from("large:key1"),
+                value: Value::from(updated_value.clone()),
+                op: WriteOp::Upsert,
+                timestamp: 0,
+                expire_ts: None,
+            }],
+            sync: true,
+            timeout: None,
+        };
+
+        store.batch_write(write_req).await?;
+
+        let read_req = ReadRequest {
+            table_id: table_id.clone(),
+            key: Key::from("large:key1"),
+            timeout: None,
+        };
+
+        let result = store.read(read_req).await?;
+        let value = result.value.unwrap();
+        assert_eq!(value.len(), 5500);
+        assert_eq!(value[0] as char, 'U');
+        println!("   ✓ Successfully updated large value to 5500 bytes");
+
+        // Test delete of large value
+        println!("\n   Testing delete of large value:");
+        let delete_req = BatchWriteRequest {
+            table_id: table_id.clone(),
+            entries: vec![WriteEntry {
+                key: Key::from("large:key2"),
+                value: Value::from(""),
+                op: WriteOp::Delete,
+                timestamp: 0,
+                expire_ts: None,
+            }],
+            sync: true,
+            timeout: None,
+        };
+
+        store.batch_write(delete_req).await?;
+
+        let read_req = ReadRequest {
+            table_id: table_id.clone(),
+            key: Key::from("large:key2"),
+            timeout: None,
+        };
+
+        let result = store.read(read_req).await?;
+        assert!(result.value.is_none());
+        println!("   ✓ Successfully deleted large value");
+    }
+
+    // ========================================
+    // 8. Final State Verification
+    // ========================================
+    println!("\n8. Final State Verification:");
     {
         // Scan all remaining keys
         let scan_req = ScanRequest {

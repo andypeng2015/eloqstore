@@ -15,5 +15,5 @@ pub use data_page_builder::DataPageBuilder;
 pub use overflow_page::{OverflowPage, OverflowChainBuilder, OverflowChainReader};
 pub use page_mapper::{PageMapper, MappingSnapshot, PageMapping};
 pub use page_pool::{PagePool, GlobalPagePool, LocalPageAllocator, PoolStats};
-pub use page_cache::{PageCache, PageCacheConfig, CacheStats};
+pub use page_cache::{PageCache, PageCacheConfig, CacheStats, EvictionPolicy};
 pub use page_builder::PageBuilder;

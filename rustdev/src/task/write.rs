@@ -1205,6 +1205,17 @@ impl BatchWriteTask {
             if should_add {
                 tracing::debug!("Collecting key={} for sorting",
                     String::from_utf8_lossy(&key_to_add));
+
+                // For overflow estimation, use pointer size not actual value size
+                let size_for_estimate = if self.is_overflow_kv(&key_to_add, &val_to_add) {
+                    // Overflow values are stored as pointers (typically 4-8 bytes per page pointer)
+                    // Estimate based on number of pages needed
+                    let num_pages = (val_to_add.len() + 3900) / 3900; // ~3900 bytes per overflow page
+                    num_pages * 4  // 4 bytes per page pointer
+                } else {
+                    val_to_add.len()
+                };
+
                 page_entries.push(PageEntry {
                     key: key_to_add.clone(),
                     value: val_to_add.clone(),
@@ -1214,7 +1225,16 @@ impl BatchWriteTask {
 
                 // Check if we're approaching page size limit
                 let estimated_size = page_entries.iter()
-                    .map(|e| 8 + e.key.len() + e.value.len() + 16) // Rough estimate
+                    .map(|e| {
+                        let val_size = if self.is_overflow_kv(&e.key, &e.value) {
+                            // For overflow entries, count pointer size not value size
+                            let num_pages = (e.value.len() + 3900) / 3900;
+                            num_pages * 4
+                        } else {
+                            e.value.len()
+                        };
+                        8 + e.key.len() + val_size + 16 // Rough estimate with encoding overhead
+                    })
                     .sum::<usize>();
 
                 if estimated_size > 3500 { // Leave some buffer
@@ -1258,17 +1278,18 @@ impl BatchWriteTask {
         page_entries.sort_by(|a, b| a.key.as_ref().cmp(b.key.as_ref()));
 
         // Log sorted entries for debugging
-        println!("DEBUG: Sorted {} entries for page:", page_entries.len());
-        for entry in &page_entries {
-            println!("DEBUG:   - Sorted key: {}", String::from_utf8_lossy(&entry.key));
-        }
+        tracing::debug!("Sorted {} entries for page", page_entries.len());
 
         // Add sorted entries to the page builder
+        let mut any_added = false;
         for entry in &page_entries {
             // Check if value would overflow
             let (value_to_add, is_overflow) = if self.is_overflow_kv(&entry.key, &entry.value) {
+                tracing::debug!("Detected overflow for key={}, value_size={}",
+                    String::from_utf8_lossy(&entry.key), entry.value.len());
                 // Write overflow value
                 self.write_overflow_value(&entry.value).await?;
+                tracing::debug!("Wrote overflow value, ptrs_size={}", self.overflow_ptrs.len());
                 // Use overflow pointers as the value
                 (Bytes::copy_from_slice(&self.overflow_ptrs), true)
             } else {
@@ -1283,12 +1304,24 @@ impl BatchWriteTask {
                 is_overflow,
             );
 
-            if !added {
+            tracing::debug!("Added key={} to page builder, added={}, is_overflow={}",
+                String::from_utf8_lossy(&entry.key), added, is_overflow);
+
+            if added {
+                any_added = true;
+            } else {
                 tracing::debug!("Page full while adding key={}, finishing current page",
                     String::from_utf8_lossy(&entry.key));
-                // Should not happen with our size estimation, but handle it
+                // Page is full, we need to finish this page and continue on next iteration
+                // Don't break here, as we still need to finish the page below
                 break;
             }
+        }
+
+        // Ensure we processed at least one entry
+        if !any_added && !page_entries.is_empty() {
+            // This shouldn't happen - even overflow values should fit as pointers
+            return Err(Error::InvalidState("Could not add any entries to page".into()));
         }
 
         // Build and write the page if there's content
@@ -1354,11 +1387,14 @@ impl BatchWriteTask {
     async fn write_overflow_value(&mut self, value: &[u8]) -> Result<()> {
         use crate::page::{OverflowPage, HEADER_SIZE};
 
+        tracing::debug!("write_overflow_value called with value_size={}", value.len());
+
         // Clear overflow pointers buffer
         self.overflow_ptrs.clear();
 
         // Calculate page capacity
         let page_cap = self.options.data_page_size - HEADER_SIZE - 100; // Reserve space for metadata
+        tracing::debug!("page_cap={}, data_page_size={}", page_cap, self.options.data_page_size);
 
         let mut remaining = value;
         let mut head_pointers = Vec::new();
@@ -1366,10 +1402,12 @@ impl BatchWriteTask {
         while !remaining.is_empty() {
             // Calculate how many bytes we can fit in this page
             let chunk_size = remaining.len().min(page_cap);
+            tracing::debug!("Writing chunk, remaining={}, chunk_size={}", remaining.len(), chunk_size);
 
             // Allocate page for overflow
             let page_id = self.page_mapper.allocate_page()?;
             head_pointers.push(page_id);
+            tracing::debug!("Allocated overflow page_id={}", page_id);
 
             // Create overflow page with chunk of value
             let mut overflow_page = OverflowPage::new(page_id, self.options.data_page_size);
