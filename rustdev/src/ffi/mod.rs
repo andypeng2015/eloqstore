@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use crate::config::KvOptions;
 use crate::store::EloqStore;
-use crate::api::{ReadRequest, WriteRequest};
+use crate::api::request::{ReadRequest, BatchWriteRequest, WriteEntry, WriteOp, TableIdent};
+use bytes::Bytes;
 
 /// Opaque handle for the store
 pub struct EloqStoreHandle {
@@ -42,7 +43,10 @@ pub unsafe extern "C" fn eloqstore_new(data_dir: *const c_char) -> *mut EloqStor
         Err(_) => return ptr::null_mut(),
     };
 
-    let store = EloqStore::new(options);
+    let store = match EloqStore::new((*options).clone()) {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
 
     Box::into_raw(Box::new(EloqStoreHandle {
         store: Box::new(store),
@@ -126,14 +130,23 @@ pub unsafe extern "C" fn eloqstore_write(
     let key_slice = slice::from_raw_parts(key, key_len);
     let value_slice = slice::from_raw_parts(value, value_len);
 
-    let req = WriteRequest {
-        table: table_str.to_string(),
-        key: key_slice.to_vec(),
-        value: value_slice.to_vec(),
+    let table_id = TableIdent::new(table_str, 0);
+    let entry = WriteEntry {
+        key: Bytes::from(key_slice.to_vec()),
+        value: Bytes::from(value_slice.to_vec()),
+        op: WriteOp::Upsert,
+        timestamp: 0,
+        expire_ts: None,
+    };
+    let req = BatchWriteRequest {
+        table_id,
+        entries: vec![entry],
+        sync: true,
+        timeout: None,
     };
 
     handle.runtime.block_on(async {
-        match handle.store.write(req).await {
+        match handle.store.batch_write(req).await {
             Ok(_) => 0,
             Err(_) => -1,
         }
@@ -168,25 +181,35 @@ pub unsafe extern "C" fn eloqstore_read(
     let key_slice = slice::from_raw_parts(key, key_len);
 
     let req = ReadRequest {
-        table: table_str.to_string(),
-        key: key_slice.to_vec(),
+        table_id: TableIdent::new(table_str, 0),
+        key: Bytes::from(key_slice.to_vec()),
+        timeout: None,
     };
 
     handle.runtime.block_on(async {
         match handle.store.read(req).await {
-            Ok(value) => {
-                let mut boxed_value = value.into_boxed_slice();
-                let value_ptr = boxed_value.as_mut_ptr();
-                let value_len = boxed_value.len();
+            Ok(response) => {
+                if let Some(value) = response.value {
+                    let value_bytes = value.to_vec();
+                    let value_len = value_bytes.len();
 
-                // Leak the box so the caller can free it later
-                std::mem::forget(boxed_value);
+                    // Allocate memory for the value
+                    let value_ptr = libc::malloc(value_len) as *mut u8;
+                    if value_ptr.is_null() {
+                        return -1;
+                    }
 
-                *value_out = value_ptr;
-                *value_len_out = value_len;
-                0
+                    // Copy the value
+                    ptr::copy_nonoverlapping(value_bytes.as_ptr(), value_ptr, value_len);
+
+                    *value_out = value_ptr;
+                    *value_len_out = value_len;
+                    0
+                } else {
+                    1 // Not found
+                }
             }
-            Err(_) => -1,
+            Err(_) => -1, // Error
         }
     })
 }

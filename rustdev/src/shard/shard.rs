@@ -5,10 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{RwLock, mpsc};
-use bytes::Bytes;
 
 use crate::config::KvOptions;
-use crate::task::{Task, TaskScheduler};
+use crate::task::{Task, TaskScheduler, ReadTask};
 use crate::page::{PageCache, PageMapper};
 use crate::storage::{AsyncFileManager, ManifestData, ManifestFile};
 use crate::io::backend::{IoBackendFactory, IoBackendType};
@@ -20,9 +19,18 @@ use crate::error::KvError;
 pub type ShardId = usize;
 
 /// Request queue item
+/// Wrapper for raw pointer to make it Send
+/// SAFETY: We ensure this is only used in a safe context
+struct RequestPtr(*const dyn crate::store::KvRequest);
+unsafe impl Send for RequestPtr {}
+unsafe impl Sync for RequestPtr {}
+
 pub struct RequestItem {
     pub request: Box<dyn crate::store::KvRequest>,
     pub timestamp: Instant,
+    /// Raw pointer to original request for setting done status
+    /// SAFETY: Only valid during exec_sync lifetime
+    pub original: Option<RequestPtr>,
 }
 
 /// Shard state
@@ -214,20 +222,77 @@ impl Shard {
     /// Add a KV request to the queue (following C++ AddKvRequest)
     pub async fn add_request(&self, request: &dyn crate::store::KvRequest) -> bool {
         if !self.running.load(Ordering::Relaxed) {
+            tracing::warn!("Shard {} not running, rejecting request", self.id);
             return false;
         }
 
-        // TODO: Properly box/clone the request
-        // For now, we need to handle the request ownership properly
-        // In real implementation, we'd need to make KvRequest Clone or use Arc
+        use crate::store::{RequestType, ReadRequest, BatchWriteRequest, ScanRequest, FloorRequest};
 
-        // Queue the request
+        tracing::debug!("Shard {} adding request type {:?}", self.id, request.request_type());
+
+        // Create a new boxed request based on the request type
+        // We need to downcast and create new instances since KvRequest is not Clone
+        let boxed_request: Box<dyn crate::store::KvRequest> = match request.request_type() {
+            RequestType::Read => {
+                if let Some(read_req) = request.as_any().downcast_ref::<ReadRequest>() {
+                    // Create new request but share the value field
+                    let mut new_req = ReadRequest::new(
+                        read_req.base.table_id.clone(),
+                        read_req.key.clone(),
+                    );
+                    // Share the Arc<Mutex<Option<Value>>> so updates are visible
+                    new_req.value = read_req.value.clone();
+                    Box::new(new_req)
+                } else {
+                    return false;
+                }
+            }
+            RequestType::BatchWrite => {
+                if let Some(write_req) = request.as_any().downcast_ref::<BatchWriteRequest>() {
+                    Box::new(BatchWriteRequest::new(
+                        write_req.base.table_id.clone(),
+                        write_req.entries.clone(),
+                    ))
+                } else {
+                    return false;
+                }
+            }
+            RequestType::Scan => {
+                if let Some(scan_req) = request.as_any().downcast_ref::<ScanRequest>() {
+                    let mut new_req = ScanRequest::new(
+                        scan_req.base.table_id.clone(),
+                        scan_req.begin_key.clone(),
+                        scan_req.end_key.clone(),
+                        scan_req.begin_inclusive,
+                    );
+                    new_req.set_pagination(scan_req.max_entries, scan_req.max_size);
+                    Box::new(new_req)
+                } else {
+                    return false;
+                }
+            }
+            RequestType::Floor => {
+                if let Some(floor_req) = request.as_any().downcast_ref::<FloorRequest>() {
+                    Box::new(FloorRequest::new(
+                        floor_req.base.table_id.clone(),
+                        floor_req.key.clone(),
+                    ))
+                } else {
+                    return false;
+                }
+            }
+            _ => {
+                // Unsupported request type
+                return false;
+            }
+        };
+
+        // Queue the request with a reference to the original
         let item = RequestItem {
-            request: Box::new(crate::store::ReadRequest::new(
-                request.table_id().clone(),
-                Bytes::new(),
-            )), // Placeholder - need proper request cloning
+            request: boxed_request,
             timestamp: Instant::now(),
+            // Cast to 'static lifetime - safe because exec_sync waits for completion
+            original: Some(RequestPtr(request as *const dyn crate::store::KvRequest as *const dyn crate::store::KvRequest)),
         };
 
         self.request_queue.send(item).is_ok()
@@ -249,6 +314,7 @@ impl Shard {
                 // Process requests from queue
                 tokio::select! {
                     Some(item) = rx.recv() => {
+                        tracing::debug!("Shard {} received request from queue", self.id);
                         // Process the request
                         self.process_request(item).await;
                     }
@@ -263,37 +329,60 @@ impl Shard {
         tracing::info!("Shard {} stopped", self.id);
     }
 
+    /// Helper to set done on the correct request
+    fn set_request_done(original: Option<RequestPtr>, request: &Box<dyn crate::store::KvRequest>, error: Option<KvError>) {
+        if let Some(RequestPtr(orig_ptr)) = original {
+            unsafe {
+                (*orig_ptr).set_done(error);
+            }
+        } else {
+            request.set_done(error);
+        }
+    }
+
     /// Process a single request
     async fn process_request(&self, item: RequestItem) {
         use crate::store::RequestType;
-        use crate::task::{ReadTask, BatchWriteTask, TaskContext};
+        use crate::task::TaskContext;
 
         let start = Instant::now();
         let request = item.request;
+        let original = item.original;
+
+        tracing::debug!("Shard {} processing request type {:?}", self.id, request.request_type());
 
         match request.request_type() {
             RequestType::Read => {
                 self.stats.reads.fetch_add(1, Ordering::Relaxed);
 
                 if let Some(read_req) = request.as_any().downcast_ref::<crate::store::ReadRequest>() {
-                    // Create and execute read task
-                    let task = ReadTask::new(
-                        read_req.key.clone(),
-                        read_req.base.table_id.clone(),
+                    // Use simplified read for now
+                    let index_manager = match self.index_manager.as_ref() {
+                        Some(mgr) => mgr.clone(),
+                        None => {
+                            Self::set_request_done(original, &request,Some(KvError::InternalError));
+                            return;
+                        }
+                    };
+
+                    match crate::task::write_simple::simple_read(
+                        &read_req.key,
+                        &read_req.base.table_id,
                         self.page_cache.clone(),
                         self.page_mapper.clone(),
                         self.file_manager.clone(),
-                    );
-
-                    let ctx = TaskContext::default();
-                    match task.execute(&ctx).await {
-                        Ok(result) => {
-                            // TODO: Set result on request
-                            request.set_done(None);
+                        index_manager,
+                    ).await {
+                        Ok(value) => {
+                            // Set result on request BEFORE marking as done
+                            *read_req.value.lock() = value;
+                            // Mark as done AFTER setting the value
+                            Self::set_request_done(original, &request, None);
                         }
                         Err(e) => {
+                            tracing::error!("Read error: {:?}", e);
                             self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                            request.set_done(Some(KvError::InternalError));
+                            Self::set_request_done(original, &request,Some(KvError::InternalError));
                         }
                     }
                 }
@@ -302,43 +391,41 @@ impl Shard {
                 self.stats.writes.fetch_add(1, Ordering::Relaxed);
 
                 if let Some(write_req) = request.as_any().downcast_ref::<crate::store::BatchWriteRequest>() {
-                    // Create and execute batch write task
-                    let entries: Vec<_> = write_req.entries.iter()
-                        .map(|e| crate::task::write::WriteDataEntry {
-                            key: Bytes::from(e.key.clone()),
-                            value: Bytes::from(e.value.clone()),
-                            op: crate::task::write::WriteOp::Upsert,
-                            timestamp: 0,
-                            expire_ts: 0,
-                        })
-                        .collect();
-
                     let index_manager = match self.index_manager.as_ref() {
                         Some(mgr) => mgr.clone(),
                         None => {
-                            request.set_done(Some(KvError::InternalError));
+                            Self::set_request_done(original, &request,Some(KvError::InternalError));
                             return;
                         }
                     };
 
-                    let task = BatchWriteTask::new(
-                        entries,
-                        write_req.base.table_id.clone(),
-                        self.page_cache.clone(),
-                        self.page_mapper.clone(),
-                        self.file_manager.clone(),
-                        index_manager.clone(),
-                    );
+                    // Use simplified write for now - just write first entry for testing
+                    let mut had_error = false;
+                    for entry in &write_req.entries {
+                        match crate::task::write_simple::simple_write(
+                            &entry.key,
+                            &entry.value,
+                            &write_req.base.table_id,
+                            self.page_cache.clone(),
+                            self.page_mapper.clone(),
+                            self.file_manager.clone(),
+                            index_manager.clone(),
+                        ).await {
+                            Ok(_) => {
+                                }
+                            Err(e) => {
+                                tracing::error!("Write error: {:?}", e);
+                                had_error = true;
+                                break;
+                            }
+                        }
+                    }
 
-                    let ctx = TaskContext::default();
-                    match task.execute(&ctx).await {
-                        Ok(result) => {
-                            request.set_done(None);
-                        }
-                        Err(e) => {
-                            self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                            request.set_done(Some(KvError::InternalError));
-                        }
+                    if had_error {
+                        self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                        Self::set_request_done(original, &request,Some(KvError::InternalError));
+                    } else {
+                        Self::set_request_done(original, &request,None);
                     }
                 }
             }
@@ -349,7 +436,7 @@ impl Shard {
                     let index_manager = match self.index_manager.as_ref() {
                         Some(mgr) => mgr.clone(),
                         None => {
-                            request.set_done(Some(KvError::InternalError));
+                            Self::set_request_done(original, &request,Some(KvError::InternalError));
                             return;
                         }
                     };
@@ -369,47 +456,56 @@ impl Shard {
                     match task.execute(&ctx).await {
                         Ok(_result) => {
                             // TODO: Set scan results on request
-                            request.set_done(None);
+                            Self::set_request_done(original, &request,None);
                         }
                         Err(_e) => {
                             self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                            request.set_done(Some(KvError::InternalError));
+                            Self::set_request_done(original, &request,Some(KvError::InternalError));
                         }
                     }
                 } else {
-                    request.set_done(Some(KvError::InvalidArgument));
+                    Self::set_request_done(original, &request,Some(KvError::InvalidArgument));
                 }
             }
             RequestType::Floor => {
                 self.stats.reads.fetch_add(1, Ordering::Relaxed);
 
                 if let Some(floor_req) = request.as_any().downcast_ref::<crate::store::ReadRequest>() {
+                    let index_manager = match self.index_manager.as_ref() {
+                        Some(im) => im,
+                        None => {
+                            tracing::error!("Index manager not initialized");
+                            Self::set_request_done(original, &request,Some(KvError::NotFound));
+                            return;
+                        }
+                    };
                     let task = ReadTask::floor(
                         floor_req.key.clone(),
                         floor_req.base.table_id.clone(),
                         self.page_cache.clone(),
                         self.page_mapper.clone(),
                         self.file_manager.clone(),
+                        index_manager.clone(),
                     );
 
                     let ctx = TaskContext::default();
                     match task.execute(&ctx).await {
                         Ok(_result) => {
                             // TODO: Set result on request
-                            request.set_done(None);
+                            Self::set_request_done(original, &request,None);
                         }
                         Err(_e) => {
                             self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                            request.set_done(Some(KvError::InternalError));
+                            Self::set_request_done(original, &request,Some(KvError::InternalError));
                         }
                     }
                 } else {
-                    request.set_done(Some(KvError::InvalidArgument));
+                    Self::set_request_done(original, &request,Some(KvError::InvalidArgument));
                 }
             }
             _ => {
                 // Other request types like Archive, Compact, CleanExpired are background operations
-                request.set_done(Some(KvError::NotSupported));
+                Self::set_request_done(original, &request,Some(KvError::NotSupported));
             }
         }
 

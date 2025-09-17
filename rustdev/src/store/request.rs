@@ -101,8 +101,8 @@ impl RequestBase {
 pub struct ReadRequest {
     pub base: RequestBase,
     pub key: Key,
-    // Output
-    pub value: Option<Value>,
+    // Output - wrapped in Arc<Mutex> for thread-safe updates
+    pub value: Arc<Mutex<Option<Value>>>,
     pub timestamp: u64,
     pub expire_ts: u64,
 }
@@ -112,7 +112,7 @@ impl ReadRequest {
         Self {
             base: RequestBase::new(table_id),
             key,
-            value: None,
+            value: Arc::new(Mutex::new(None)),
             timestamp: 0,
             expire_ts: 0,
         }

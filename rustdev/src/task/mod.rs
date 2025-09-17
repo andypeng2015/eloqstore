@@ -4,6 +4,7 @@ pub mod traits;
 pub mod scheduler;
 pub mod read;
 pub mod write;
+pub mod write_simple;
 pub mod scan;
 pub mod background_write;
 pub mod file_gc;

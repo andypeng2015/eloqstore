@@ -3,32 +3,8 @@
 use bytes::Bytes;
 use std::time::Duration;
 
-/// Table identifier
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct TableIdent {
-    pub table_name: String,
-    pub partition_id: u32,
-}
-
-impl TableIdent {
-    /// Create a new table identifier
-    pub fn new(table_name: impl Into<String>, partition_id: u32) -> Self {
-        Self {
-            table_name: table_name.into(),
-            partition_id,
-        }
-    }
-
-    /// Get shard index for this table partition
-    pub fn shard_index(&self, num_shards: u16) -> u16 {
-        (self.partition_id as u16) % num_shards
-    }
-
-    /// Get disk index for this table partition
-    pub fn disk_index(&self, num_disks: u8) -> u8 {
-        (self.partition_id as u8) % num_disks
-    }
-}
+// Re-export TableIdent from types module
+pub use crate::types::TableIdent;
 
 /// Write operation type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +107,21 @@ pub struct CompactRequest {
 pub struct CleanExpiredRequest {
     pub table_id: TableIdent,
     pub current_time: u64,
+}
+
+/// Single write request (convenience)
+#[derive(Debug)]
+pub struct WriteRequest {
+    pub table_id: TableIdent,
+    pub key: Bytes,
+    pub value: Bytes,
+}
+
+/// Delete request
+#[derive(Debug)]
+pub struct DeleteRequest {
+    pub table_id: TableIdent,
+    pub key: Bytes,
 }
 
 /// Request builder for fluent API

@@ -74,14 +74,14 @@ impl TableIdent {
         })
     }
 
-    /// Get disk index for this table partition
-    pub fn disk_index(&self, num_disks: u8) -> u8 {
-        (self.partition_id as u8) % num_disks
-    }
-
     /// Get shard index for this table partition
     pub fn shard_index(&self, num_shards: u16) -> u16 {
         (self.partition_id as u16) % num_shards
+    }
+
+    /// Get disk index for this table partition
+    pub fn disk_index(&self, num_disks: u8) -> u8 {
+        (self.partition_id as u8) % num_disks
     }
 
     /// Get storage path for this table partition

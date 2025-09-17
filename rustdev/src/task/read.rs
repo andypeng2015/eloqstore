@@ -8,10 +8,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::types::{Key, Value};
+use crate::types::{Key, Value, PageId};
 use crate::page::{DataPage, PageCache};
 use crate::page::PageMapper;
 use crate::storage::AsyncFileManager;
+use crate::index::{IndexPageManager, IndexPageIter};
+use crate::config::KvOptions;
 use crate::Result;
 use crate::error::Error;
 
@@ -43,6 +45,10 @@ pub struct ReadTask {
     page_mapper: Arc<PageMapper>,
     /// File manager using I/O abstraction
     file_manager: Arc<AsyncFileManager>,
+    /// Index manager
+    index_manager: Arc<IndexPageManager>,
+    /// Options
+    options: Arc<KvOptions>,
 }
 
 impl ReadTask {
@@ -53,8 +59,9 @@ impl ReadTask {
         page_cache: Arc<PageCache>,
         page_mapper: Arc<PageMapper>,
         file_manager: Arc<AsyncFileManager>,
+        index_manager: Arc<IndexPageManager>,
     ) -> Self {
-        Self::with_op(key, ReadOp::Exact, table_id, page_cache, page_mapper, file_manager)
+        Self::with_op(key, ReadOp::Exact, table_id, page_cache, page_mapper, file_manager, index_manager)
     }
 
     /// Create a new read task with operation type
@@ -65,6 +72,7 @@ impl ReadTask {
         page_cache: Arc<PageCache>,
         page_mapper: Arc<PageMapper>,
         file_manager: Arc<AsyncFileManager>,
+        index_manager: Arc<IndexPageManager>,
     ) -> Self {
         Self {
             key,
@@ -73,6 +81,8 @@ impl ReadTask {
             page_cache,
             page_mapper,
             file_manager,
+            index_manager,
+            options: Arc::new(KvOptions::default()),
         }
     }
 
@@ -83,8 +93,9 @@ impl ReadTask {
         page_cache: Arc<PageCache>,
         page_mapper: Arc<PageMapper>,
         file_manager: Arc<AsyncFileManager>,
+        index_manager: Arc<IndexPageManager>,
     ) -> Self {
-        Self::with_op(key, ReadOp::Floor, table_id, page_cache, page_mapper, file_manager)
+        Self::with_op(key, ReadOp::Floor, table_id, page_cache, page_mapper, file_manager, index_manager)
     }
 
     /// Create a ceiling read task (find first key >= search key)
@@ -94,52 +105,90 @@ impl ReadTask {
         page_cache: Arc<PageCache>,
         page_mapper: Arc<PageMapper>,
         file_manager: Arc<AsyncFileManager>,
+        index_manager: Arc<IndexPageManager>,
     ) -> Self {
-        Self::with_op(key, ReadOp::Ceiling, table_id, page_cache, page_mapper, file_manager)
+        Self::with_op(key, ReadOp::Ceiling, table_id, page_cache, page_mapper, file_manager, index_manager)
     }
 
-    /// Find the page containing the key
+    /// Find the page containing the key by navigating the index
     async fn find_page(&self) -> Result<Option<Arc<DataPage>>> {
         // First check cache
         if let Some(page) = self.page_cache.get(&self.key).await {
             return Ok(Some(page));
         }
 
-        // In a full implementation, we would:
-        // 1. Get root metadata for the table using IndexManager
-        // 2. Use SeekIndex to find the page_id containing the key
-        // 3. Map logical page_id to physical file_page_id
-        // 4. Load the page from disk
+        // Get root metadata for the table
+        let root_id = {
+            let root_meta = self.index_manager.find_root(&self.table_id)?;
+            let id = root_meta.root_id;
+            drop(root_meta); // Drop to release raw pointer before await
+            id
+        };
 
-        // For now, try to load from mapper if we have any pages
-        let snapshot = self.page_mapper.snapshot();
-
-        // Simple linear search through pages (inefficient but works for testing)
-        // In production, we'd use the index tree
-        for page_id in 0..snapshot.max_page_id() {
-            if let Ok(file_page_id) = snapshot.to_file_page(page_id) {
-                // Load the page from disk
-                match self.file_manager.read_page(
-                    file_page_id.file_id() as u64,
-                    file_page_id.page_offset()
-                ).await {
-                    Ok(page_data) => {
-                        let data_page = DataPage::from_page(page_id, page_data);
-                        // Check if key might be in this page
-                        let page_arc = Arc::new(data_page);
-
-                        // Cache the page
-                        self.page_cache.insert(self.key.clone(), page_arc.clone()).await;
-
-                        return Ok(Some(page_arc));
-                    }
-                    Err(_) => continue, // Try next page
-                }
-            }
+        if root_id == PageId::MAX {
+            // Empty tree
+            return Ok(None);
         }
 
-        // No page found
-        Ok(None)
+        // Navigate the index tree to find the data page
+        let page_id = self.seek_index(root_id).await?;
+        if page_id == PageId::MAX {
+            return Ok(None);
+        }
+
+        // Map logical page_id to physical file_page_id
+        let snapshot = self.page_mapper.snapshot();
+        let file_page_id = snapshot.to_file_page(page_id)?;
+
+        // Load the page from disk
+        let page_data = self.file_manager.read_page(
+            file_page_id.file_id() as u64,
+            file_page_id.page_offset()
+        ).await?;
+
+        // Parse as data page
+        let data_page = DataPage::from_page(page_id, page_data);
+        let page_arc = Arc::new(data_page);
+
+        // Cache the page
+        self.page_cache.insert(self.key.clone(), page_arc.clone()).await;
+
+        Ok(Some(page_arc))
+    }
+
+    /// Navigate the index tree to find the data page containing the key
+    async fn seek_index(&self, mut curr_page_id: PageId) -> Result<PageId> {
+        let mapper = self.page_mapper.snapshot();
+
+        loop {
+            // Load the index page
+            let idx_page = match self.index_manager.find_page(&mapper, curr_page_id).await {
+                Ok(page) => page,
+                Err(_) => return Ok(PageId::MAX),
+            };
+            idx_page.pin();
+
+            // Create iterator and seek to key
+            let mut iter = IndexPageIter::new(&idx_page, &self.options);
+            iter.seek(self.key.as_ref());
+
+            // Get the page ID for the next level
+            let next_page_id = iter.get_page_id();
+            idx_page.unpin();
+
+            if next_page_id == PageId::MAX {
+                return Ok(PageId::MAX);
+            }
+
+            // Check if this index points to data pages
+            if idx_page.is_pointing_to_leaf() {
+                // Found the data page
+                return Ok(next_page_id);
+            }
+
+            // Continue down the tree
+            curr_page_id = next_page_id;
+        }
     }
 
     /// Find the last key <= search key (floor operation)
@@ -368,12 +417,20 @@ mod tests {
         // Create a read task
         let table_id = TableIdent::new("test", 1);
         let key = Bytes::from("test_key");
+
+        let options = Arc::new(KvOptions::default());
+        let index_manager = Arc::new(IndexPageManager::new(
+            file_manager.clone(),
+            options.clone(),
+        ));
+
         let task = ReadTask::new(
             key.clone(),
             table_id,
             page_cache,
             page_mapper,
             file_manager,
+            index_manager,
         );
 
         // Execute (should return None since no data)

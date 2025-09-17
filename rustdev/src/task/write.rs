@@ -14,7 +14,8 @@ use crate::types::{Key, Value, TableIdent, PageId};
 use crate::page::{DataPage, PageCache, DataPageBuilder};
 use crate::page::PageMapper;
 use crate::storage::AsyncFileManager;
-use crate::index::{IndexPageManager, CowRootMeta};
+use crate::index::{IndexPageManager, CowRootMeta, IndexPageIter};
+use crate::config::KvOptions;
 use crate::Result;
 use crate::error::Error;
 
@@ -48,20 +49,33 @@ pub struct WriteDataEntry {
 struct IndexStackEntry {
     /// Index page (if any)
     idx_page: Option<Arc<crate::index::MemIndexPage>>,
-    /// Iterator position
-    idx_iter_pos: usize,
-    /// Pending changes
-    changes: Vec<IndexOp>,
+    /// Index page iterator
+    idx_page_iter: crate::index::IndexPageIter<'static>,
+    /// KV options
+    options: Arc<crate::config::KvOptions>,
     /// Is this a leaf index
     is_leaf_index: bool,
 }
 
-/// Index operation
-struct IndexOp {
-    key: String,
-    page_id: PageId,
-    op: WriteOp,
+impl IndexStackEntry {
+    /// Create a new stack entry
+    fn new(idx_page: Option<Arc<crate::index::MemIndexPage>>, options: Arc<crate::config::KvOptions>) -> Self {
+        // Create a dummy iterator for now - will be properly initialized when used
+        let dummy_iter = unsafe {
+            std::mem::transmute::<crate::index::IndexPageIter<'_>, crate::index::IndexPageIter<'static>>(
+                crate::index::IndexPageIter::from_page_data(&[], options.comparator())
+            )
+        };
+
+        Self {
+            idx_page,
+            idx_page_iter: dummy_iter,
+            options,
+            is_leaf_index: false,
+        }
+    }
 }
+
 
 /// Single write task
 #[derive(Clone, Debug)]
@@ -121,7 +135,10 @@ impl Task for WriteTask {
             key: self.key.clone(),
             value: self.value.clone(),
             op: WriteOp::Upsert,
-            timestamp: 0, // TODO: Get timestamp
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
             expire_ts: 0,
         };
 
@@ -185,6 +202,8 @@ pub struct BatchWriteTask {
     data_page_builder: DataPageBuilder,
     /// Data page builder for index pages (reuse DataPageBuilder)
     idx_page_builder: DataPageBuilder,
+    /// Options
+    options: Arc<KvOptions>,
 }
 
 impl BatchWriteTask {
@@ -209,8 +228,9 @@ impl BatchWriteTask {
             applying_page: None,
             cow_meta: None,
             ttl_batch: Vec::new(),
-            data_page_builder: DataPageBuilder::new(4096), // TODO: Get from options
-            idx_page_builder: DataPageBuilder::new(4096), // TODO: Get from options
+            data_page_builder: DataPageBuilder::new(4096), // Default page size
+            idx_page_builder: DataPageBuilder::new(4096), // Default page size
+            options: Arc::new(KvOptions::default()),
         }
     }
 
@@ -224,7 +244,7 @@ impl BatchWriteTask {
 
             // Check if we need to move to next sibling or pop
             // Simplified version - full implementation would check bounds
-            if stack_entry.idx_iter_pos >= stack_entry.changes.len() {
+            if !stack_entry.idx_page_iter.has_next() {
                 self.pop_stack().await?;
             } else {
                 break;
@@ -247,14 +267,76 @@ impl BatchWriteTask {
 
     /// Seek to leaf page (following C++ Seek)
     async fn seek(&mut self, key: &Key) -> Result<PageId> {
+        // Check if we have an empty tree (no index page)
         if self.stack.is_empty() {
+            return Err(Error::InvalidState("Stack is empty".into()));
+        }
+
+        let stack_entry = self.stack.last_mut().unwrap();
+        if stack_entry.idx_page.is_none() {
+            // Empty tree case - no index pages yet
+            stack_entry.is_leaf_index = true;
             return Ok(PageId::MAX);
         }
 
-        // Navigate down to leaf
-        // Simplified - just return MAX for now
-        // Full implementation would traverse index tree
-        Ok(PageId::MAX)
+        // Navigate down the index tree to find the leaf
+        loop {
+            let stack_len = self.stack.len();
+            let should_continue = {
+                let stack_entry = &mut self.stack[stack_len - 1];
+
+                // Seek to the key position in current index page
+                if let Some(ref idx_page) = stack_entry.idx_page {
+                    // Create a new iterator for this page
+                    let mut iter = IndexPageIter::new(idx_page, &self.options);
+                    iter.seek(key.as_ref());
+                    let page_id = iter.get_page_id();
+
+                    if page_id == PageId::MAX {
+                        // This shouldn't happen in a valid index
+                        return Err(Error::InvalidState("Invalid page ID in index".into()));
+                    }
+
+                    // Check if this index page points to leaf pages
+                    if idx_page.is_pointing_to_leaf() {
+                        // We've reached the leaf level
+                        stack_entry.is_leaf_index = true;
+                        stack_entry.idx_page_iter = unsafe {
+                            std::mem::transmute::<IndexPageIter<'_>, IndexPageIter<'static>>(iter)
+                        };
+                        return Ok(page_id);
+                    }
+
+                    // Store the iterator
+                    stack_entry.idx_page_iter = unsafe {
+                        std::mem::transmute::<IndexPageIter<'_>, IndexPageIter<'static>>(iter)
+                    };
+
+                    // Need to load next level
+                    Some(page_id)
+                } else {
+                    None
+                }
+            };
+
+            if let Some(page_id) = should_continue {
+                // Load the next index page
+                let mapper = self.cow_meta.as_ref()
+                    .and_then(|m| m.mapper.as_ref())
+                    .ok_or_else(|| Error::InvalidState("No mapper available".into()))?;
+
+                let next_idx_page = self.index_manager
+                    .find_page(&mapper.snapshot(), page_id).await?;
+
+                next_idx_page.pin();
+
+                // Push new stack entry for the next level
+                let new_entry = IndexStackEntry::new(Some(Arc::new(*next_idx_page)), self.options.clone());
+                self.stack.push(new_entry);
+            } else {
+                return Err(Error::InvalidState("No index page in stack entry".into()));
+            }
+        }
     }
 
     /// Load triple element (following C++ LoadTripleElement)
@@ -387,20 +469,13 @@ impl BatchWriteTask {
         if root_id != PageId::MAX {
             // Load root index page
             // Simplified - full implementation would load from index manager
-            self.stack.push(IndexStackEntry {
-                idx_page: None,
-                idx_iter_pos: 0,
-                changes: Vec::new(),
-                is_leaf_index: false,
-            });
+            let entry = IndexStackEntry::new(None, self.options.clone());
+            self.stack.push(entry);
         } else {
             // Empty tree
-            self.stack.push(IndexStackEntry {
-                idx_page: None,
-                idx_iter_pos: 0,
-                changes: Vec::new(),
-                is_leaf_index: true,
-            });
+            let mut entry = IndexStackEntry::new(None, self.options.clone());
+            entry.is_leaf_index = true;
+            self.stack.push(entry);
         }
 
         let now_ms = std::time::SystemTime::now()
@@ -506,8 +581,8 @@ impl BatchWriteTask {
 
         // Build and write the page if there's content
         if !self.data_page_builder.is_empty() {
-            // TODO: Allocate proper page ID
-            let page_id = 0;
+            // Allocate a new page ID
+            let page_id = self.page_mapper.allocate_page()?;
             // Create a new builder to move from self
             let builder = std::mem::replace(&mut self.data_page_builder, DataPageBuilder::new(4096));
             let page = builder.finish(page_id);
@@ -612,6 +687,7 @@ impl Clone for BatchWriteTask {
             ttl_batch: Vec::new(),
             data_page_builder: DataPageBuilder::new(4096),
             idx_page_builder: DataPageBuilder::new(4096),
+            options: Arc::new(KvOptions::default()),
         }
     }
 }

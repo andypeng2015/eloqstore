@@ -197,6 +197,161 @@ impl EloqStore {
         Ok(())
     }
 
+    /// Read a single key-value pair
+    pub async fn read(&self, req: crate::api::request::ReadRequest) -> Result<crate::api::response::ReadResponse> {
+        // Convert API request to store request (Key and Value are from bytes::Bytes in both)
+        let store_req = Arc::new(request::ReadRequest::new(req.table_id.clone(), req.key));
+
+        // Execute synchronously
+        self.exec_sync(store_req.as_ref());
+
+        // Ensure we see all writes from the shard thread
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+        // Convert response
+        if let Some(err) = store_req.base.error.lock().as_ref() {
+            return Err(Error::from(*err));
+        }
+
+        let value = store_req.value.lock().clone();
+        Ok(crate::api::response::ReadResponse {
+            value,
+        })
+    }
+
+    /// Write a batch of key-value pairs
+    pub async fn batch_write(&self, req: crate::api::request::BatchWriteRequest) -> Result<crate::api::response::BatchWriteResponse> {
+        // Convert API request to store request
+        let mut entries = Vec::new();
+        for entry in req.entries {
+            entries.push(crate::types::WriteDataEntry {
+                key: entry.key.to_vec(),
+                value: entry.value.to_vec(),
+                timestamp: entry.timestamp,
+                op: match entry.op {
+                    crate::api::request::WriteOp::Upsert => crate::types::WriteOp::Upsert,
+                    crate::api::request::WriteOp::Delete => crate::types::WriteOp::Delete,
+                },
+                expire_ts: entry.expire_ts.unwrap_or(0),
+            });
+        }
+
+        let store_req = request::BatchWriteRequest::new(req.table_id.clone(), entries);
+
+        // Execute synchronously
+        self.exec_sync(&store_req);
+
+        // Ensure we see all writes from the shard thread
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+        // Convert response
+        if let Some(err) = store_req.base.error.lock().as_ref() {
+            return Err(Error::from(*err));
+        }
+
+        Ok(crate::api::response::BatchWriteResponse {
+            success: true,
+        })
+    }
+
+    /// Scan a range of keys
+    pub async fn scan(&self, req: crate::api::request::ScanRequest) -> Result<crate::api::response::ScanResponse> {
+        // Convert API request to store request
+        let end_key = req.end_key.unwrap_or_else(|| {
+            // If no end key, use a max key
+            crate::types::Key::from(vec![0xFF; 256])
+        });
+
+        let mut store_req = request::ScanRequest::new(
+            req.table_id.clone(),
+            req.start_key,
+            end_key,
+            true, // begin_inclusive
+        );
+
+        if let Some(limit) = req.limit {
+            store_req.set_pagination(limit, 4 * 1024 * 1024);
+        }
+
+        // TODO: Handle reverse scanning (store/request doesn't support it directly)
+
+        // Execute synchronously
+        self.exec_sync(&store_req);
+
+        // Ensure we see all writes from the shard thread
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+        // Convert response
+        if let Some(err) = store_req.base.error.lock().as_ref() {
+            return Err(Error::from(*err));
+        }
+
+        // Convert entries from KvEntry to (Key, Value) tuples
+        // Note: KvEntry has key and value as Vec<u8>, but we need Bytes
+        let mut entries = Vec::new();
+        for kv_entry in &store_req.entries {
+            entries.push((
+                crate::types::Key::from(kv_entry.key.clone()),
+                crate::types::Value::from(kv_entry.value.clone()),
+            ));
+        }
+
+        Ok(crate::api::response::ScanResponse {
+            entries,
+            has_more: store_req.has_more,
+        })
+    }
+
+    /// Delete a key
+    pub async fn delete(&self, req: crate::api::request::DeleteRequest) -> Result<crate::api::response::DeleteResponse> {
+        // Create a delete write entry
+        let entry = crate::types::WriteDataEntry {
+            key: req.key.to_vec(),
+            value: Vec::new(),
+            timestamp: 0,
+            op: crate::types::WriteOp::Delete,
+            expire_ts: 0,
+        };
+
+        let store_req = request::BatchWriteRequest::new(req.table_id.clone(), vec![entry]);
+
+        // Execute synchronously
+        self.exec_sync(&store_req);
+
+        // Ensure we see all writes from the shard thread
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+        // Convert response
+        if let Some(err) = store_req.base.error.lock().as_ref() {
+            return Err(Error::from(*err));
+        }
+
+        Ok(crate::api::response::DeleteResponse {
+            success: true,
+        })
+    }
+
+    /// Write a single key-value pair (convenience method)
+    pub async fn write(&self, req: crate::api::request::WriteRequest) -> Result<crate::api::response::WriteResponse> {
+        let batch_req = crate::api::request::BatchWriteRequest {
+            table_id: req.table_id,
+            entries: vec![crate::api::request::WriteEntry {
+                key: req.key,
+                value: req.value,
+                op: crate::api::request::WriteOp::Upsert,
+                timestamp: 0,
+                expire_ts: None,
+            }],
+            sync: true,
+            timeout: None,
+        };
+
+        let resp = self.batch_write(batch_req).await?;
+        Ok(crate::api::response::WriteResponse {
+            success: resp.success,
+        })
+    }
+
     /// Execute request asynchronously with callback
     pub async fn exec_async<F>(&self, req: &dyn request::KvRequest, user_data: u64, callback: F) -> bool
     where
@@ -228,8 +383,7 @@ impl EloqStore {
             return false;
         }
 
-        // Reset request state
-        req.set_done(None);
+        // Don't reset state here - this marks request as done prematurely!
 
         // Route to appropriate shard based on table ID
         let shard_index = req.table_id().shard_index(self.shards.len() as u16) as usize;

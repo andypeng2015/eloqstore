@@ -26,9 +26,7 @@ pub enum Response {
 /// Read response
 #[derive(Debug)]
 pub struct ReadResponse {
-    pub value: Bytes,
-    pub timestamp: u64,
-    pub expire_ts: Option<u64>,
+    pub value: Option<crate::types::Value>,
 }
 
 /// Floor response
@@ -43,7 +41,7 @@ pub struct FloorResponse {
 /// Scan response
 #[derive(Debug)]
 pub struct ScanResponse {
-    pub entries: Vec<ScanEntry>,
+    pub entries: Vec<(crate::types::Key, crate::types::Value)>,
     pub has_more: bool,
 }
 
@@ -59,8 +57,19 @@ pub struct ScanEntry {
 /// Batch write response
 #[derive(Debug)]
 pub struct BatchWriteResponse {
-    pub success_count: usize,
-    pub failed_keys: Vec<Bytes>,
+    pub success: bool,
+}
+
+/// Write response
+#[derive(Debug)]
+pub struct WriteResponse {
+    pub success: bool,
+}
+
+/// Delete response
+#[derive(Debug)]
+pub struct DeleteResponse {
+    pub success: bool,
 }
 
 /// Truncate response
