@@ -165,7 +165,8 @@ impl IndexPageManager {
 
     /// Update root metadata after commit
     pub fn update_root(&self, table_ident: &TableIdent, new_meta: CowRootMeta) {
-        tracing::debug!("update_root: Updating root for {:?} to root_id={}", table_ident, new_meta.root_id);
+        tracing::info!("update_root: Updating root for {:?} to root_id={}, has mapper={}",
+                      table_ident, new_meta.root_id, new_meta.mapper.is_some());
         let mut roots = self.roots.write().unwrap();
 
         let root = roots.entry(table_ident.clone()).or_insert_with(RootMeta::default);
@@ -214,14 +215,22 @@ impl IndexPageManager {
         mapping: &MappingSnapshot,
         page_id: PageId,
     ) -> Result<Box<MemIndexPage>> {
-        tracing::debug!("find_page: Looking for page_id={}", page_id);
+        tracing::info!("find_page: Looking for page_id={}", page_id);
         // Check if page is already in memory (swizzled pointer)
         // For now, always load from disk
 
         // Map logical page to file page
-        let file_page_id = mapping.to_file_page(page_id)?;
-        tracing::debug!("find_page: Mapped page_id={} to file_page_id={:?}",
-            page_id, file_page_id);
+        let file_page_id = match mapping.to_file_page(page_id) {
+            Ok(fid) => {
+                tracing::info!("find_page: Successfully mapped page_id={} to file_page_id={:?}",
+                    page_id, fid);
+                fid
+            },
+            Err(e) => {
+                tracing::error!("find_page: Failed to map page_id={} - error: {:?}", page_id, e);
+                return Err(e);
+            }
+        };
 
         // Load page from disk
         let page_data = match self.io_manager

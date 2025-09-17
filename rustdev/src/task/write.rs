@@ -329,7 +329,17 @@ impl BatchWriteTask {
         // Process both iterators in merge order
         while is_base_iter_valid && curr_change.is_some() {
             let base_iter = base_page_iter.as_ref().unwrap();
-            let base_key = base_iter.key().unwrap_or(b"");
+            // Get the key, if None then advance iterator
+            let base_key = match base_iter.key() {
+                Some(key) => key,
+                None => {
+                    // No valid key, skip this entry
+                    if let Some(ref mut iter) = base_page_iter {
+                        is_base_iter_valid = iter.next();
+                    }
+                    continue;
+                }
+            };
             let base_page_id = base_iter.get_page_id();
 
             let change = curr_change.as_ref().unwrap();
@@ -364,8 +374,8 @@ impl BatchWriteTask {
                 }
             };
 
-            // Add to page if not deleted
-            if !new_key.is_empty() || new_page_id != MAX_PAGE_ID {
+            // Add to page if not deleted (skip if key is empty - that shouldn't happen)
+            if !new_key.is_empty() && new_page_id != MAX_PAGE_ID {
                 // Check if page is full
                 if !self.idx_page_builder.add(&new_key, new_page_id, is_leaf_index) {
                     // Page is full, finish current page
@@ -400,26 +410,28 @@ impl BatchWriteTask {
         // Process remaining base entries
         while is_base_iter_valid {
             if let Some(ref base_iter) = base_page_iter {
-                let new_key = base_iter.key().unwrap_or(b"");
-                let new_page_id = base_iter.get_page_id();
+                // Skip entries with no key (shouldn't happen in valid index)
+                if let Some(new_key) = base_iter.key() {
+                    let new_page_id = base_iter.get_page_id();
 
-                // Check if page is full
-                if !self.idx_page_builder.add(&new_key, new_page_id, is_leaf_index) {
-                    // Page is full, finish current page
-                    if let Some(page_data) = prev_page_data.take() {
-                        // Flush previous page
-                        self.flush_index_page(prev_page_id, page_data, prev_page_key.as_bytes(), true).await?;
+                    // Check if page is full
+                    if !self.idx_page_builder.add(new_key, new_page_id, is_leaf_index) {
+                        // Page is full, finish current page
+                        if let Some(page_data) = prev_page_data.take() {
+                            // Flush previous page
+                            self.flush_index_page(prev_page_id, page_data, prev_page_key.as_bytes(), true).await?;
+                        }
+
+                        prev_page_key = curr_page_key.clone();
+                        prev_page_data = Some(self.idx_page_builder.finish().to_vec());
+                        prev_page_id = self.page_mapper.allocate_page()?;
+
+                        curr_page_key = String::from_utf8_lossy(new_key).to_string();
+                        self.idx_page_builder.reset();
+
+                        // Add leftmost pointer without key
+                        self.idx_page_builder.add(b"", new_page_id, is_leaf_index);
                     }
-
-                    prev_page_key = curr_page_key.clone();
-                    prev_page_data = Some(self.idx_page_builder.finish().to_vec());
-                    prev_page_id = self.page_mapper.allocate_page()?;
-
-                    curr_page_key = String::from_utf8_lossy(&new_key).to_string();
-                    self.idx_page_builder.reset();
-
-                    // Add leftmost pointer without key
-                    self.idx_page_builder.add(b"", new_page_id, is_leaf_index);
                 }
 
                 if let Some(ref mut iter) = base_page_iter {
@@ -639,7 +651,10 @@ impl BatchWriteTask {
     async fn shift_leaf_link(&mut self) -> Result<()> {
         if let Some(page) = self.leaf_triple[0].take() {
             // Write page to disk
+            tracing::info!("shift_leaf_link: writing page_id={}", page.page_id());
             self.write_page(page).await?;
+        } else {
+            tracing::debug!("shift_leaf_link: no page in leaf_triple[0]");
         }
         self.leaf_triple[0] = self.leaf_triple[1].take();
         Ok(())
@@ -657,6 +672,7 @@ impl BatchWriteTask {
     /// Insert into leaf link (following C++ LeafLinkInsert)
     async fn leaf_link_insert(&mut self, mut page: DataPage) -> Result<()> {
         assert!(self.leaf_triple[1].is_none());
+        tracing::info!("leaf_link_insert: inserting page_id={}", page.page_id());
 
         // Handle the mutable borrow carefully
         let (next_id, prev_id) = if let Some(prev_page) = &mut self.leaf_triple[0] {
@@ -702,7 +718,8 @@ impl BatchWriteTask {
     /// Write page to disk
     async fn write_page(&self, page: DataPage) -> Result<()> {
         let page_id = page.page_id();
-        tracing::debug!("write_page: writing page_id={}", page_id);
+        tracing::info!("write_page: writing page_id={} with {} entries",
+            page_id, page.restart_num());
 
         // Ensure file exists first
         if self.file_manager.get_metadata(0).await.is_err() {
@@ -733,7 +750,8 @@ impl BatchWriteTask {
             .write_page(file_page_id.file_id() as u64, file_page_id.page_offset(), page.as_page())
             .await?;
 
-        tracing::debug!("Successfully wrote page {} to disk", page_id);
+        tracing::info!("Successfully wrote page {} to disk at file_id={}, offset={}",
+            page_id, file_page_id.file_id(), file_page_id.page_offset());
         Ok(())
     }
 
@@ -746,6 +764,16 @@ impl BatchWriteTask {
         // Following C++ Apply() exactly
         // 1. Make COW root
         self.cow_meta = Some(self.index_manager.make_cow_root(&self.table_id)?);
+
+        // CRITICAL: Initialize our page_mapper with existing mappings from COW metadata
+        if let Some(ref cow_meta) = self.cow_meta {
+            if let Some(ref mapper) = cow_meta.mapper {
+                tracing::info!("Initializing page_mapper with existing mappings from COW metadata");
+                // Copy all mappings from the COW metadata's mapper to our page_mapper
+                let snapshot = mapper.snapshot();
+                self.page_mapper.restore_from_snapshot(&snapshot);
+            }
+        }
 
         // 2. Apply main batch
         let root_id = self.cow_meta.as_ref().unwrap().root_id;
@@ -789,7 +817,20 @@ impl BatchWriteTask {
             tracing::debug!("Loading existing root index page with root_id={}", root_id);
 
             // Load the existing root index page from disk
-            let snapshot = self.page_mapper.snapshot();
+            // CRITICAL: Use the snapshot from COW metadata, not our empty page_mapper!
+            let snapshot = if let Some(ref cow_meta) = self.cow_meta {
+                if let Some(ref mapper) = cow_meta.mapper {
+                    tracing::info!("Using mapper from COW metadata to find root page");
+                    mapper.snapshot()
+                } else {
+                    tracing::warn!("No mapper in COW metadata, using empty snapshot");
+                    self.page_mapper.snapshot()
+                }
+            } else {
+                tracing::warn!("No COW metadata available, using empty snapshot");
+                self.page_mapper.snapshot()
+            };
+
             tracing::debug!("About to call find_page for root_id={}", root_id);
             let idx_page = match self.index_manager.find_page(&snapshot, root_id).await {
                 Ok(page) => {
@@ -827,7 +868,12 @@ impl BatchWriteTask {
 
         let mut cidx = 0;
         while cidx < self.entries.len() {
-            tracing::debug!("Processing entry {} of {}", cidx + 1, self.entries.len());
+            // println!("DEBUG apply_batch: Processing entry {} of {}: key={:?}",
+            //     cidx + 1, self.entries.len(),
+            //     String::from_utf8_lossy(&self.entries[cidx].key));
+            tracing::info!("Processing entry {} of {}: key={:?}",
+                cidx + 1, self.entries.len(),
+                String::from_utf8_lossy(&self.entries[cidx].key));
             let batch_start_key = self.entries[cidx].key.clone();
 
             if self.stack.len() > 1 {
@@ -846,7 +892,8 @@ impl BatchWriteTask {
 
             tracing::debug!("About to call apply_one_page at cidx={}", cidx);
             self.apply_one_page(&mut cidx, now_ms, update_ttl).await?;
-            tracing::debug!("apply_one_page completed, cidx now={}", cidx);
+            // println!("DEBUG apply_batch: apply_one_page completed, cidx now={}", cidx);
+            tracing::info!("apply_one_page completed, cidx now={}", cidx);
         }
 
         // Flush remaining pages
@@ -906,7 +953,10 @@ impl BatchWriteTask {
 
     /// Apply one page (following C++ ApplyOnePage)
     async fn apply_one_page(&mut self, cidx: &mut usize, now_ms: u64, update_ttl: bool) -> Result<()> {
-        tracing::debug!("apply_one_page: starting at cidx={}", *cidx);
+        // println!("DEBUG apply_one_page: starting at cidx={}, total entries={}",
+        //     *cidx, self.entries.len());
+        tracing::info!("apply_one_page: starting at cidx={}, total entries={}",
+            *cidx, self.entries.len());
         self.data_page_builder.reset();
 
         // Get the comparator
@@ -929,6 +979,8 @@ impl BatchWriteTask {
         let mut loop_iterations = 0;
         while is_base_valid || *cidx < change_end {
             loop_iterations += 1;
+            // println!("DEBUG loop start: iter={}, cidx={}, is_base_valid={}, change_end={}",
+            //     loop_iterations, *cidx, is_base_valid, change_end);
             if loop_iterations > 1000 {
                 tracing::error!("apply_one_page: Infinite loop detected! is_base_valid={}, cidx={}, change_end={}",
                                is_base_valid, *cidx, change_end);
@@ -944,12 +996,42 @@ impl BatchWriteTask {
             let mut advance_change = false;
 
             // Compare base and change entries
+            // println!("DEBUG loop iter {}: is_base_valid={}, cidx={}, checking entry",
+            //     loop_iterations, is_base_valid, *cidx);
             if is_base_valid && *cidx < change_end {
-                let base_key = base_iter.as_ref().unwrap().key().unwrap();
-                let change_entry = &self.entries[*cidx];
-                let cmp_result = comparator.compare(&base_key, &change_entry.key);
+                let base_key = if let Some(ref iter) = base_iter {
+                    if let Some(key) = iter.key() {
+                        key
+                    } else {
+                        // Base iterator has no key, mark as invalid
+                        is_base_valid = false;
+                        Bytes::new()
+                    }
+                } else {
+                    // Base iterator doesn't exist
+                    is_base_valid = false;
+                    Bytes::new()
+                };
 
-                if cmp_result < 0 {
+                if !is_base_valid {
+                    // Base is invalid, only process change
+                    // println!("DEBUG: Base is invalid, processing change at cidx={}", *cidx);
+                    let change_entry = &self.entries[*cidx];
+                    key_to_add = change_entry.key.clone();
+                    val_to_add = change_entry.value.clone();
+                    ts_to_add = change_entry.timestamp;
+                    expire_to_add = change_entry.expire_ts;
+                    advance_change = true;
+                    should_add = true;  // FIX: We need to add this entry!
+                } else {
+                    // println!("DEBUG: Base is valid, comparing base_key={:?} with change_key={:?} at cidx={}",
+                    //     String::from_utf8_lossy(&base_key),
+                    //     String::from_utf8_lossy(&self.entries[*cidx].key),
+                    //     *cidx);
+                    let change_entry = &self.entries[*cidx];
+                    let cmp_result = comparator.compare(&base_key, &change_entry.key);
+
+                    if cmp_result < 0 {
                     // Base key comes first - keep it
                     if let Some(ref iter) = base_iter {
                         key_to_add = iter.key().unwrap();
@@ -1024,18 +1106,26 @@ impl BatchWriteTask {
                         }
                     }
                 }
+                }  // Close the else block from line 1005
             } else if is_base_valid {
                 // Only base entries left
                 if let Some(ref iter) = base_iter {
-                    key_to_add = iter.key().unwrap();
-                    val_to_add = iter.value().unwrap_or(Bytes::new());
-                    ts_to_add = iter.timestamp();
-                    expire_to_add = iter.expire_ts().unwrap_or(0);
-                    should_add = true;
-                    advance_base = true;
+                    if let Some(key) = iter.key() {
+                        key_to_add = key;
+                        val_to_add = iter.value().unwrap_or(Bytes::new());
+                        ts_to_add = iter.timestamp();
+                        expire_to_add = iter.expire_ts().unwrap_or(0);
+                        should_add = true;
+                        advance_base = true;
+                    } else {
+                        // Iterator has no valid key, skip
+                        advance_base = true;
+                    }
                 }
             } else if *cidx < change_end {
                 // Only change entries left
+                // println!("DEBUG: Only change entries left, processing cidx={}, key={:?}",
+                //     *cidx, String::from_utf8_lossy(&self.entries[*cidx].key));
                 let change_entry = &self.entries[*cidx];
                 advance_change = true;
 
@@ -1067,6 +1157,8 @@ impl BatchWriteTask {
 
             // Add to page if needed
             if should_add {
+                tracing::debug!("Adding key={:?} to data_page_builder",
+                    String::from_utf8_lossy(&key_to_add));
                 let added = self.data_page_builder.add(
                     &key_to_add,
                     &val_to_add,
@@ -1076,6 +1168,7 @@ impl BatchWriteTask {
                 );
 
                 if !added {
+                    tracing::debug!("Page full, need to finish current page");
                     // Page is full, need to finish this page and create index entry
                     // Get the first key of this page as the page key
                     let page_key = if let Some(ref page) = self.applying_page {
@@ -1104,12 +1197,19 @@ impl BatchWriteTask {
                 if let Some(ref mut iter) = base_iter {
                     if iter.next().is_none() {
                         is_base_valid = false;
+                        // println!("DEBUG: Base iterator exhausted, is_base_valid now false");
                         tracing::debug!("Base iterator exhausted, is_base_valid now false");
                     }
+                    // else {
+                    //     println!("DEBUG: Base iterator advanced, now at key={:?}",
+                    //         iter.key().map(|k| String::from_utf8_lossy(&k).to_string()));
+                    // }
                 }
             }
             if advance_change {
                 *cidx += 1;
+                // println!("DEBUG apply_one_page: Advanced cidx to {} (advance_base={}, should_add={})",
+                //     *cidx, advance_base, should_add);
                 tracing::debug!("Advanced cidx to {}", *cidx);
             }
 
@@ -1122,7 +1222,7 @@ impl BatchWriteTask {
 
         // Build and write the page if there's content
         if !self.data_page_builder.is_empty() {
-            tracing::debug!("Finishing page with data");
+            tracing::info!("Finishing page with data in builder");
 
             // Get the first key for this page - this will be the index entry key
             let page_key = if *cidx > 0 && *cidx <= self.entries.len() {
@@ -1131,16 +1231,17 @@ impl BatchWriteTask {
             } else {
                 Bytes::from("")
             };
+            tracing::info!("Using page_key={:?} for index entry", String::from_utf8_lossy(&page_key));
 
             // Use finish_data_page which will add index entry
-            let page_id = if let Some(ref page) = self.applying_page {
-                page.page_id()
-            } else {
-                PageId::MAX
-            };
+            // IMPORTANT: In COW, we always create a new page when modifying!
+            // Don't reuse the existing page ID even if we loaded one.
+            let page_id = PageId::MAX;  // Always allocate new page for COW
 
             self.finish_data_page(page_key, page_id).await?;
-            tracing::debug!("Added page with index entry");
+            tracing::info!("finish_data_page completed, page should be written");
+        } else {
+            tracing::warn!("data_page_builder is empty at end of apply_one_page");
         }
 
         // Apply TTL updates now that we're done with the iterator
@@ -1167,9 +1268,19 @@ impl BatchWriteTask {
     /// Update metadata (following C++ UpdateMeta)
     async fn update_meta(&mut self) -> Result<()> {
         // Update the COW metadata in index manager
-        if let Some(cow_meta) = self.cow_meta.take() {
-            tracing::debug!("update_meta: Updating root for table {:?} with root_id={}",
-                self.table_id, cow_meta.root_id);
+        if let Some(mut cow_meta) = self.cow_meta.take() {
+            // CRITICAL: Clone the page_mapper to preserve the mappings!
+            // This is what allows the next write to find the pages
+            cow_meta.mapper = Some(Box::new((*self.page_mapper).clone()));
+
+            tracing::info!("update_meta: Updating root for table {:?} with root_id={}, has mapper={}",
+                self.table_id, cow_meta.root_id, cow_meta.mapper.is_some());
+
+            // The mapper should contain the page mappings!
+            if let Some(ref mapper) = cow_meta.mapper {
+                tracing::info!("update_meta: Mapper now contains page mappings");
+            }
+
             self.index_manager.update_root(&self.table_id, cow_meta);
         } else {
             tracing::warn!("update_meta: No COW metadata to update for table {:?}", self.table_id);
@@ -1189,6 +1300,10 @@ impl BatchWriteTask {
         }
 
         let data_page = builder.finish(page_id);
+        println!("DEBUG: Built data page id={} with content_length={} bytes, restart_count={}",
+            page_id, data_page.content_length(), data_page.restart_count());
+        tracing::info!("Built data page id={} with content_length={} bytes",
+            page_id, data_page.content_length());
 
         // Check if we should redistribute with previous page
         let one_quarter = self.options.data_page_size >> 2;

@@ -113,7 +113,11 @@ impl IndexPageBuilder {
             return true;
         }
 
-        assert!(!key.is_empty());
+        if key.is_empty() {
+            tracing::error!("IndexPageBuilder::add called with empty key for non-leftmost entry! page_id={}, is_leaf={}",
+                          page_id, is_leaf_index);
+        }
+        assert!(!key.is_empty(), "Key cannot be empty for non-leftmost entries");
         assert!(!self.finished);
 
         // Check page type matches

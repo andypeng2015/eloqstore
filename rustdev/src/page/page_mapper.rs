@@ -235,6 +235,35 @@ impl PageMapper {
         MappingSnapshot::from_mappings(mappings.clone(), version)
     }
 
+    /// Restore mappings from a snapshot
+    pub fn restore_from_snapshot(&self, snapshot: &MappingSnapshot) {
+        let mut mappings = self.mappings.write().unwrap();
+        mappings.clear();
+
+        // Copy all mappings from snapshot
+        for (page_id, mapping) in snapshot.all_mappings() {
+            mappings.insert(*page_id, mapping.clone());
+        }
+
+        // Update counters based on snapshot
+        let mut next_page = self.next_page_id.write().unwrap();
+        *next_page = snapshot.max_page_id() + 1;
+
+        // Update file page counter to the maximum found
+        let mut max_file_page_id = 0u64;
+        for mapping in mappings.values() {
+            let raw = mapping.file_page_id.raw();
+            if raw > max_file_page_id {
+                max_file_page_id = raw;
+            }
+        }
+        let mut next_file_page = self.next_file_page_id.write().unwrap();
+        *next_file_page = max_file_page_id + 1;
+
+        tracing::info!("Restored {} mappings from snapshot, next_page_id={}, next_file_page_id={}",
+                      mappings.len(), *next_page, *next_file_page);
+    }
+
     /// Export all mappings for manifest
     pub fn export_mappings(&self) -> Vec<(PageId, FilePageId)> {
         let mappings = self.mappings.read().unwrap();
