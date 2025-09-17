@@ -9,6 +9,10 @@ license = "MIT OR Apache-2.0"
 keywords = ["database", "key-value", "storage", "io-uring", "async"]
 categories = ["database", "asynchronous", "filesystem"]
 
+[lib]
+name = "eloqstore"
+crate-type = ["lib", "cdylib", "staticlib"]
+
 [features]
 default = ["compression", "cloud"]
 compression = ["lz4", "zstd"]

@@ -235,6 +235,14 @@ impl PageMapper {
         MappingSnapshot::from_mappings(mappings.clone(), version)
     }
 
+    /// Export all mappings for manifest
+    pub fn export_mappings(&self) -> Vec<(PageId, FilePageId)> {
+        let mappings = self.mappings.read().unwrap();
+        mappings.iter()
+            .map(|(page_id, mapping)| (*page_id, mapping.file_page_id))
+            .collect()
+    }
+
     /// Restore from a snapshot
     pub fn restore(&self, snapshot: &MappingSnapshot) -> Result<()> {
         let mut mappings = self.mappings.write().unwrap();

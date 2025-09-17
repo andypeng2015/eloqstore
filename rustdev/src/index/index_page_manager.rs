@@ -162,6 +162,37 @@ impl IndexPageManager {
         root.next_expire_ts = new_meta.next_expire_ts;
     }
 
+    /// Export all root metadata for manifest
+    pub fn export_roots(&self) -> HashMap<TableIdent, CowRootMeta> {
+        let roots = self.roots.read().unwrap();
+        roots.iter()
+            .map(|(table_id, root)| {
+                let cow_meta = CowRootMeta {
+                    root_id: root.root_id,
+                    ttl_root_id: root.ttl_root_id,
+                    mapper: root.mapper.clone(),
+                    manifest_size: root.manifest_size,
+                    next_expire_ts: root.next_expire_ts,
+                    old_mapping: None, // Not needed for checkpoint
+                };
+                (table_id.clone(), cow_meta)
+            })
+            .collect()
+    }
+
+    /// Restore root metadata from manifest
+    pub fn restore_roots(&self, roots_data: HashMap<TableIdent, CowRootMeta>) {
+        let mut roots = self.roots.write().unwrap();
+        for (table_id, cow_meta) in roots_data {
+            let root = roots.entry(table_id).or_insert_with(RootMeta::default);
+            root.root_id = cow_meta.root_id;
+            root.ttl_root_id = cow_meta.ttl_root_id;
+            root.mapper = cow_meta.mapper;
+            root.manifest_size = cow_meta.manifest_size;
+            root.next_expire_ts = cow_meta.next_expire_ts;
+        }
+    }
+
     /// Find a page by ID, loading from disk if necessary
     pub async fn find_page(
         &self,

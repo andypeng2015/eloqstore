@@ -89,6 +89,10 @@ impl FileHandle {
         self.file.seek(SeekFrom::Start(file_offset))?;
         self.file.write_all(page.as_bytes())?;
 
+        // CRITICAL: Sync immediately for durability without WAL
+        // This matches C++ behavior where writes must be durable before returning
+        self.file.sync_data()?;
+
         // Update metadata
         let new_size = (page_offset + 1) * page.size() as u64;
         if new_size > self.metadata.size {

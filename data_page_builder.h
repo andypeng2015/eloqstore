@@ -58,6 +58,7 @@ public:
     static size_t HeaderSize();
 
 private:
+    friend class DataPageTestHelper;  // Allow test access
     static std::tuple<size_t, size_t, size_t, uint64_t> CalculateDelta(
         std::string_view key,
         size_t val_size,

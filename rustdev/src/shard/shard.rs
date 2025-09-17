@@ -174,20 +174,18 @@ impl Shard {
                     for (page_id, file_page_id) in &manifest.mappings {
                         self.page_mapper.update_mapping(*page_id, *file_page_id);
                     }
+                    let num_mappings = manifest.mappings.len();
+                    let num_roots = manifest.roots.len();
+                    tracing::info!("Restored {} page mappings", num_mappings);
 
                     // Restore root metadata for each table
                     if let Some(index_mgr) = &self.index_manager {
-                        for (table_id, root_meta) in &manifest.roots {
-                            // The index manager needs to be updated to support setting root metadata
-                            // For now, log that we would restore it
-                            tracing::debug!(
-                                "Would restore root for table {}: root={}, ttl_root={}",
-                                table_id.table_name, root_meta.root_id, root_meta.ttl_root_id
-                            );
-                        }
+                        index_mgr.restore_roots(manifest.roots);
+                        tracing::info!("Restored {} root entries", num_roots);
                     }
 
-                    tracing::info!("Manifest loaded successfully with {} mappings", manifest.mappings.len());
+                    tracing::info!("Manifest loaded successfully with {} mappings and {} roots",
+                                 num_mappings, num_roots);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load manifest: {}. Starting fresh.", e);
@@ -448,6 +446,10 @@ impl Shard {
                 tracing::debug!("Would trigger file GC");
             }
 
+            // NOTE: Removed dirty page flushing
+            // Writes are now synchronous - pages are written immediately to disk
+            // This ensures durability without WAL
+
             // Checkpoint every 10000 iterations (less frequent than other maintenance)
             if count % 10000 == 0 {
                 tracing::debug!("Running periodic checkpoint");
@@ -455,8 +457,6 @@ impl Shard {
                     tracing::error!("Failed to save periodic checkpoint: {}", e);
                 }
             }
-
-            // TODO: Flush dirty pages to disk
         }
     }
 
@@ -474,21 +474,23 @@ impl Shard {
             .as_secs();
 
         // Collect page mappings from PageMapper
-        // The page mapper would need a method to export all mappings
-        // For now, we'll simulate this
-        tracing::debug!("Would collect page mappings from PageMapper");
+        let mappings = self.page_mapper.export_mappings();
+        for (page_id, file_page_id) in mappings {
+            manifest.mappings.insert(page_id, file_page_id);
+        }
+        tracing::debug!("Collected {} page mappings", manifest.mappings.len());
 
         // Collect root metadata from index manager
         if let Some(index_mgr) = &self.index_manager {
-            // The index manager would need a method to export all roots
-            // For now, we'll simulate this
-            tracing::debug!("Would collect root metadata from IndexPageManager");
+            manifest.roots = index_mgr.export_roots();
+            tracing::debug!("Collected {} root entries", manifest.roots.len());
         }
 
         // Save the manifest
         ManifestFile::save_to_file(&manifest, &manifest_path).await?;
 
-        tracing::info!("Manifest checkpoint saved successfully");
+        tracing::info!("Manifest checkpoint saved with {} mappings and {} roots",
+                      manifest.mappings.len(), manifest.roots.len());
         Ok(())
     }
 
@@ -506,10 +508,11 @@ impl Shard {
             tracing::error!("Failed to save manifest during shutdown: {}", e);
         }
 
-        // Flush any pending operations
-        // 1. Flush all dirty pages from page cache
-        // The page cache would need a flush method
-        tracing::debug!("Would flush page cache");
+        // Clear the page cache (no dirty pages to flush - writes are synchronous)
+        // NOTE: Without WAL, all writes are flushed to disk immediately
+        // so there are no dirty pages to flush at shutdown
+        self.page_cache.clear().await;
+        tracing::debug!("Cleared page cache");
 
         // 2. Sync all open files to disk
         if let Err(e) = self.file_manager.sync_all().await {

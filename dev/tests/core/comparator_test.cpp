@@ -326,6 +326,21 @@ TEST_CASE("Comparator_CustomComparator", "[comparator][unit]") {
         const char* Name() const override {
             return "ReverseComparator";
         }
+
+        void FindShortestSeparator(std::string* start, std::string_view limit) const override {
+            // Use default implementation
+            Comparator::DefaultComparator()->FindShortestSeparator(start, limit);
+        }
+
+        std::string_view FindShortestSeparator(std::string_view left, std::string_view right) const override {
+            // Use default implementation
+            return Comparator::DefaultComparator()->FindShortestSeparator(left, right);
+        }
+
+        void FindShortSuccessor(std::string* key) const override {
+            // Use default implementation
+            Comparator::DefaultComparator()->FindShortSuccessor(key);
+        }
     };
 
     ReverseComparator rev_comp;

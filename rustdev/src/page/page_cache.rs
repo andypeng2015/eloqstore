@@ -46,6 +46,7 @@ struct CachedPage {
     access_count: u64,
     /// Page size
     size: usize,
+    // NOTE: No dirty tracking - writes are synchronous for durability without WAL
 }
 
 /// Page cache implementation
@@ -234,6 +235,10 @@ impl PageCache {
             self.invalidate_page(page_id).await;
         }
     }
+
+    // NOTE: Removed dirty page tracking methods
+    // Writes must be synchronous for durability without WAL
+    // Pages are written directly to disk before returning to client
 
     /// Get cache statistics
     pub async fn stats(&self) -> CacheStats {

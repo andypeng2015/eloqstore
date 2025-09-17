@@ -8,6 +8,7 @@
 #include "../../fixtures/test_fixtures.h"
 #include "../../fixtures/test_helpers.h"
 #include "../../fixtures/data_generator.h"
+#include "../../fixtures/data_page_test_helper.h"
 #include "../../kv_options.h"
 
 using namespace eloqstore;
@@ -35,9 +36,13 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_EmptyPage", "[buil
         REQUIRE(page_data.size() <= opt_.data_page_size);
 
         // Verify the page can be read
-        // Page verification would require proper page ID and page structure
-        // For now, just check the data was generated
-        REQUIRE(!page_data.empty());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
+
+        REQUIRE(DataPageTestHelper::NumEntries(page.get(), &opt_) == 0);
+        REQUIRE(DataPageTestHelper::Empty(page.get()));
     }
 
     SECTION("Estimated size for empty builder") {
@@ -53,11 +58,14 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_AddSingleEntry", "
         REQUIRE(builder.Add("key1", "value1", false, 0, 0) == true);
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
-        REQUIRE(page.EntryCount() == 1);
+        REQUIRE(DataPageTestHelper::NumEntries(page.get(), &opt_) == 1);
         std::string value;
-        REQUIRE(page.Get("key1", &value) == true);
+        REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, "key1", &value) == true);
         REQUIRE(value == "value1");
     }
 
@@ -86,13 +94,16 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_KeyOrdering", "[bu
         if (out_of_order_result) {
             // If it accepts out-of-order, verify it's handled correctly
             auto page_data = builder.Finish();
-            DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+            auto page = std::make_unique<DataPage>(1);
+            Page page_mem(true);  // Allocate page
+            std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+            page->SetPage(std::move(page_mem));
 
             // Check if keys are properly sorted
-            DataPage::Iterator iter(&page, comparator_);
+            DataPageTestHelper::Iterator iter(page.get(), &opt_);
             std::vector<std::string> keys;
             while (iter.Valid()) {
-                keys.push_back(iter.key().ToString());
+                keys.push_back(std::string(iter.key()));
                 iter.Next();
             }
             REQUIRE(std::is_sorted(keys.begin(), keys.end()));
@@ -107,17 +118,22 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_KeyOrdering", "[bu
         bool duplicate_result = builder.Add("key1", "value2", false, 0, 0);
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
         std::string value;
-        REQUIRE(page.Get("key1", &value) == true);
+        REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, "key1", &value) == true);
         // Value could be either "value1" or "value2" depending on implementation
     }
 }
 
 TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_PageFullCondition", "[builder][unit]") {
     SECTION("Fill page to capacity") {
-        DataPageBuilder builder(comparator_, 512, restart_interval_);  // Small page
+        KvOptions small_opt = opt_;
+        small_opt.data_page_size = 512;
+        DataPageBuilder builder(&small_opt);  // Small page
 
         int added_count = 0;
         for (int i = 0; i < 1000; ++i) {
@@ -135,20 +151,25 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_PageFullCondition"
 
         // Verify all added entries
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
-        REQUIRE(page.EntryCount() == added_count);
+        REQUIRE(DataPageTestHelper::NumEntries(page.get(), &opt_) == added_count);
 
         for (int i = 0; i < added_count; ++i) {
             std::string key = "key_" + std::to_string(10000 + i);
             std::string value;
-            REQUIRE(page.Get(key, &value) == true);
+            REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, key, &value) == true);
             REQUIRE(value == "value_" + std::to_string(i));
         }
     }
 
     SECTION("Detect when single entry exceeds page size") {
-        DataPageBuilder builder(comparator_, 256, restart_interval_);  // Very small page
+        KvOptions tiny_opt = opt_;
+        tiny_opt.data_page_size = 256;
+        DataPageBuilder builder(&tiny_opt);  // Very small page
 
         std::string large_value(500, 'x');  // Larger than page
         bool result = builder.Add("key", large_value, false, 0, 0);
@@ -159,19 +180,24 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_PageFullCondition"
 
 TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_RestartPoints", "[builder][unit]") {
     SECTION("Verify restart points are created") {
-        DataPageBuilder builder(comparator_, default_page_size_, 4);  // Restart every 4 entries
+        KvOptions restart_opt = opt_;
+        restart_opt.data_page_restart_interval = 4;
+        DataPageBuilder builder(&restart_opt);  // Restart every 4 entries
 
         // Add exactly 16 entries to get 4 restart points
         for (int i = 0; i < 16; ++i) {
             std::string key = "key_" + std::string(3 - std::to_string(i).length(), '0') + std::to_string(i);
-            REQUIRE(builder.Add(key, "value") == true);
+            REQUIRE(builder.Add(key, "value", false, 0, 0) == true);
         }
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
         // Verify seeking works efficiently with restart points
-        DataPage::Iterator iter(&page, comparator_);
+        DataPageTestHelper::Iterator iter(page.get(), &restart_opt);
 
         // Seek to entries at restart points
         for (int i = 0; i < 16; i += 4) {
@@ -183,18 +209,23 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_RestartPoints", "[
     }
 
     SECTION("Single restart point for few entries") {
-        DataPageBuilder builder(comparator_, default_page_size_, 100);  // Large interval
+        KvOptions large_interval_opt = opt_;
+        large_interval_opt.data_page_restart_interval = 100;
+        DataPageBuilder builder(&large_interval_opt);  // Large interval
 
         for (int i = 0; i < 5; ++i) {
-            builder.Add("key" + std::to_string(i), "value");
+            builder.Add("key" + std::to_string(i), "value", false, 0, 0);
         }
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
         // Should still work with single restart point
         std::string value;
-        REQUIRE(page.Get("key2", &value) == true);
+        REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, "key2", &value) == true);
     }
 }
 
@@ -205,10 +236,13 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_EdgeCases", "[buil
         REQUIRE(builder.Add("", "value", false, 0, 0) == true);
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
         std::string value;
-        REQUIRE(page.Get("", &value) == true);
+        REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, "", &value) == true);
         REQUIRE(value == "value");
     }
 
@@ -218,26 +252,34 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_EdgeCases", "[buil
         REQUIRE(builder.Add("key", "", false, 0, 0) == true);
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
         std::string value = "not_empty";
-        REQUIRE(page.Get("key", &value) == true);
+        REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, "key", &value) == true);
         REQUIRE(value == "");
     }
 
     SECTION("Maximum length key and value") {
-        DataPageBuilder builder(comparator_, 8192, restart_interval_);  // Larger page
+        KvOptions large_opt = opt_;
+        large_opt.data_page_size = 8192;
+        DataPageBuilder builder(&large_opt);  // Larger page
 
         std::string max_key(1024, 'k');
         std::string max_value(2048, 'v');
 
-        REQUIRE(builder.Add(max_key, max_value) == true);
+        REQUIRE(builder.Add(max_key, max_value, false, 0, 0) == true);
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
         std::string value;
-        REQUIRE(page.Get(max_key, &value) == true);
+        REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, max_key, &value) == true);
         REQUIRE(value == max_value);
     }
 
@@ -252,13 +294,16 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_EdgeCases", "[buil
             binary_value += static_cast<char>(255 - i);
         }
 
-        REQUIRE(builder.Add(binary_key, binary_value) == true);
+        REQUIRE(builder.Add(binary_key, binary_value, false, 0, 0) == true);
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
         std::string value;
-        REQUIRE(page.Get(binary_key, &value) == true);
+        REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, binary_key, &value) == true);
         REQUIRE(value == binary_value);
     }
 
@@ -266,25 +311,28 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_EdgeCases", "[buil
         DataPageBuilder builder(&opt_);
 
         std::vector<std::pair<std::string, std::string>> utf8_pairs = {
-            {u8"键1", u8"值1"},
-            {u8"キー2", u8"バリュー2"},
-            {u8"مفتاح3", u8"قيمة3"},
-            {u8"🔑4", u8"💎4"}
+            {"键1", "值1"},
+            {"キー2", "バリュー2"},
+            {"مفتاح3", "قيمة3"},
+            {"🔑4", "💎4"}
         };
 
         // Sort by key for proper ordering
         std::sort(utf8_pairs.begin(), utf8_pairs.end());
 
         for (const auto& [key, value] : utf8_pairs) {
-            REQUIRE(builder.Add(key, value) == true);
+            REQUIRE(builder.Add(key, value, false, 0, 0) == true);
         }
 
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
         for (const auto& [key, expected_value] : utf8_pairs) {
             std::string value;
-            REQUIRE(page.Get(key, &value) == true);
+            REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, key, &value) == true);
             REQUIRE(value == expected_value);
         }
     }
@@ -292,7 +340,9 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_EdgeCases", "[buil
 
 TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_StressTest", "[builder][stress]") {
     SECTION("Build with maximum entries") {
-        DataPageBuilder builder(comparator_, 65536, restart_interval_);  // 64KB page
+        KvOptions huge_opt = opt_;
+        huge_opt.data_page_size = 65536;
+        DataPageBuilder builder(&huge_opt);  // 64KB page
 
         int max_entries = 0;
         for (int i = 0; i < 10000; ++i) {
@@ -311,15 +361,18 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_StressTest", "[bui
 
         // Verify page integrity
         auto page_data = builder.Finish();
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
-        REQUIRE(page.EntryCount() == max_entries);
+        REQUIRE(DataPageTestHelper::NumEntries(page.get(), &opt_) == max_entries);
 
         // Spot check some entries
         for (int i = 0; i < max_entries; i += 100) {
             std::string key = std::to_string(10000000 + i);
             std::string value;
-            REQUIRE(page.Get(key, &value) == true);
+            REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, key, &value) == true);
             REQUIRE(value == std::to_string(i));
         }
     }
@@ -338,7 +391,7 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_StressTest", "[bui
                 std::string key = gen_.GeneratePrefixedKey("k", 1000 + i);
                 std::string value = gen_.GenerateValue(val_len);
 
-                if (builder.Add(key, value)) {
+                if (builder.Add(key, value, false, 0, 0)) {
                     entries.push_back({key, value});
                 } else {
                     break;
@@ -347,11 +400,14 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_StressTest", "[bui
 
             // Verify all entries
             auto page_data = builder.Finish();
-            DataPage page(const_cast<char*>(page_data.data()), page_data.size());
+            auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
 
             for (const auto& [key, expected_value] : entries) {
                 std::string value;
-                REQUIRE(page.Get(key, &value) == true);
+                REQUIRE(DataPageTestHelper::Get(page.get(), &opt_, key, &value) == true);
                 REQUIRE(value == expected_value);
             }
         }
@@ -368,7 +424,7 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_StressTest", "[bui
             for (int i = 0; i < 100; ++i) {
                 std::string key = gen_.GenerateSequentialKey(i);
                 std::string value = gen_.GenerateValue(20);
-                builder.Add(key, value);
+                builder.Add(key, value, false, 0, 0);
             }
 
             auto page_data = builder.Finish();
@@ -394,8 +450,11 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_ErrorConditions", 
         // Could assert, return false, or start new page
         // We'll just verify the original page is valid
 
-        DataPage page(const_cast<char*>(page_data.data()), page_data.size());
-        REQUIRE(page.EntryCount() == 1);
+        auto page = std::make_unique<DataPage>(1);
+        Page page_mem(true);  // Allocate page
+        std::memcpy(page_mem.Ptr(), page_data.data(), page_data.size());
+        page->SetPage(std::move(page_mem));
+        REQUIRE(DataPageTestHelper::NumEntries(page.get(), &opt_) == 1);
     }
 
     SECTION("Extremely small page size") {
@@ -415,10 +474,12 @@ TEST_CASE_METHOD(DataPageBuilderTestFixture, "DataPageBuilder_ErrorConditions", 
     SECTION("Page size exactly at boundary") {
         // Find the exact size where one more entry would exceed limit
         for (uint32_t page_size = 100; page_size <= 200; ++page_size) {
-            DataPageBuilder builder(comparator_, page_size, restart_interval_);
+            KvOptions test_opt = opt_;
+            test_opt.data_page_size = page_size;
+            DataPageBuilder builder(&test_opt);
 
             int count = 0;
-            while (builder.Add("k" + std::to_string(count), "v")) {
+            while (builder.Add("k" + std::to_string(count), "v", false, 0, 0)) {
                 count++;
                 if (count > 100) break;  // Safety limit
             }

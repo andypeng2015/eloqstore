@@ -69,6 +69,10 @@ impl AsyncFileHandle {
         let file_offset = page_offset * page.size() as u64;
         self.handle.write_at(file_offset, page.as_bytes()).await?;
 
+        // CRITICAL: Sync immediately for durability without WAL
+        // This matches C++ behavior where writes must be durable before returning
+        self.handle.sync_data().await?;
+
         // Update metadata
         let new_size = (page_offset + 1) * page.size() as u64;
         if new_size > self.metadata.size {

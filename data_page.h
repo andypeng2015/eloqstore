@@ -60,6 +60,7 @@ public:
     void Clear();
 
 private:
+    friend class DataPageTestHelper;  // Allow test access
     PageId page_id_{MaxPageId};
     Page page_{false};
 };
