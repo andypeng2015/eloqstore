@@ -13,7 +13,7 @@ use bytes::Bytes;
 use crate::types::{Key, Value, TableIdent, PageId, MAX_PAGE_ID};
 use crate::page::{DataPage, PageCache, DataPageBuilder, DataPageIterator, Page};
 use crate::page::PageMapper;
-use crate::storage::AsyncFileManager;
+use crate::storage::{AsyncFileManager, ManifestBuilder};
 use crate::index::{IndexPageManager, IndexPageBuilder, CowRootMeta, IndexPageIter};
 use crate::config::KvOptions;
 use crate::Result;
@@ -215,6 +215,10 @@ pub struct BatchWriteTask {
     idx_page_builder: IndexPageBuilder,
     /// Options
     options: Arc<KvOptions>,
+    /// Manifest builder for tracking page mappings (following C++ wal_builder_)
+    manifest_builder: ManifestBuilder,
+    /// Overflow pointers buffer (following C++ overflow_ptrs_)
+    overflow_ptrs: Vec<u8>,
 }
 
 impl BatchWriteTask {
@@ -242,6 +246,8 @@ impl BatchWriteTask {
             data_page_builder: DataPageBuilder::new(4096), // Default page size
             idx_page_builder: IndexPageBuilder::new(Arc::new(KvOptions::default())),
             options: Arc::new(KvOptions::default()),
+            manifest_builder: ManifestBuilder::new(),
+            overflow_ptrs: Vec::new(),
         }
     }
 
@@ -716,7 +722,7 @@ impl BatchWriteTask {
     }
 
     /// Write page to disk
-    async fn write_page(&self, page: DataPage) -> Result<()> {
+    async fn write_page(&mut self, page: DataPage) -> Result<()> {
         let page_id = page.page_id();
         tracing::info!("write_page: writing page_id={} with {} entries",
             page_id, page.restart_num());
@@ -741,6 +747,8 @@ impl BatchWriteTask {
             let file_page_id = self.page_mapper.allocate_file_page()?;
             self.page_mapper.map_page(page_id, file_page_id)?;
             self.page_mapper.update_mapping(page_id, file_page_id);
+            // Track in manifest builder (following C++ UpdateMapping)
+            self.manifest_builder.update_mapping(page_id, file_page_id);
             tracing::debug!("Mapped page {} to file page {:?}", page_id, file_page_id);
             file_page_id
         };
@@ -953,6 +961,15 @@ impl BatchWriteTask {
 
     /// Apply one page (following C++ ApplyOnePage)
     async fn apply_one_page(&mut self, cidx: &mut usize, now_ms: u64, update_ttl: bool) -> Result<()> {
+        // Structure to hold entries that will go into the page
+        #[derive(Clone)]
+        struct PageEntry {
+            key: Bytes,
+            value: Bytes,
+            timestamp: u64,
+            expire_ts: u64,
+        }
+
         // println!("DEBUG apply_one_page: starting at cidx={}, total entries={}",
         //     *cidx, self.entries.len());
         tracing::info!("apply_one_page: starting at cidx={}, total entries={}",
@@ -965,6 +982,9 @@ impl BatchWriteTask {
         // Collect TTL updates separately to avoid borrow issues
         let mut ttl_updates = Vec::new();
 
+        // Collect all entries that will go into the page
+        let mut page_entries: Vec<PageEntry> = Vec::new();
+
         // Initialize base page iterator if we have an applying page
         let mut base_iter = self.applying_page.as_ref().map(|page| DataPageIterator::new(page));
         let mut is_base_valid = base_iter.as_ref().map_or(false, |_| true);
@@ -973,8 +993,16 @@ impl BatchWriteTask {
         let start_cidx = *cidx;
         let change_end = self.entries.len();
 
-        tracing::debug!("apply_one_page loop starting: is_base_valid={}, cidx={}, change_end={}",
-                        is_base_valid, *cidx, change_end);
+        // Build a set of keys being deleted for quick lookup
+        let mut deleted_keys = std::collections::HashSet::new();
+        for i in *cidx..change_end {
+            if matches!(self.entries[i].op, WriteOp::Delete) {
+                deleted_keys.insert(self.entries[i].key.clone());
+            }
+        }
+
+        tracing::debug!("apply_one_page loop starting: is_base_valid={}, cidx={}, change_end={}, deleted_keys={}",
+                        is_base_valid, *cidx, change_end, deleted_keys.len());
 
         let mut loop_iterations = 0;
         while is_base_valid || *cidx < change_end {
@@ -1017,12 +1045,22 @@ impl BatchWriteTask {
                     // Base is invalid, only process change
                     // println!("DEBUG: Base is invalid, processing change at cidx={}", *cidx);
                     let change_entry = &self.entries[*cidx];
-                    key_to_add = change_entry.key.clone();
-                    val_to_add = change_entry.value.clone();
-                    ts_to_add = change_entry.timestamp;
-                    expire_to_add = change_entry.expire_ts;
                     advance_change = true;
-                    should_add = true;  // FIX: We need to add this entry!
+
+                    // Check operation type - don't add if it's a delete
+                    match change_entry.op {
+                        WriteOp::Delete => {
+                            // Deleting non-existent key - skip
+                            should_add = false;
+                        }
+                        WriteOp::Upsert => {
+                            key_to_add = change_entry.key.clone();
+                            val_to_add = change_entry.value.clone();
+                            ts_to_add = change_entry.timestamp;
+                            expire_to_add = change_entry.expire_ts;
+                            should_add = true;
+                        }
+                    }
                 } else {
                     // println!("DEBUG: Base is valid, comparing base_key={:?} with change_key={:?} at cidx={}",
                     //     String::from_utf8_lossy(&base_key),
@@ -1032,13 +1070,21 @@ impl BatchWriteTask {
                     let cmp_result = comparator.compare(&base_key, &change_entry.key);
 
                     if cmp_result < 0 {
-                    // Base key comes first - keep it
+                    // Base key comes first - check if it's being deleted
                     if let Some(ref iter) = base_iter {
-                        key_to_add = iter.key().unwrap();
-                        val_to_add = iter.value().unwrap_or(Bytes::new());
-                        ts_to_add = iter.timestamp();
-                        expire_to_add = iter.expire_ts().unwrap_or(0);
-                        should_add = true;
+                        let base_key_bytes = iter.key().unwrap();
+
+                        // Check if this key is being deleted by a later change
+                        if deleted_keys.contains(&base_key_bytes) {
+                            // Skip this entry, it will be deleted
+                            should_add = false;
+                        } else {
+                            key_to_add = base_key_bytes;
+                            val_to_add = iter.value().unwrap_or(Bytes::new());
+                            ts_to_add = iter.timestamp();
+                            expire_to_add = iter.expire_ts().unwrap_or(0);
+                            should_add = true;
+                        }
                         advance_base = true;
                     }
                 } else if cmp_result == 0 {
@@ -1155,36 +1201,24 @@ impl BatchWriteTask {
                 break;
             }
 
-            // Add to page if needed
+            // Collect entry if needed (don't add to builder yet)
             if should_add {
-                tracing::debug!("Adding key={:?} to data_page_builder",
+                tracing::debug!("Collecting key={} for sorting",
                     String::from_utf8_lossy(&key_to_add));
-                let added = self.data_page_builder.add(
-                    &key_to_add,
-                    &val_to_add,
-                    ts_to_add,
-                    if expire_to_add > 0 { Some(expire_to_add) } else { None },
-                    false, // is_overflow
-                );
+                page_entries.push(PageEntry {
+                    key: key_to_add.clone(),
+                    value: val_to_add.clone(),
+                    timestamp: ts_to_add,
+                    expire_ts: expire_to_add,
+                });
 
-                if !added {
-                    tracing::debug!("Page full, need to finish current page");
-                    // Page is full, need to finish this page and create index entry
-                    // Get the first key of this page as the page key
-                    let page_key = if let Some(ref page) = self.applying_page {
-                        // Use first key from existing page
-                        let mut iter = DataPageIterator::new(page);
-                        if iter.seek(b"") {
-                            iter.key().unwrap_or(Bytes::new())
-                        } else {
-                            key_to_add.clone()
-                        }
-                    } else {
-                        key_to_add.clone()
-                    };
+                // Check if we're approaching page size limit
+                let estimated_size = page_entries.iter()
+                    .map(|e| 8 + e.key.len() + e.value.len() + 16) // Rough estimate
+                    .sum::<usize>();
 
-                    // Finish the data page and add to index
-                    self.finish_data_page(page_key, PageId::MAX).await?;
+                if estimated_size > 3500 { // Leave some buffer
+                    // We have enough entries, stop collecting
                     break;
                 }
             }
@@ -1220,17 +1254,51 @@ impl BatchWriteTask {
             }
         }
 
+        // Sort all collected entries by key
+        page_entries.sort_by(|a, b| a.key.as_ref().cmp(b.key.as_ref()));
+
+        // Log sorted entries for debugging
+        println!("DEBUG: Sorted {} entries for page:", page_entries.len());
+        for entry in &page_entries {
+            println!("DEBUG:   - Sorted key: {}", String::from_utf8_lossy(&entry.key));
+        }
+
+        // Add sorted entries to the page builder
+        for entry in &page_entries {
+            // Check if value would overflow
+            let (value_to_add, is_overflow) = if self.is_overflow_kv(&entry.key, &entry.value) {
+                // Write overflow value
+                self.write_overflow_value(&entry.value).await?;
+                // Use overflow pointers as the value
+                (Bytes::copy_from_slice(&self.overflow_ptrs), true)
+            } else {
+                (entry.value.clone(), false)
+            };
+
+            let added = self.data_page_builder.add(
+                &entry.key,
+                &value_to_add,
+                entry.timestamp,
+                if entry.expire_ts > 0 { Some(entry.expire_ts) } else { None },
+                is_overflow,
+            );
+
+            if !added {
+                tracing::debug!("Page full while adding key={}, finishing current page",
+                    String::from_utf8_lossy(&entry.key));
+                // Should not happen with our size estimation, but handle it
+                break;
+            }
+        }
+
         // Build and write the page if there's content
         if !self.data_page_builder.is_empty() {
             tracing::info!("Finishing page with data in builder");
 
-            // Get the first key for this page - this will be the index entry key
-            let page_key = if *cidx > 0 && *cidx <= self.entries.len() {
-                // Use the first entry we added to this page
-                self.entries[start_cidx].key.clone()
-            } else {
-                Bytes::from("")
-            };
+            // Get the first key for this page - use the first sorted entry
+            let page_key = page_entries.first()
+                .map(|e| e.key.clone())
+                .unwrap_or_else(|| Bytes::from(""));
             tracing::info!("Using page_key={:?} for index entry", String::from_utf8_lossy(&page_key));
 
             // Use finish_data_page which will add index entry
@@ -1265,8 +1333,80 @@ impl BatchWriteTask {
         }
     }
 
+    /// Check if a key-value pair would overflow (following C++ IsOverflowKV)
+    fn is_overflow_kv(&self, key: &[u8], value: &[u8]) -> bool {
+        use crate::page::HEADER_SIZE;
+
+        // Minimum reserved space for header and restart array
+        let reserved = HEADER_SIZE + (2 * 2); // header + at least 1 restart entry
+
+        // Check if value is too large for a single page
+        if reserved + value.len() > self.options.data_page_size {
+            return true;
+        }
+
+        // Also consider the key size and encoding overhead
+        let total_size = reserved + key.len() + value.len() + 16; // 16 bytes for varint encoding overhead
+        total_size > self.options.data_page_size
+    }
+
+    /// Write overflow value to overflow pages (following C++ WriteOverflowValue)
+    async fn write_overflow_value(&mut self, value: &[u8]) -> Result<()> {
+        use crate::page::{OverflowPage, HEADER_SIZE};
+
+        // Clear overflow pointers buffer
+        self.overflow_ptrs.clear();
+
+        // Calculate page capacity
+        let page_cap = self.options.data_page_size - HEADER_SIZE - 100; // Reserve space for metadata
+
+        let mut remaining = value;
+        let mut head_pointers = Vec::new();
+
+        while !remaining.is_empty() {
+            // Calculate how many bytes we can fit in this page
+            let chunk_size = remaining.len().min(page_cap);
+
+            // Allocate page for overflow
+            let page_id = self.page_mapper.allocate_page()?;
+            head_pointers.push(page_id);
+
+            // Create overflow page with chunk of value
+            let mut overflow_page = OverflowPage::new(page_id, self.options.data_page_size);
+            overflow_page.set_value_data(&remaining[..chunk_size]);
+
+            // Write page to disk
+            let file_page_id = self.page_mapper.allocate_file_page()?;
+            self.page_mapper.map_page(page_id, file_page_id)?;
+            self.page_mapper.update_mapping(page_id, file_page_id);
+            self.manifest_builder.update_mapping(page_id, file_page_id);
+
+            let page = overflow_page.to_page();
+            self.file_manager.write_page(
+                file_page_id.file_id() as u64,
+                file_page_id.page_offset(),
+                &page
+            ).await?;
+
+            remaining = &remaining[chunk_size..];
+        }
+
+        // Encode pointers into overflow_ptrs buffer (following C++ PutFixed32)
+        for page_id in head_pointers {
+            self.overflow_ptrs.extend_from_slice(&page_id.to_le_bytes());
+        }
+
+        Ok(())
+    }
+
     /// Update metadata (following C++ UpdateMeta)
     async fn update_meta(&mut self) -> Result<()> {
+        // First flush manifest (following C++ FlushManifest)
+        self.flush_manifest().await?;
+
+        // Trigger compaction if needed (following C++ CompactIfNeeded)
+        self.compact_if_needed();
+
         // Update the COW metadata in index manager
         if let Some(mut cow_meta) = self.cow_meta.take() {
             // CRITICAL: Clone the page_mapper to preserve the mappings!
@@ -1285,6 +1425,135 @@ impl BatchWriteTask {
         } else {
             tracing::warn!("update_meta: No COW metadata to update for table {:?}", self.table_id);
         }
+        Ok(())
+    }
+
+    /// Check and trigger compaction if needed (following C++ CompactIfNeeded)
+    fn compact_if_needed(&self) {
+        // Check if compaction is enabled (use default factor of 2.0)
+        let file_amplify_factor = 2.0;
+        if !self.options.data_append_mode || file_amplify_factor == 0.0 {
+            return;
+        }
+
+        // Get current file usage stats
+        let mapping_count = self.page_mapper.mapping_count();
+        let allocated_pages = self.page_mapper.allocated_pages();
+
+        // Calculate amplification factor
+        if allocated_pages > 0 {
+            let amplify_factor = mapping_count as f64 / allocated_pages as f64;
+
+            // Trigger compaction if amplification exceeds threshold
+            if amplify_factor > file_amplify_factor {
+                tracing::info!("Triggering compaction for table {:?}, amplify_factor={:.2}",
+                    self.table_id, amplify_factor);
+
+                // TODO: Schedule compaction task
+                // For now, just trigger file GC
+                self.trigger_file_gc();
+            }
+        }
+    }
+
+    /// Trigger file garbage collection (following C++ TriggerFileGC)
+    fn trigger_file_gc(&self) {
+        tracing::info!("Triggering file GC for table {:?}", self.table_id);
+
+        // Get retained files from current mappings
+        let mut retained_files = std::collections::HashSet::new();
+
+        // Walk through all mappings to find which files are still in use
+        let mapping = self.page_mapper.snapshot();
+        for page_id in 0..mapping.max_page_id() {
+            if let Ok(file_page_id) = mapping.to_file_page(page_id) {
+                let file_id = file_page_id.file_id() as u64;  // Convert u32 to u64
+                retained_files.insert(file_id);
+            }
+        }
+
+        // Get current file ID
+        let current_file_id = self.page_mapper.current_file_id();
+
+        // Create GC task
+        use crate::task::file_gc::GcTask;
+        let gc_task = GcTask::new(
+            self.table_id.clone(),
+            chrono::Utc::now().timestamp_micros() as u64,
+            current_file_id,
+            retained_files,
+        );
+
+        // TODO: Submit task to file GC worker
+        // This would typically be sent to a global file GC instance
+        // For now, just log it
+        tracing::info!("Would submit GC task for table {:?} with {} retained files",
+            self.table_id, gc_task.retained_files().len());
+    }
+
+    /// Flush manifest to disk (following C++ FlushManifest)
+    async fn flush_manifest(&mut self) -> Result<()> {
+        // Check if manifest builder is empty (following C++ line 211-214)
+        if self.manifest_builder.is_empty() {
+            return Ok(());
+        }
+
+        let manifest_size = self.cow_meta.as_ref()
+            .map(|m| m.manifest_size)
+            .unwrap_or(0);
+
+        // Get current root IDs
+        let root_id = self.cow_meta.as_ref()
+            .map(|m| m.root_id)
+            .unwrap_or(MAX_PAGE_ID);
+        let ttl_root_id = self.cow_meta.as_ref()
+            .map(|m| m.ttl_root_id)
+            .unwrap_or(MAX_PAGE_ID);
+
+        // Following C++ logic: append if under limit, otherwise switch
+        // Use a reasonable default manifest limit (64KB like C++)
+        let manifest_limit = 64 * 1024;
+
+        if manifest_size > 0 &&
+           manifest_size + self.manifest_builder.current_size() as u64 <= manifest_limit {
+            // Append to existing manifest (following C++ line 223-227)
+            let blob = self.manifest_builder.finalize(root_id, ttl_root_id);
+            self.file_manager.append_manifest(
+                &self.table_id,
+                &blob,
+                manifest_size
+            ).await?;
+
+            // Update manifest size
+            if let Some(ref mut meta) = self.cow_meta {
+                meta.manifest_size += blob.len() as u64;
+            }
+        } else {
+            // Switch to new manifest (following C++ line 231-238)
+            let snapshot = self.page_mapper.snapshot();
+            let max_fp_id = self.page_mapper.allocate_file_page()?;
+
+            let snapshot_data = self.manifest_builder.snapshot(
+                root_id,
+                ttl_root_id,
+                &snapshot,
+                max_fp_id
+            );
+
+            self.file_manager.switch_manifest(
+                &self.table_id,
+                &snapshot_data
+            ).await?;
+
+            // Update manifest size
+            if let Some(ref mut meta) = self.cow_meta {
+                meta.manifest_size = snapshot_data.len() as u64;
+            }
+        }
+
+        // Reset manifest builder for next batch
+        self.manifest_builder.reset();
+
         Ok(())
     }
 
@@ -1388,6 +1657,8 @@ impl BatchWriteTask {
             let fid = self.page_mapper.allocate_file_page()?;
             self.page_mapper.map_page(page_id, fid)?;
             self.page_mapper.update_mapping(page_id, fid);
+            // Track in manifest builder (following C++ UpdateMapping)
+            self.manifest_builder.update_mapping(page_id, fid);
             tracing::debug!("flush_index_page: mapped page {} to file_page {}", page_id, fid);
             fid
         };
@@ -1515,6 +1786,8 @@ impl Clone for BatchWriteTask {
             data_page_builder: DataPageBuilder::new(4096),
             idx_page_builder: IndexPageBuilder::new(Arc::new(KvOptions::default())),
             options: Arc::new(KvOptions::default()),
+            manifest_builder: ManifestBuilder::new(),
+            overflow_ptrs: Vec::new(),
         }
     }
 }

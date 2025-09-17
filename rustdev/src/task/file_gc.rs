@@ -50,6 +50,11 @@ impl GcTask {
     pub fn is_stop_signal(&self) -> bool {
         self.table_id.table_name.is_empty()
     }
+
+    /// Get retained files
+    pub fn retained_files(&self) -> &HashSet<FileId> {
+        &self.retained_files
+    }
 }
 
 /// File garbage collector (following C++ FileGarbageCollector)

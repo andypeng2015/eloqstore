@@ -149,7 +149,7 @@ impl PageCache {
         self.pages_by_id.insert(page_id, cached);
 
         // Update key index with all keys in the page
-        for (k, _) in page.iter() {
+        for (k, _, _, _) in page.iter() {
             self.key_index.insert(k, page_id);
         }
 

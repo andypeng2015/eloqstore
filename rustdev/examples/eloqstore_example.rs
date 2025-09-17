@@ -181,7 +181,9 @@ async fn main() -> Result<()> {
             key: Key::from("product:2001"),
             timeout: None,
         };
+        println!("   DEBUG: Reading product:2001...");
         let result = store.read(read_req).await?;
+        println!("   DEBUG: product:2001 read result = {:?}", result.value.as_ref().map(|v| String::from_utf8_lossy(v)));
         assert_eq!(result.value, Some(Value::from("Laptop Pro 15")));
         println!("   ✓ product:2001 => 'Laptop Pro 15'");
     }
@@ -203,6 +205,12 @@ async fn main() -> Result<()> {
         };
 
         let result = store.scan(scan_req).await?;
+        println!("   DEBUG: Scan found {} entries", result.entries.len());
+        for (key, value) in &result.entries {
+            let key_str = String::from_utf8_lossy(key.as_ref());
+            let val_str = String::from_utf8_lossy(value.as_ref());
+            println!("   DEBUG: Scanned entry: {} => {}", key_str, val_str);
+        }
         assert_eq!(result.entries.len(), 3, "Should find 3 user entries");
 
         for (key, value) in &result.entries {

@@ -272,7 +272,7 @@ impl ManifestFile {
 
     /// Deserialize manifest from bytes
     fn deserialize_manifest(data: &[u8]) -> Result<ManifestData> {
-        let mut replayer = ManifestReplayer::new();
+        let mut replayer = ManifestReplayer::new_empty();
         replayer.replay_buffer(data)?;
 
         let mut manifest = ManifestData::new();
@@ -411,7 +411,28 @@ pub struct ManifestReplayer {
 
 impl ManifestReplayer {
     /// Create a new replayer (following C++ Replayer constructor)
-    pub fn new() -> Self {
+    pub fn new(buffer: &[u8]) -> Self {
+        let mut log_buf = Vec::with_capacity(1024);
+        log_buf.resize(HEADER_SIZE, 0);
+
+        let mut replayer = Self {
+            log_buf,
+            root_id: MAX_PAGE_ID,
+            ttl_root_id: MAX_PAGE_ID,
+            max_file_page_id: FilePageId::from_raw(0),
+            mapping_table: Vec::new(),
+            file_size: 0,
+            mappings: HashMap::new(),
+            roots: HashMap::new(),
+        };
+
+        // Replay the buffer
+        let _ = replayer.replay_buffer(buffer);
+        replayer
+    }
+
+    /// Create an empty replayer
+    pub fn new_empty() -> Self {
         let mut log_buf = Vec::with_capacity(1024);
         log_buf.resize(HEADER_SIZE, 0);
 
@@ -464,8 +485,16 @@ impl ManifestReplayer {
         Ok(())
     }
 
+    /// Simple replay method that returns roots and mappings
+    pub fn replay(&self) -> Result<(PageId, PageId, Vec<(PageId, FilePageId)>)> {
+        let mappings: Vec<_> = self.mappings.iter()
+            .map(|(&k, &v)| (k, v))
+            .collect();
+        Ok((self.root_id, self.ttl_root_id, mappings))
+    }
+
     /// Replay a manifest file (following C++ Replay)
-    pub fn replay(&mut self, manifest: &mut ManifestFile) -> Result<()> {
+    pub fn replay_file(&mut self, manifest: &mut ManifestFile) -> Result<()> {
         self.reset();
 
         while !manifest.is_eof() {
@@ -642,7 +671,7 @@ mod tests {
 
         let mut manifest = ManifestFile::from_content(data.to_vec());
 
-        let mut replayer = ManifestReplayer::new();
+        let mut replayer = ManifestReplayer::new_empty();
         replayer.replay(&mut manifest).unwrap();
 
         assert_eq!(replayer.root_id, 10);
@@ -669,7 +698,7 @@ mod tests {
         manifest.load().await.unwrap();
 
         // Replay
-        let mut replayer = ManifestReplayer::new();
+        let mut replayer = ManifestReplayer::new_empty();
         replayer.replay(&mut manifest).unwrap();
 
         assert_eq!(replayer.root_id, 5);

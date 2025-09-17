@@ -8,7 +8,7 @@ use std::ptr::NonNull;
 use crate::config::KvOptions;
 use crate::codec::Comparator;
 use crate::error::{Error, KvError};
-use crate::types::{PageId, TableIdent, MAX_PAGE_ID};
+use crate::types::{PageId, TableIdent, MAX_PAGE_ID, MAX_FILE_PAGE_ID};
 use crate::page::MappingSnapshot;
 use crate::storage::AsyncFileManager;
 use crate::Result;
@@ -143,6 +143,47 @@ impl IndexPageManager {
     /// Create a COW root for write transaction
     pub fn make_cow_root(&self, table_ident: &TableIdent) -> Result<CowRootMeta> {
         let mut roots = self.roots.write().unwrap();
+
+        // Check if this is the first time accessing this table
+        if !roots.contains_key(table_ident) {
+            tracing::info!("First access to table {:?}, trying to load manifest", table_ident);
+            // Try to load manifest for this table first
+            // We need to do this in a blocking way since we can't await here
+            let manifest_data = futures::executor::block_on(
+                self.io_manager.load_manifest(table_ident)
+            )?;
+            tracing::info!("Loaded manifest data: {} bytes", manifest_data.len());
+
+            if !manifest_data.is_empty() {
+                // Replay the manifest to restore state
+                tracing::info!("Loading manifest for table {:?}, size={} bytes",
+                    table_ident, manifest_data.len());
+
+                use crate::storage::ManifestReplayer;
+                use crate::page::PageMapper;
+                let replayer = ManifestReplayer::new(&manifest_data);
+
+                if let Ok((root_id, ttl_root_id, mappings)) = replayer.replay() {
+                    tracing::info!("Restored from manifest: root_id={}, ttl_root_id={}, {} mappings",
+                        root_id, ttl_root_id, mappings.len());
+
+                    // Create mapper with restored mappings
+                    let mut mapper = PageMapper::new();
+                    for (page_id, file_page_id) in mappings {
+                        mapper.update_mapping(page_id, file_page_id);
+                    }
+
+                    // Insert the restored root
+                    roots.insert(table_ident.clone(), RootMeta {
+                        root_id,
+                        ttl_root_id,
+                        mapper: Some(Box::new(mapper)),
+                        manifest_size: manifest_data.len() as u64,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
 
         // Ensure the table has a root entry
         let root = roots.entry(table_ident.clone()).or_insert_with(|| {
@@ -353,40 +394,98 @@ impl IndexPageManager {
         *count >= self.max_pages
     }
 
-    /// Evict a page from memory
+    /// Evict a page from memory (following C++ Evict)
     fn evict(&self) -> bool {
-        // Find the LRU page that is not pinned
+        // Start from the tail of the active list
         let tail = self.active_tail.lock().unwrap();
+        let head = self.active_head.lock().unwrap();
 
-        if let Some(tail_ptr) = *tail {
-            unsafe {
-                let page = tail_ptr.as_ref();
-                if !page.is_pinned() {
-                    // Unswizzle and evict
-                    // TODO: Implement eviction
-                    return true;
-                }
-            }
+        if tail.is_none() || head.is_none() {
+            return false;
         }
 
-        false
+        let mut node = *tail;
+        let head_ptr = *head;
+
+        loop {
+            // Find an unpinned page walking backwards from tail
+            while let Some(current) = node {
+                unsafe {
+                    let page = current.as_ref();
+
+                    // Skip pinned pages
+                    if !page.is_pinned() {
+                        // Found unpinned page, recycle it
+                        let page_mut = current.as_ptr().as_mut().unwrap();
+                        if self.recycle_page(page_mut) {
+                            // Check if free list now has pages
+                            let free_list = self.free_list.lock().unwrap();
+                            return !free_list.is_empty();
+                        }
+                    }
+
+                    // Move to previous page
+                    node = page.get_prev();
+
+                    // Reached head of list?
+                    if node == head_ptr {
+                        return false;
+                    }
+                }
+            }
+
+            // Check if free list has pages now
+            let free_list = self.free_list.lock().unwrap();
+            if !free_list.is_empty() {
+                return true;
+            }
+        }
     }
 
-    /// Recycle a page
+    /// Recycle a page (following C++ RecyclePage)
     fn recycle_page(&self, page: &mut MemIndexPage) -> bool {
         if page.is_pinned() {
             return false;
         }
 
-        // Remove from active list
+        // Unswizzle the page pointer in all mapping snapshots
+        // This would require tracking which table the page belongs to
+        // For now, we'll skip the unswizzling as it requires more infrastructure
+
+        // Remove the page from the active list
         page.deque();
 
-        // Add to free list
-        self.free_index_page(Box::new(MemIndexPage::new(false)));
+        // Reset page IDs
+        page.reset_ids();
 
-        let mut page_count = self.page_count.lock().unwrap();
-        *page_count -= 1;
+        // Create a new box for the free list
+        // Note: In C++, they reuse the same page object
+        // In Rust, we need to be more careful with ownership
+        let recycled = Box::new(MemIndexPage::new(false));
+        self.free_index_page(recycled);
 
         true
+    }
+
+    /// Evict root if empty - implementation 2 (following C++ EvictRootIfEmpty)
+    fn evict_root_if_empty_impl(&self, table_ident: &TableIdent) {
+        let mut roots = self.roots.write().unwrap();
+
+        // Check if we should remove the root entry
+        let should_remove = if let Some(root) = roots.get(table_ident) {
+            // In C++: remove if ref_cnt == 0
+            // In our Rust version, we don't have ref counting yet,
+            // so we check if the root is at default state
+            root.root_id == MAX_PAGE_ID &&
+            root.mapper.is_none() &&
+            root.manifest_size == 0
+        } else {
+            false
+        };
+
+        if should_remove {
+            tracing::info!("Evicting empty root metadata for {:?}", table_ident);
+            roots.remove(table_ident);
+        }
     }
 }

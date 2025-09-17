@@ -76,23 +76,43 @@ impl ScanIterator {
         // Get mapping snapshot for consistent view
         self.mapping = Some(Arc::new(self.page_mapper.snapshot()));
 
+        // Following C++ line 29-33: SeekIndex to find the data page
+        let data_page_id = self.index_manager.seek_index(
+            self.mapping.as_ref().unwrap(),
+            root_id,
+            key
+        ).await?;
 
-        // For simple implementation: root_id might directly be a data page
-        // In production, we'd traverse the index tree
-        // For now, just load the root as a data page
-        let page_id = root_id;
+        if data_page_id == MAX_PAGE_ID {
+            return Err(Error::Eof);
+        }
 
-        // Load the data page
-        self.load_page(page_id).await?;
+        // Load the data page (not the index page!)
+        self.load_page(data_page_id).await?;
 
-        // Seek within the page
+        // Seek within the page (following C++ line 41)
         if let Some(ref data_page) = self.data_page {
-            // Create a temporary iterator to find the position
+            // Create an iterator and seek to find the position
             let mut iter = DataPageIterator::new(data_page);
-            iter.seek(key);
+            let found = iter.seek(key);
 
-            // Store the position (iterator tracks its own position)
-            self.current_position = Some(0); // Start at beginning after seek
+            if found {
+                // Iterator is positioned at first key >= target
+                // Count how many entries we need to skip to get to this position
+                let mut count = 0;
+                let mut check_iter = DataPageIterator::new(data_page);
+                while let Some((check_key, _, _, _)) = check_iter.next() {
+                    if check_key.as_ref() >= key.as_ref() {
+                        break;
+                    }
+                    count += 1;
+                }
+                self.current_position = Some(count);
+            } else {
+                // No key >= target found, need to move to next page
+                // Following C++ line 42-44
+                self.next_internal().await?;
+            }
         }
 
         Ok(())

@@ -204,12 +204,9 @@ impl Shard {
             tracing::info!("No manifest found at {:?}. Starting fresh.", manifest_path);
         }
 
-        // Restore from checkpoint if available
-        // TODO: Implement checkpoint restoration
-        // The checkpoint contains:
-        // - In-memory index pages
-        // - Hot data pages in cache
-        // - Transaction state
+        // Checkpoint restoration is done lazily in C++ when FindRoot is called
+        // The manifest loading above already handles the core restoration
+        // Additional restoration (index pages, cache) happens on demand
 
         // Update state
         let mut state = self.state.write().await;

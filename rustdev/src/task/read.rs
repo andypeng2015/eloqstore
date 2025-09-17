@@ -1,7 +1,7 @@
 /// Read task implementation following C++ read_task.cpp exactly
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::types::{Key, Value, TableIdent, PageId, FilePageId, MAX_PAGE_ID};
 use crate::page::{DataPage, DataPageIterator, PageCache};
@@ -72,9 +72,47 @@ impl ReadTask {
         Ok(data_page)
     }
 
+    /// Get overflow value (following C++ GetOverflowValue)
+    async fn get_overflow_value(&self, encoded_ptrs: Bytes) -> Result<Bytes> {
+        use crate::page::OverflowPage;
+
+        // Decode overflow pointers (32-bit page IDs)
+        let mut page_ids = Vec::new();
+        let mut pos = 0;
+        while pos + 4 <= encoded_ptrs.len() {
+            let page_id = u32::from_le_bytes([
+                encoded_ptrs[pos],
+                encoded_ptrs[pos + 1],
+                encoded_ptrs[pos + 2],
+                encoded_ptrs[pos + 3],
+            ]);
+            page_ids.push(page_id);
+            pos += 4;
+        }
+
+        // Read all overflow pages and concatenate values
+        let mut value = BytesMut::new();
+        let mapping = self.page_mapper.snapshot();
+
+        for page_id in page_ids {
+            let file_page_id = mapping.to_file_page(page_id)?;
+
+            // Read overflow page
+            let page_data = self.file_manager.read_page(
+                file_page_id.file_id() as u64,
+                file_page_id.page_offset()
+            ).await?;
+
+            let overflow_page = OverflowPage::from_page(page_id, page_data);
+            value.extend_from_slice(&overflow_page.value_data());
+        }
+
+        Ok(value.freeze())
+    }
+
     /// Read implementation (following C++ Read exactly)
     pub async fn read(&self) -> Result<Option<(Value, u64, u64)>> {
-        tracing::debug!("ReadTask::read key={:?}, table={:?}",
+        println!("DEBUG: ReadTask::read key={}, table={:?}",
             String::from_utf8_lossy(&self.key), self.table_id);
 
         // Following C++ line 17-18: FindRoot
@@ -87,7 +125,7 @@ impl ReadTask {
 
         // Following C++ line 19-22: Check if empty
         if root_id == MAX_PAGE_ID {
-            tracing::debug!("Root is MAX_PAGE_ID, key not found");
+            println!("DEBUG: Root is MAX_PAGE_ID, key not found");
             return Ok(None);
         }
 
@@ -101,7 +139,7 @@ impl ReadTask {
             &self.key
         ).await?;
 
-        tracing::debug!("SeekIndex returned page_id={}", page_id);
+        println!("DEBUG: SeekIndex returned page_id={}", page_id);
 
         // Following C++ line 29: ToFilePage
         let file_page = mapping.to_file_page(page_id)?;
@@ -112,12 +150,21 @@ impl ReadTask {
         // Following C++ line 33: Create DataPageIter
         let mut iter = DataPageIterator::new(&data_page);
 
+        // Debug: List all keys in the page
+        println!("DEBUG: Listing all keys in page {}:", page_id);
+        let mut debug_iter = DataPageIterator::new(&data_page);
+        while let Some((key, _, _, _)) = debug_iter.next() {
+            println!("DEBUG:   - Key: {}", String::from_utf8_lossy(&key));
+        }
+
         // Following C++ line 34: Seek
+        println!("DEBUG: Seeking key: {}", String::from_utf8_lossy(&self.key));
         let found = iter.seek(&self.key);
+        println!("DEBUG: Seek result: found={}", found);
 
         // Following C++ line 35-38: Check if found and exact match
         if !found {
-            tracing::debug!("Key not found in data page");
+            println!("DEBUG: Key not found in data page");
             return Ok(None);
         }
 
@@ -125,7 +172,7 @@ impl ReadTask {
         if let Some(iter_key) = iter.key() {
             // Use comparator to check if keys match
             if iter_key != self.key.as_ref() {
-                tracing::debug!("Key mismatch: {:?} != {:?}",
+                println!("DEBUG: Key mismatch: {} != {}",
                     String::from_utf8_lossy(&iter_key),
                     String::from_utf8_lossy(&self.key));
                 return Ok(None);
@@ -136,9 +183,9 @@ impl ReadTask {
 
         // Following C++ line 40-49: Get value (handle overflow if needed)
         let value = if iter.is_overflow() {
-            // TODO: Following C++ line 42-44: GetOverflowValue
-            // For now, just use the value as-is
-            iter.value().unwrap_or(Bytes::new())
+            // Following C++ line 42-44: GetOverflowValue
+            let encoded_ptrs = iter.value().unwrap_or(Bytes::new());
+            self.get_overflow_value(encoded_ptrs).await?
         } else {
             // Following C++ line 48
             iter.value().unwrap_or(Bytes::new())
@@ -211,8 +258,8 @@ impl ReadTask {
 
         // Following C++ line 95-104: Get value
         let value = if iter.is_overflow() {
-            // TODO: GetOverflowValue
-            iter.value().unwrap_or(Bytes::new())
+            let encoded_ptrs = iter.value().unwrap_or(Bytes::new());
+            self.get_overflow_value(encoded_ptrs).await?
         } else {
             iter.value().unwrap_or(Bytes::new())
         };

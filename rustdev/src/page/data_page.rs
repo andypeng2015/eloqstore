@@ -4,7 +4,7 @@ use bytes::Bytes;
 use std::cmp::Ordering;
 
 use crate::types::{PageId, PageType, MAX_PAGE_ID};
-use crate::Result;
+use crate::{Result, Error};
 use super::page::{Page, HEADER_SIZE};
 
 /// Restart point for binary search
@@ -202,31 +202,61 @@ impl<'a> DataPageIterator<'a> {
             return false;
         }
 
-        // Find the right restart point
+        // Special case: only one restart point
+        if restart_count == 1 {
+            // Start from the beginning
+            if let Some(offset) = self.page.restart_point(0) {
+                self.current_pos = HEADER_SIZE + offset as usize;
+            }
+
+            // Linear search from the only restart point
+            while let Some((key, _, _, _)) = self.peek() {
+                match key.as_ref().cmp(target_key) {
+                    Ordering::Less => {
+                        self.next();
+                    }
+                    Ordering::Greater | Ordering::Equal => {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Binary search for the right restart region
+        // Find the restart point whose key is <= target_key
         let mut left = 0;
         let mut right = restart_count - 1;
+        let mut best_restart = 0;
 
-        while left < right {
-            let mid = left + (right - left + 1) / 2;
+        while left <= right {
+            let mid = left + (right - left) / 2;
             if let Some(offset) = self.page.restart_point(mid) {
+                // Save current position
+                let saved_pos = self.current_pos;
                 self.current_pos = HEADER_SIZE + offset as usize;
+
                 if let Some((key, _, _, _)) = self.parse_entry() {
                     match key.as_ref().cmp(target_key) {
-                        Ordering::Less => left = mid,
+                        Ordering::Less | Ordering::Equal => {
+                            best_restart = mid;
+                            left = mid + 1;
+                        }
                         Ordering::Greater => {
                             if mid == 0 {
                                 break;
                             }
                             right = mid - 1;
                         }
-                        Ordering::Equal => return true,
                     }
                 }
+                // Restore position for next iteration
+                self.current_pos = saved_pos;
             }
         }
 
-        // Start from the selected restart point
-        if let Some(offset) = self.page.restart_point(left) {
+        // Start linear search from the best restart point
+        if let Some(offset) = self.page.restart_point(best_restart) {
             self.current_pos = HEADER_SIZE + offset as usize;
         }
 
@@ -530,16 +560,28 @@ mod tests {
 }
 
 impl DataPage {
-    /// Get entry by key
+    /// Get entry by key (following C++ Seek logic)
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        // TODO: Implement binary search
+        let mut iter = DataPageIterator::new(self);
+
+        // Use binary search to find the key
+        if iter.seek(key) {
+            // Check if we found exact match
+            if let Some((found_key, value, _, _)) = iter.peek() {
+                if found_key.as_ref() == key {
+                    return Ok(Some(value.to_vec()));
+                }
+            }
+        }
+
         Ok(None)
     }
 
     /// Insert a key-value pair
     pub fn insert(&mut self, key: Bytes, value: Bytes) -> Result<()> {
-        // TODO: Implement insertion
-        Ok(())
+        // Note: In C++, insertion happens during page building, not on existing pages
+        // Data pages are immutable once built
+        Err(Error::NotSupported("DataPage is immutable after building".to_string()))
     }
 
     /// Check if key-value can fit
@@ -551,33 +593,53 @@ impl DataPage {
     }
 
     /// Iterator over entries
-    pub fn iter(&self) -> impl Iterator<Item = (Bytes, Bytes)> + '_ {
-        // TODO: Implement proper iteration
-        std::iter::empty()
+    pub fn iter(&self) -> DataPageIterator<'_> {
+        DataPageIterator::new(self)
     }
 
-    /// Find floor entry (largest key <= target)
+    /// Find floor entry (largest key <= target) (following C++ SeekFloor)
     pub fn floor(&self, key: &[u8]) -> Result<Option<(Bytes, Bytes)>> {
-        // TODO: Implement floor search
+        let mut iter = DataPageIterator::new(self);
+
+        // Use binary search to find floor
+        if iter.seek_floor(key) {
+            if let Some((found_key, value, _, _)) = iter.peek() {
+                return Ok(Some((found_key, value)));
+            }
+        }
+
         Ok(None)
     }
 
     /// Get last entry
     pub fn last_entry(&self) -> Result<Option<(Bytes, Bytes)>> {
-        // TODO: Implement
-        Ok(None)
+        let mut iter = DataPageIterator::new(self);
+        let mut last_entry = None;
+
+        // Iterate through all entries to find the last one
+        while let Some((key, value, _, _)) = iter.next() {
+            last_entry = Some((key, value));
+        }
+
+        Ok(last_entry)
     }
 
     /// Get first key
     pub fn first_key(&self) -> Option<Bytes> {
-        // TODO: Implement
-        None
+        let mut iter = DataPageIterator::new(self);
+        iter.next().map(|(key, _, _, _)| key)
     }
 
     /// Get last key
     pub fn last_key(&self) -> Option<Bytes> {
-        // TODO: Implement
-        None
+        let mut iter = DataPageIterator::new(self);
+        let mut last_key = None;
+
+        while let Some((key, _, _, _)) = iter.next() {
+            last_key = Some(key);
+        }
+
+        last_key
     }
 
     /// Get entry count

@@ -131,6 +131,11 @@ impl OverflowPage {
     pub fn into_page(self) -> Page {
         self.page
     }
+
+    /// Get a clone of the underlying page
+    pub fn to_page(&self) -> Page {
+        self.page.clone()
+    }
 }
 
 /// Builder for creating overflow page chains

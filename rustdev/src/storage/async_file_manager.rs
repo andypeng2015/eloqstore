@@ -449,6 +449,68 @@ impl AsyncFileManager {
         self.page_size
     }
 
+    /// Append to manifest file (following C++ AppendManifest)
+    pub async fn append_manifest(
+        &self,
+        table_id: &TableIdent,
+        log_data: &[u8],
+        manifest_size: u64
+    ) -> Result<()> {
+        // Open or get manifest file
+        let manifest_path = self.base_dir.join(format!("{}_manifest.dat", table_id.to_string()));
+
+        // Open file for append (create if not exists)
+        let handle = self.backend.open_file(&manifest_path, true).await?;
+
+        // Write at the specified offset (manifest_size is current size)
+        handle.write_at(manifest_size, log_data).await?;
+
+        // Sync to ensure durability
+        handle.sync().await?;
+
+        Ok(())
+    }
+
+    /// Switch manifest file (following C++ SwitchManifest)
+    /// Creates a new manifest file with atomic rename
+    pub async fn switch_manifest(
+        &self,
+        table_id: &TableIdent,
+        snapshot: &[u8]
+    ) -> Result<()> {
+        let manifest_path = self.base_dir.join(format!("{}_manifest.dat", table_id.to_string()));
+        let tmp_path = self.base_dir.join(format!("{}_manifest.tmp", table_id.to_string()));
+
+        // Write to temp file (create new)
+        let handle = self.backend.open_file(&tmp_path, true).await?;
+
+        handle.write_at(0, snapshot).await?;
+        handle.sync().await?;
+        drop(handle); // Close file
+
+        // Atomic rename
+        self.backend.rename(&tmp_path, &manifest_path).await?;
+
+        Ok(())
+    }
+
+    /// Load manifest file (for recovery)
+    pub async fn load_manifest(&self, table_id: &TableIdent) -> Result<Vec<u8>> {
+        let manifest_path = self.base_dir.join(format!("{}_manifest.dat", table_id.to_string()));
+
+        if !self.backend.file_exists(&manifest_path).await? {
+            return Ok(Vec::new());
+        }
+
+        let handle = self.backend.open_file(&manifest_path, false).await?;
+
+        // Read entire file - get file size first
+        let metadata = self.backend.metadata(&manifest_path).await?;
+        let data = handle.read_at(0, metadata.size as usize).await?;
+
+        Ok(data.to_vec())
+    }
+
     /// Get I/O statistics
     pub fn io_stats(&self) -> crate::io::backend::IoStats {
         self.backend.stats()

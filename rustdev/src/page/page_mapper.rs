@@ -299,6 +299,16 @@ impl PageMapper {
         *self.current_file_id.read().unwrap()
     }
 
+    /// Get the count of active mappings
+    pub fn mapping_count(&self) -> usize {
+        self.mappings.read().unwrap().len()
+    }
+
+    /// Get the total number of allocated pages
+    pub fn allocated_pages(&self) -> usize {
+        *self.next_page_id.read().unwrap() as usize
+    }
+
     /// Get allocations for a specific file
     pub fn get_file_allocations(&self, file_id: FileId) -> Vec<FilePageId> {
         let allocations = self.file_allocations.read().unwrap();

@@ -3,6 +3,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::ptr::NonNull;
 
 
 use crate::config::KvOptions;
@@ -148,6 +149,17 @@ impl MemIndexPage {
     /// Check if page ID is valid
     pub fn is_page_id_valid(&self) -> bool {
         self.page_id < MAX_PAGE_ID
+    }
+
+    /// Get previous page pointer
+    pub fn get_prev(&self) -> Option<NonNull<MemIndexPage>> {
+        self.prev.map(|ptr| NonNull::new(ptr).unwrap())
+    }
+
+    /// Reset page IDs to invalid values
+    pub fn reset_ids(&mut self) {
+        self.page_id = MAX_PAGE_ID;
+        self.file_page_id = MAX_FILE_PAGE_ID;
     }
 
     /// Dequeue from LRU list
