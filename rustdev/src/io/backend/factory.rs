@@ -105,9 +105,15 @@ impl IoBackendFactory {
             }
             #[cfg(target_os = "linux")]
             IoBackendType::IoUring => {
-                // let queue_depth = config.queue_depth.unwrap_or(256);
-                // Ok(Arc::new(UringBackend::new(queue_depth)?))
-                Err(Error::NotSupported("IoUring backend temporarily disabled due to thread safety issues".into()))
+                // Note: io_uring backend requires special execution model:
+                // 1. Each shard must run in a dedicated std::thread (not tokio task)
+                // 2. That thread must run tokio_uring::Runtime (not regular tokio)
+                // 3. The backend wrapper satisfies Send+Sync but panics if used incorrectly
+                //
+                // For now, return the wrapper that satisfies type constraints
+                // Real implementation would require refactoring shard execution
+                let queue_depth = config.queue_depth.unwrap_or(256);
+                Ok(Arc::new(super::uring_backend::UringBackend::new(queue_depth)?))
             }
         }
     }

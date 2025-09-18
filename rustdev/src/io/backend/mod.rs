@@ -15,8 +15,10 @@ use crate::Result;
 pub mod sync_backend;
 pub mod tokio_backend;
 pub mod thread_pool_backend;
+#[cfg(target_os = "linux")]
+pub mod uring_backend;
 // #[cfg(target_os = "linux")]
-// pub mod uring_backend;  // TODO: Fix thread safety issues with tokio-uring
+// pub mod uring_backend_real;  // Temporarily disabled due to API issues
 pub mod factory;
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 use bytes::BytesMut;
 
-use crate::codec::encoding::KvEncoder;
+use crate::codec::data_page_codec::DataPageEncoder;
 use crate::types::{PageId, PageType, MAX_PAGE_ID};
 use super::page::{Page, HEADER_SIZE};
 use super::data_page::DataPage;
@@ -26,8 +26,8 @@ pub struct DataPageBuilder {
     content_size: usize,
     /// Last key for prefix compression (future enhancement)
     last_key: Vec<u8>,
-    /// KV encoder
-    encoder: KvEncoder,
+    /// Data page encoder (C++ compatible)
+    encoder: DataPageEncoder,
 }
 
 impl DataPageBuilder {
@@ -55,7 +55,7 @@ impl DataPageBuilder {
             entries_since_restart: 0,
             content_size: 0,
             last_key: Vec::new(),
-            encoder: KvEncoder::new(),
+            encoder: DataPageEncoder::new(),
         }
     }
 
@@ -83,13 +83,28 @@ impl DataPageBuilder {
                       String::from_utf8_lossy(key), value.len(), timestamp);
 
         // Check if we need a restart point
-        if self.entries_since_restart >= self.restart_interval {
+        let is_restart = self.entries_since_restart >= self.restart_interval;
+        if is_restart {
             self.restart_points.push(self.content_size as u16);
             self.entries_since_restart = 0;
         }
 
-        // Encode the entry
-        let encoded = self.encoder.encode_entry(key, value, timestamp, expire_ts, is_overflow);
+        // Encode the entry following C++ format
+        let last_key_ref = if is_restart || self.last_key.is_empty() {
+            None
+        } else {
+            Some(self.last_key.as_slice())
+        };
+
+        let encoded = self.encoder.encode_entry(
+            key,
+            value,
+            timestamp,
+            expire_ts,
+            is_overflow,
+            is_restart,
+            last_key_ref,
+        );
         let entry_size = encoded.len();
 
         // Calculate space needed

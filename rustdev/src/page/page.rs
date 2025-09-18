@@ -1,7 +1,6 @@
 //! Base page structure and operations
 
 use bytes::{Bytes, BytesMut, BufMut};
-use crc32c::crc32c;
 use std::ops::{Index, IndexMut, Range};
 
 use crate::types::{PageId, PageType, DEFAULT_PAGE_SIZE};
@@ -135,21 +134,14 @@ impl Page {
         }
     }
 
-    /// Calculate and set checksum for the page
+    /// Calculate and set checksum for the page (using XXH3 to match C++)
     pub fn update_checksum(&mut self) {
-        // Zero out checksum field first
-        self.set_checksum(0);
-
-        // Calculate CRC32C of entire page except checksum field
-        let checksum = crc32c(&self.data[CHECKSUM_OFFSET + 8..]) as u64;
-        self.set_checksum(checksum);
+        super::checksum::set_checksum(self.as_bytes_mut());
     }
 
-    /// Verify page checksum
+    /// Verify page checksum (using XXH3 to match C++)
     pub fn verify_checksum(&self) -> bool {
-        let stored = self.checksum();
-        let calculated = crc32c(&self.data[CHECKSUM_OFFSET + 8..]) as u64;
-        stored == calculated
+        super::checksum::validate_checksum(self.as_bytes())
     }
 
     /// Get page length
