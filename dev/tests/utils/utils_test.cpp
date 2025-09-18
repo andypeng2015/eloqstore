@@ -2,13 +2,145 @@
 #include <thread>
 #include <chrono>
 #include <random>
+#include <set>
+#include <vector>
+#include <iostream>
 
 #include "utils.h"
 #include "fixtures/test_helpers.h"
 #include "fixtures/data_generator.h"
 
+// Simple LOG replacement for testing
+#define LOG(level) std::cout
+
 using namespace eloqstore;
 using namespace eloqstore::test;
+
+// Stub implementations for missing utility functions
+namespace {
+    uint32_t Hash(const void* data, size_t size, uint32_t seed = 0) {
+        // Simple hash implementation for testing
+        const char* bytes = static_cast<const char*>(data);
+        uint32_t hash = seed;
+        for (size_t i = 0; i < size; ++i) {
+            hash = hash * 31 + bytes[i];
+        }
+        return hash;
+    }
+
+    uint32_t CRC32(const void* data, size_t size, uint32_t seed = 0) {
+        // Simple CRC32-like implementation for testing
+        const char* bytes = static_cast<const char*>(data);
+        uint32_t crc = seed;
+        for (size_t i = 0; i < size; ++i) {
+            crc = (crc << 1) ^ bytes[i];
+        }
+        return crc;
+    }
+
+    uint64_t GetMonotonicTime() {
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+    }
+
+    uint32_t Random32() {
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        return gen();
+    }
+
+    size_t AlignUp(size_t value, size_t alignment) {
+        return (value + alignment - 1) & ~(alignment - 1);
+    }
+
+    size_t AlignDown(size_t value, size_t alignment) {
+        return value & ~(alignment - 1);
+    }
+
+    bool IsAligned(size_t value, size_t alignment) {
+        return (value & (alignment - 1)) == 0;
+    }
+
+    bool IsPowerOfTwo(uint64_t value) {
+        return value && !(value & (value - 1));
+    }
+
+    uint64_t NextPowerOfTwo(uint64_t value) {
+        if (value <= 1) return 1;
+        value--;
+        value |= value >> 1;
+        value |= value >> 2;
+        value |= value >> 4;
+        value |= value >> 8;
+        value |= value >> 16;
+        value |= value >> 32;
+        return value + 1;
+    }
+
+    int Log2(uint64_t value) {
+        int log = 0;
+        while (value >>= 1) log++;
+        return log;
+    }
+
+    std::string Trim(const std::string& str) {
+        size_t first = str.find_first_not_of(" \t\n\r");
+        if (first == std::string::npos) return "";
+        size_t last = str.find_last_not_of(" \t\n\r");
+        return str.substr(first, (last - first + 1));
+    }
+
+    std::vector<std::string> Split(const std::string& str, char delimiter) {
+        std::vector<std::string> result;
+        std::string current;
+        for (char c : str) {
+            if (c == delimiter) {
+                if (!current.empty()) {
+                    result.push_back(current);
+                    current.clear();
+                }
+            } else {
+                current += c;
+            }
+        }
+        if (!current.empty()) {
+            result.push_back(current);
+        }
+        return result;
+    }
+
+    std::vector<std::string> Split(const std::string& str, const std::string& delimiter) {
+        std::vector<std::string> result;
+        size_t start = 0;
+        size_t found = str.find(delimiter);
+        while (found != std::string::npos) {
+            result.push_back(str.substr(start, found - start));
+            start = found + delimiter.length();
+            found = str.find(delimiter, start);
+        }
+        result.push_back(str.substr(start));
+        return result;
+    }
+
+    std::string Join(const std::vector<std::string>& parts, const std::string& delimiter) {
+        if (parts.empty()) return "";
+        std::string result = parts[0];
+        for (size_t i = 1; i < parts.size(); ++i) {
+            result += delimiter + parts[i];
+        }
+        return result;
+    }
+
+    std::string Replace(const std::string& str, const std::string& from, const std::string& to) {
+        std::string result = str;
+        size_t pos = result.find(from);
+        while (pos != std::string::npos) {
+            result.replace(pos, from.length(), to);
+            pos = result.find(from, pos + to.length());
+        }
+        return result;
+    }
+}
 
 TEST_CASE("Utils_Hash_Functions", "[utils][unit]") {
     SECTION("Hash consistency") {

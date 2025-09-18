@@ -50,10 +50,10 @@ TEST_CASE_METHOD(KvOptionsTestFixture, "KvOptions_DefaultValues", "[kvoptions][u
         REQUIRE(opts.num_retained_archives == 0);
         REQUIRE(opts.archive_interval_secs == 0);
         REQUIRE(opts.num_gc_threads == 0);
-        REQUIRE(opts.evict_interval_secs == 60);
-        REQUIRE(opts.gc_interval_secs == 600);
+        // evict_interval_secs not available in current API
+        // gc_interval_secs not available in current API
         REQUIRE(opts.local_space_limit == 0);
-        REQUIRE(opts.per_shard_limit_ == 0);
+        // per_shard_limit_ not available in current API
         REQUIRE(opts.data_append_mode == false);
     }
 }
@@ -83,7 +83,8 @@ data_append_mode = true
         REQUIRE(opts.index_buffer_pool_size == 50000);
         REQUIRE(opts.fd_limit == 1000);
         REQUIRE(opts.skip_verify_checksum == true);
-        REQUIRE(opts.data_path == "/tmp/test_store");
+        REQUIRE(opts.store_path.size() == 1);
+        REQUIRE(opts.store_path[0] == "/tmp/test_store");
         REQUIRE(opts.data_page_size == 8192);
         REQUIRE(opts.pages_per_file_shift == 12);
         REQUIRE(opts.data_append_mode == true);
@@ -104,10 +105,10 @@ data_page_size = 4096
         int result = opts.LoadFromIni(ini_path.c_str());
 
         REQUIRE(result == 0);
-        REQUIRE(opts.data_paths.size() == 3);
-        REQUIRE(opts.data_paths[0] == "/path1");
-        REQUIRE(opts.data_paths[1] == "/path2");
-        REQUIRE(opts.data_paths[2] == "/path3");
+        REQUIRE(opts.store_path.size() == 3);
+        REQUIRE(opts.store_path[0] == "/path1");
+        REQUIRE(opts.store_path[1] == "/path2");
+        REQUIRE(opts.store_path[2] == "/path3");
     }
 
     SECTION("All parameters") {
@@ -125,8 +126,8 @@ coroutine_stack_size = 65536
 num_retained_archives = 10
 archive_interval_secs = 3600
 num_gc_threads = 2
-evict_interval_secs = 120
-gc_interval_secs = 1200
+# evict_interval_secs = 120 (not supported)
+# gc_interval_secs = 1200 (not supported)
 local_space_limit = 1073741824
 skip_verify_checksum = true
 
@@ -136,7 +137,7 @@ data_page_size = 16384
 pages_per_file_shift = 14
 data_append_mode = false
 cloud_store_path = s3://bucket/path
-cloud_worker_count = 4
+rclone_threads = 4
 )";
 
         std::string ini_path = CreateIniFile(ini_content);
@@ -156,11 +157,11 @@ cloud_worker_count = 4
         REQUIRE(opts.num_retained_archives == 10);
         REQUIRE(opts.archive_interval_secs == 3600);
         REQUIRE(opts.num_gc_threads == 2);
-        REQUIRE(opts.evict_interval_secs == 120);
-        REQUIRE(opts.gc_interval_secs == 1200);
+        // evict_interval_secs not available in current API
+        // gc_interval_secs not available in current API
         REQUIRE(opts.local_space_limit == 1073741824);
         REQUIRE(opts.cloud_store_path == "s3://bucket/path");
-        REQUIRE(opts.cloud_worker_count == 4);
+        REQUIRE(opts.rclone_threads == 4);
     }
 }
 
@@ -271,8 +272,8 @@ TEST_CASE_METHOD(KvOptionsTestFixture, "KvOptions_Equality", "[kvoptions][unit]"
         opts2.num_threads = 4;
         REQUIRE(opts1 == opts2);
 
-        opts1.data_path = "/path1";
-        opts2.data_path = "/path2";
+        opts1.store_path = {"/path1"};
+        opts2.store_path = {"/path2"};
         REQUIRE(!(opts1 == opts2));
     }
 
@@ -335,18 +336,21 @@ TEST_CASE("KvOptions_EdgeCases", "[kvoptions][unit][edge-case]") {
     }
 
     SECTION("Path edge cases") {
-        opts.data_path = "";  // Empty path
-        REQUIRE(opts.data_path.empty());
+        opts.store_path.clear();  // Empty path
+        REQUIRE(opts.store_path.empty());
 
-        opts.data_path = std::string(1000, 'x');  // Very long path
-        REQUIRE(opts.data_path.length() == 1000);
+        opts.store_path.clear();
+        opts.store_path.push_back(std::string(1000, 'x'));  // Very long path
+        REQUIRE(opts.store_path[0].length() == 1000);
 
-        opts.data_path = "/path/with spaces/and-special@chars#";
-        REQUIRE(!opts.data_path.empty());
+        opts.store_path.clear();
+        opts.store_path.push_back("/path/with spaces/and-special@chars#");
+        REQUIRE(!opts.store_path.empty());
 
         // Unicode path
-        opts.data_path = u8"/路径/パス/경로";
-        REQUIRE(!opts.data_path.empty());
+        opts.store_path.clear();
+        opts.store_path.push_back("/路径/パス/경로");
+        REQUIRE(!opts.store_path.empty());
     }
 }
 

@@ -5,13 +5,12 @@
 #include <vector>
 
 #include "shard.h"
-#include "kv_request.h"
-#include "read_request.h"
-#include "write_request.h"
+#include "eloq_store.h"
+#include "types.h"
 #include "task_manager.h"
 #include "async_io_manager.h"
 #include "index_page_manager.h"
-#include "pages_pool.h"
+#include "page.h"
 #include "fixtures/test_fixtures.h"
 #include "fixtures/test_helpers.h"
 #include "fixtures/data_generator.h"
@@ -32,16 +31,14 @@ public:
     std::unique_ptr<ReadRequest> CreateReadRequest(const TableIdent& table,
                                                   const std::string& key) {
         auto req = std::make_unique<ReadRequest>();
-        req->table = table;
-        req->key = key;
+        req->SetArgs(table, key);
         return req;
     }
 
-    std::unique_ptr<WriteRequest> CreateWriteRequest(const TableIdent& table,
-                                                    const std::vector<WriteOp>& ops) {
-        auto req = std::make_unique<WriteRequest>();
-        req->table = table;
-        req->ops = ops;
+    std::unique_ptr<BatchWriteRequest> CreateWriteRequest(const TableIdent& table,
+                                                    const std::vector<WriteDataEntry>& entries) {
+        auto req = std::make_unique<BatchWriteRequest>();
+        req->SetArgs(table, std::move(const_cast<std::vector<WriteDataEntry>&>(entries)));
         return req;
     }
 
@@ -80,7 +77,7 @@ TEST_CASE_METHOD(ShardTestFixture, "Shard_BasicOperations", "[shard][unit]") {
 
         const KvOptions* opts = shard->Options();
         REQUIRE(opts != nullptr);
-        REQUIRE(opts->page_size > 0);
+        REQUIRE(opts->data_page_size > 0);
     }
 }
 
@@ -102,14 +99,11 @@ TEST_CASE_METHOD(ShardTestFixture, "Shard_RequestHandling", "[shard][unit]") {
     }
 
     SECTION("Add write request") {
-        std::vector<WriteOp> ops;
-        WriteOp op;
-        op.key = "test_key";
-        op.value = "test_value";
-        op.timestamp = 1000;
-        ops.push_back(op);
+        std::vector<WriteDataEntry> entries;
+        WriteDataEntry entry("test_key", "test_value", 1000, WriteOp::Upsert);
+        entries.push_back(entry);
 
-        auto request = CreateWriteRequest(table, ops);
+        auto request = CreateWriteRequest(table, entries);
 
         bool added = shard->AddKvRequest(request.get());
         REQUIRE(added == true);
@@ -221,8 +215,9 @@ TEST_CASE_METHOD(ShardTestFixture, "Shard_ComponentAccess", "[shard][unit]") {
         REQUIRE(page_pool != nullptr);
 
         // Should be able to allocate pages
-        Page page = page_pool->Get();
-        REQUIRE(page.Data() != nullptr);
+        char* page_ptr = page_pool->Allocate();
+        REQUIRE(page_ptr != nullptr);
+        page_pool->Free(page_ptr);
     }
 }
 
@@ -298,13 +293,11 @@ TEST_CASE_METHOD(ShardTestFixture, "Shard_RequestQueueing", "[shard][unit]") {
                 requests.push_back(std::move(req));
             } else {
                 // Write request
-                std::vector<WriteOp> ops;
-                WriteOp op;
-                op.key = "write_" + std::to_string(i);
-                op.value = gen_.GenerateValue(100);
-                ops.push_back(op);
+                std::vector<WriteDataEntry> entries;
+                WriteDataEntry entry("write_" + std::to_string(i), gen_.GenerateValue(100), 1000, WriteOp::Upsert);
+                entries.push_back(entry);
 
-                auto req = CreateWriteRequest(table, ops);
+                auto req = CreateWriteRequest(table, entries);
                 shard->AddKvRequest(req.get());
                 requests.push_back(std::move(req));
             }

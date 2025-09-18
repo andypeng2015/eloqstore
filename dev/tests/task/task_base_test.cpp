@@ -5,7 +5,7 @@
 
 #include "task.h"
 #include "shard.h"
-#include "kv_request.h"
+#include "eloq_store.h"
 #include "fixtures/test_fixtures.h"
 #include "fixtures/test_helpers.h"
 
@@ -16,6 +16,18 @@ using namespace eloqstore::test;
 class MockTask : public KvTask {
 public:
     explicit MockTask(TaskType type) : type_(type) {}
+    MockTask(const MockTask& other) : type_(other.type_), aborted_(other.aborted_) {}
+    MockTask(MockTask&& other) noexcept : type_(other.type_), aborted_(other.aborted_) {}
+    MockTask& operator=(const MockTask& other) {
+        type_ = other.type_;
+        aborted_ = other.aborted_;
+        return *this;
+    }
+    MockTask& operator=(MockTask&& other) noexcept {
+        type_ = other.type_;
+        aborted_ = other.aborted_;
+        return *this;
+    }
 
     TaskType Type() const override { return type_; }
 
@@ -35,7 +47,7 @@ public:
 
     void InitOptions() {
         options_ = std::make_unique<KvOptions>();
-        options_->page_size = 4096;
+        options_->data_page_size = 4096;
         options_->num_threads = 4;
     }
 
@@ -457,7 +469,7 @@ TEST_CASE("LoadPage_Functions", "[task][unit]") {
 
         // May fail if file doesn't exist
         if (err == KvError::NoError) {
-            REQUIRE(page.Data() != nullptr);
+            REQUIRE(page.Ptr() != nullptr);
         }
     }
 
@@ -467,7 +479,7 @@ TEST_CASE("LoadPage_Functions", "[task][unit]") {
         auto [data_page, err] = LoadDataPage(table, page_id, fp_id);
 
         if (err == KvError::NoError) {
-            REQUIRE(data_page.Data() != nullptr);
+            REQUIRE(data_page.PagePtr() != nullptr);
         }
     }
 
@@ -477,7 +489,7 @@ TEST_CASE("LoadPage_Functions", "[task][unit]") {
         auto [overflow_page, err] = LoadOverflowPage(table, page_id, fp_id);
 
         if (err == KvError::NoError) {
-            REQUIRE(overflow_page.Data() != nullptr);
+            REQUIRE(overflow_page.PagePtr() != nullptr);
         }
     }
 }

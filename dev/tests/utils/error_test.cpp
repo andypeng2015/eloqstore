@@ -1,12 +1,29 @@
 #include <catch2/catch_test_macros.hpp>
 #include <sstream>
 #include <set>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <errno.h>
 
 #include "error.h"
 #include "fixtures/test_helpers.h"
 
 using namespace eloqstore;
 using namespace eloqstore::test;
+
+// Forward declarations for helper functions
+bool IsRetryable(KvError err);
+bool IsFatal(KvError err);
+bool IsIORelated(KvError err);
+std::string ErrorToString(KvError err);
+std::string ErrorToStringWithContext(KvError err, const std::string& context);
+KvError ErrnoToKvError(int err);
+int KvErrorToErrno(KvError err);
+bool IsSuccess(KvError err);
+KvError CombineErrors(KvError err1, KvError err2);
+bool CanIgnoreInDestructor(KvError err);
+int GetSeverity(KvError err);
 
 TEST_CASE("KvError_BasicErrors", "[error][unit]") {
     SECTION("Error codes are unique") {
@@ -15,27 +32,27 @@ TEST_CASE("KvError_BasicErrors", "[error][unit]") {
         // Check all error codes are unique
         error_codes.insert(static_cast<int>(KvError::NoError));
         error_codes.insert(static_cast<int>(KvError::NotFound));
-        error_codes.insert(static_cast<int>(KvError::Corruption));
-        error_codes.insert(static_cast<int>(KvError::NotSupported));
-        error_codes.insert(static_cast<int>(KvError::InvalidArgument));
-        error_codes.insert(static_cast<int>(KvError::IOError));
-        error_codes.insert(static_cast<int>(KvError::MergeInProgress));
-        error_codes.insert(static_cast<int>(KvError::Incomplete));
-        error_codes.insert(static_cast<int>(KvError::ShutdownInProgress));
-        error_codes.insert(static_cast<int>(KvError::TimedOut));
-        error_codes.insert(static_cast<int>(KvError::Aborted));
+        error_codes.insert(static_cast<int>(KvError::Corrupted));
+        // Removed NotSupported - not available in actual API
+        error_codes.insert(static_cast<int>(KvError::InvalidArgs));
+        error_codes.insert(static_cast<int>(KvError::IoFail));
+        // Removed MergeInProgress - not available in actual API
+        error_codes.insert(static_cast<int>(KvError::EndOfFile));
+        error_codes.insert(static_cast<int>(KvError::NotRunning));
+        error_codes.insert(static_cast<int>(KvError::Timeout));
+        // Removed Aborted - not available in actual API
         error_codes.insert(static_cast<int>(KvError::Busy));
-        error_codes.insert(static_cast<int>(KvError::Expired));
+        error_codes.insert(static_cast<int>(KvError::OpenFileLimit));
         error_codes.insert(static_cast<int>(KvError::TryAgain));
-        error_codes.insert(static_cast<int>(KvError::Cancelled));
-        error_codes.insert(static_cast<int>(KvError::OutOfMemory));
-        error_codes.insert(static_cast<int>(KvError::DiskFull));
-        error_codes.insert(static_cast<int>(KvError::FileNotFound));
-        error_codes.insert(static_cast<int>(KvError::PermissionDenied));
-        error_codes.insert(static_cast<int>(KvError::Unknown));
+        error_codes.insert(static_cast<int>(KvError::NoPermission));
+        error_codes.insert(static_cast<int>(KvError::OutOfMem));
+        error_codes.insert(static_cast<int>(KvError::OutOfSpace));
+        // FileNotFound -> using NotFound
+        error_codes.insert(static_cast<int>(KvError::CloudErr));
+        // Unknown error type removed - not in actual API
 
         // Number of unique codes should equal number of error types
-        REQUIRE(error_codes.size() == 20);  // Adjust based on actual error count
+        REQUIRE(error_codes.size() == 15);  // Actual count of KvError enum values
     }
 
     SECTION("NoError is zero") {
@@ -59,8 +76,8 @@ TEST_CASE("KvError_ErrorCategories", "[error][unit]") {
         std::vector<KvError> retryable_errors = {
             KvError::TryAgain,
             KvError::Busy,
-            KvError::TimedOut,
-            KvError::Incomplete
+            KvError::Timeout,
+            KvError::OpenFileLimit
         };
 
         for (KvError err : retryable_errors) {
@@ -71,11 +88,10 @@ TEST_CASE("KvError_ErrorCategories", "[error][unit]") {
     SECTION("Non-retryable errors") {
         // These errors should not be retryable
         std::vector<KvError> non_retryable_errors = {
-            KvError::Corruption,
-            KvError::NotSupported,
-            KvError::InvalidArgument,
-            KvError::FileNotFound,
-            KvError::PermissionDenied
+            KvError::Corrupted,
+            KvError::InvalidArgs,
+            KvError::NotFound,
+            KvError::NoPermission
         };
 
         for (KvError err : non_retryable_errors) {
@@ -86,9 +102,9 @@ TEST_CASE("KvError_ErrorCategories", "[error][unit]") {
     SECTION("Fatal errors") {
         // These errors indicate serious problems
         std::vector<KvError> fatal_errors = {
-            KvError::Corruption,
-            KvError::OutOfMemory,
-            KvError::DiskFull
+            KvError::Corrupted,
+            KvError::OutOfMem,
+            KvError::OutOfSpace
         };
 
         for (KvError err : fatal_errors) {
@@ -98,10 +114,10 @@ TEST_CASE("KvError_ErrorCategories", "[error][unit]") {
 
     SECTION("I/O related errors") {
         std::vector<KvError> io_errors = {
-            KvError::IOError,
-            KvError::DiskFull,
-            KvError::FileNotFound,
-            KvError::PermissionDenied
+            KvError::IoFail,
+            KvError::OutOfSpace,
+            KvError::NotFound,
+            KvError::NoPermission
         };
 
         for (KvError err : io_errors) {
@@ -114,25 +130,20 @@ TEST_CASE("KvError_ErrorMessages", "[error][unit]") {
     SECTION("All errors have messages") {
         std::vector<KvError> all_errors = {
             KvError::NoError,
+            KvError::InvalidArgs,
             KvError::NotFound,
-            KvError::Corruption,
-            KvError::NotSupported,
-            KvError::InvalidArgument,
-            KvError::IOError,
-            KvError::MergeInProgress,
-            KvError::Incomplete,
-            KvError::ShutdownInProgress,
-            KvError::TimedOut,
-            KvError::Aborted,
-            KvError::Busy,
-            KvError::Expired,
+            KvError::NotRunning,
+            KvError::Corrupted,
+            KvError::EndOfFile,
+            KvError::OutOfSpace,
+            KvError::OutOfMem,
+            KvError::OpenFileLimit,
             KvError::TryAgain,
-            KvError::Cancelled,
-            KvError::OutOfMemory,
-            KvError::DiskFull,
-            KvError::FileNotFound,
-            KvError::PermissionDenied,
-            KvError::Unknown
+            KvError::Busy,
+            KvError::Timeout,
+            KvError::NoPermission,
+            KvError::CloudErr,
+            KvError::IoFail
         };
 
         for (KvError err : all_errors) {
@@ -145,8 +156,8 @@ TEST_CASE("KvError_ErrorMessages", "[error][unit]") {
     SECTION("Error message format") {
         REQUIRE(ErrorToString(KvError::NoError) == "OK");
         REQUIRE(ErrorToString(KvError::NotFound) == "Not found");
-        REQUIRE(ErrorToString(KvError::Corruption) == "Corruption detected");
-        REQUIRE(ErrorToString(KvError::IOError) == "I/O error");
+        REQUIRE(ErrorToString(KvError::Corrupted) == "Disk data corrupted");
+        REQUIRE(ErrorToString(KvError::IoFail) == "I/O failure");
     }
 
     SECTION("Error with context") {
@@ -163,25 +174,25 @@ TEST_CASE("KvError_ErrorConversion", "[error][unit]") {
     SECTION("Convert from errno") {
         // Common errno values
         REQUIRE(ErrnoToKvError(0) == KvError::NoError);
-        REQUIRE(ErrnoToKvError(ENOENT) == KvError::FileNotFound);
-        REQUIRE(ErrnoToKvError(EACCES) == KvError::PermissionDenied);
-        REQUIRE(ErrnoToKvError(EIO) == KvError::IOError);
-        REQUIRE(ErrnoToKvError(ENOMEM) == KvError::OutOfMemory);
-        REQUIRE(ErrnoToKvError(ENOSPC) == KvError::DiskFull);
-        REQUIRE(ErrnoToKvError(EINVAL) == KvError::InvalidArgument);
+        REQUIRE(ErrnoToKvError(ENOENT) == KvError::NotFound);
+        REQUIRE(ErrnoToKvError(EACCES) == KvError::NoPermission);
+        REQUIRE(ErrnoToKvError(EIO) == KvError::IoFail);
+        REQUIRE(ErrnoToKvError(ENOMEM) == KvError::OutOfMem);
+        REQUIRE(ErrnoToKvError(ENOSPC) == KvError::OutOfSpace);
+        REQUIRE(ErrnoToKvError(EINVAL) == KvError::InvalidArgs);
         REQUIRE(ErrnoToKvError(EAGAIN) == KvError::TryAgain);
         REQUIRE(ErrnoToKvError(EBUSY) == KvError::Busy);
-        REQUIRE(ErrnoToKvError(ETIMEDOUT) == KvError::TimedOut);
+        REQUIRE(ErrnoToKvError(ETIMEDOUT) == KvError::Timeout);
     }
 
     SECTION("Convert to errno") {
         // Reverse conversion
         REQUIRE(KvErrorToErrno(KvError::NoError) == 0);
-        REQUIRE(KvErrorToErrno(KvError::FileNotFound) == ENOENT);
-        REQUIRE(KvErrorToErrno(KvError::PermissionDenied) == EACCES);
-        REQUIRE(KvErrorToErrno(KvError::IOError) == EIO);
-        REQUIRE(KvErrorToErrno(KvError::OutOfMemory) == ENOMEM);
-        REQUIRE(KvErrorToErrno(KvError::DiskFull) == ENOSPC);
+        REQUIRE(KvErrorToErrno(KvError::NotFound) == ENOENT);
+        REQUIRE(KvErrorToErrno(KvError::NoPermission) == EACCES);
+        REQUIRE(KvErrorToErrno(KvError::IoFail) == EIO);
+        REQUIRE(KvErrorToErrno(KvError::OutOfMem) == ENOMEM);
+        REQUIRE(KvErrorToErrno(KvError::OutOfSpace) == ENOSPC);
     }
 
     SECTION("Round-trip conversion") {
@@ -202,7 +213,7 @@ TEST_CASE("KvError_ErrorHandling", "[error][unit]") {
     SECTION("Success check") {
         REQUIRE(IsSuccess(KvError::NoError) == true);
         REQUIRE(IsSuccess(KvError::NotFound) == false);
-        REQUIRE(IsSuccess(KvError::IOError) == false);
+        REQUIRE(IsSuccess(KvError::IoFail) == false);
     }
 
     SECTION("Error propagation") {
@@ -229,12 +240,12 @@ TEST_CASE("KvError_ErrorHandling", "[error][unit]") {
         KvError combined = CombineErrors(err1, err2);
         REQUIRE(combined == KvError::NotFound);  // Error takes precedence
 
-        err1 = KvError::IOError;
-        err2 = KvError::Corruption;
+        err1 = KvError::IoFail;
+        err2 = KvError::Corrupted;
 
         combined = CombineErrors(err1, err2);
         // More severe error should take precedence
-        REQUIRE(combined == KvError::Corruption);
+        REQUIRE(combined == KvError::Corrupted);
     }
 }
 
@@ -250,8 +261,8 @@ TEST_CASE("KvError_EdgeCases", "[error][unit][edge-case]") {
         // Errors that can be safely ignored in destructors
         std::vector<KvError> safe_in_destructor = {
             KvError::NoError,
-            KvError::Cancelled,
-            KvError::ShutdownInProgress
+            KvError::NotRunning,
+            KvError::EndOfFile
         };
 
         for (KvError err : safe_in_destructor) {
@@ -261,9 +272,9 @@ TEST_CASE("KvError_EdgeCases", "[error][unit][edge-case]") {
 
     SECTION("Error severity ordering") {
         // More severe errors should compare greater
-        REQUIRE(GetSeverity(KvError::Corruption) > GetSeverity(KvError::NotFound));
-        REQUIRE(GetSeverity(KvError::OutOfMemory) > GetSeverity(KvError::Busy));
-        REQUIRE(GetSeverity(KvError::DiskFull) > GetSeverity(KvError::TimedOut));
+        REQUIRE(GetSeverity(KvError::Corrupted) > GetSeverity(KvError::NotFound));
+        REQUIRE(GetSeverity(KvError::OutOfMem) > GetSeverity(KvError::Busy));
+        REQUIRE(GetSeverity(KvError::OutOfSpace) > GetSeverity(KvError::Timeout));
     }
 }
 
@@ -272,8 +283,8 @@ bool IsRetryable(KvError err) {
     switch (err) {
         case KvError::TryAgain:
         case KvError::Busy:
-        case KvError::TimedOut:
-        case KvError::Incomplete:
+        case KvError::Timeout:
+        case KvError::OpenFileLimit:
             return true;
         default:
             return false;
@@ -282,9 +293,9 @@ bool IsRetryable(KvError err) {
 
 bool IsFatal(KvError err) {
     switch (err) {
-        case KvError::Corruption:
-        case KvError::OutOfMemory:
-        case KvError::DiskFull:
+        case KvError::Corrupted:
+        case KvError::OutOfMem:
+        case KvError::OutOfSpace:
             return true;
         default:
             return false;
@@ -293,10 +304,10 @@ bool IsFatal(KvError err) {
 
 bool IsIORelated(KvError err) {
     switch (err) {
-        case KvError::IOError:
-        case KvError::DiskFull:
-        case KvError::FileNotFound:
-        case KvError::PermissionDenied:
+        case KvError::IoFail:
+        case KvError::OutOfSpace:
+        case KvError::NotFound:
+        case KvError::NoPermission:
             return true;
         default:
             return false;
@@ -307,24 +318,19 @@ std::string ErrorToString(KvError err) {
     switch (err) {
         case KvError::NoError: return "OK";
         case KvError::NotFound: return "Not found";
-        case KvError::Corruption: return "Corruption detected";
-        case KvError::NotSupported: return "Operation not supported";
-        case KvError::InvalidArgument: return "Invalid argument";
-        case KvError::IOError: return "I/O error";
-        case KvError::MergeInProgress: return "Merge in progress";
-        case KvError::Incomplete: return "Operation incomplete";
-        case KvError::ShutdownInProgress: return "Shutdown in progress";
-        case KvError::TimedOut: return "Operation timed out";
-        case KvError::Aborted: return "Operation aborted";
-        case KvError::Busy: return "Resource busy";
-        case KvError::Expired: return "Resource expired";
-        case KvError::TryAgain: return "Try again";
-        case KvError::Cancelled: return "Operation cancelled";
-        case KvError::OutOfMemory: return "Out of memory";
-        case KvError::DiskFull: return "Disk full";
-        case KvError::FileNotFound: return "File not found";
-        case KvError::PermissionDenied: return "Permission denied";
-        case KvError::Unknown: return "Unknown error";
+        case KvError::InvalidArgs: return "Invalid arguments";
+        case KvError::NotRunning: return "EloqStore is not running";
+        case KvError::Corrupted: return "Disk data corrupted";
+        case KvError::EndOfFile: return "End of file";
+        case KvError::OutOfSpace: return "Out of disk space";
+        case KvError::OutOfMem: return "Out of memory";
+        case KvError::OpenFileLimit: return "Too many opened files";
+        case KvError::TryAgain: return "Try again later";
+        case KvError::Busy: return "Device or resource busy";
+        case KvError::Timeout: return "Operation timeout";
+        case KvError::NoPermission: return "Operation not permitted";
+        case KvError::CloudErr: return "Cloud service is unavailable";
+        case KvError::IoFail: return "I/O failure";
         default: return "Unknown error";
     }
 }
@@ -336,31 +342,31 @@ std::string ErrorToStringWithContext(KvError err, const std::string& context) {
 KvError ErrnoToKvError(int err) {
     switch (err) {
         case 0: return KvError::NoError;
-        case ENOENT: return KvError::FileNotFound;
-        case EACCES: return KvError::PermissionDenied;
-        case EIO: return KvError::IOError;
-        case ENOMEM: return KvError::OutOfMemory;
-        case ENOSPC: return KvError::DiskFull;
-        case EINVAL: return KvError::InvalidArgument;
+        case ENOENT: return KvError::NotFound;
+        case EACCES: return KvError::NoPermission;
+        case EIO: return KvError::IoFail;
+        case ENOMEM: return KvError::OutOfMem;
+        case ENOSPC: return KvError::OutOfSpace;
+        case EINVAL: return KvError::InvalidArgs;
         case EAGAIN: return KvError::TryAgain;
         case EBUSY: return KvError::Busy;
-        case ETIMEDOUT: return KvError::TimedOut;
-        default: return KvError::Unknown;
+        case ETIMEDOUT: return KvError::Timeout;
+        default: return KvError::IoFail;
     }
 }
 
 int KvErrorToErrno(KvError err) {
     switch (err) {
         case KvError::NoError: return 0;
-        case KvError::FileNotFound: return ENOENT;
-        case KvError::PermissionDenied: return EACCES;
-        case KvError::IOError: return EIO;
-        case KvError::OutOfMemory: return ENOMEM;
-        case KvError::DiskFull: return ENOSPC;
-        case KvError::InvalidArgument: return EINVAL;
+        case KvError::NotFound: return ENOENT;
+        case KvError::NoPermission: return EACCES;
+        case KvError::IoFail: return EIO;
+        case KvError::OutOfMem: return ENOMEM;
+        case KvError::OutOfSpace: return ENOSPC;
+        case KvError::InvalidArgs: return EINVAL;
         case KvError::TryAgain: return EAGAIN;
         case KvError::Busy: return EBUSY;
-        case KvError::TimedOut: return ETIMEDOUT;
+        case KvError::Timeout: return ETIMEDOUT;
         default: return EIO;  // Generic I/O error for unknown
     }
 }
@@ -382,21 +388,21 @@ KvError CombineErrors(KvError err1, KvError err2) {
 
 bool CanIgnoreInDestructor(KvError err) {
     return err == KvError::NoError ||
-           err == KvError::Cancelled ||
-           err == KvError::ShutdownInProgress;
+           err == KvError::NotRunning ||
+           err == KvError::EndOfFile;
 }
 
 int GetSeverity(KvError err) {
     if (err == KvError::NoError) return 0;
-    if (err == KvError::Cancelled || err == KvError::ShutdownInProgress) return 1;
+    if (err == KvError::NotRunning || err == KvError::EndOfFile) return 1;
     if (err == KvError::NotFound) return 2;
     if (err == KvError::Busy || err == KvError::TryAgain) return 3;
-    if (err == KvError::TimedOut) return 4;
-    if (err == KvError::InvalidArgument) return 5;
-    if (err == KvError::IOError) return 6;
-    if (err == KvError::DiskFull) return 7;
-    if (err == KvError::OutOfMemory) return 8;
-    if (err == KvError::Corruption) return 9;
+    if (err == KvError::Timeout) return 4;
+    if (err == KvError::InvalidArgs) return 5;
+    if (err == KvError::IoFail) return 6;
+    if (err == KvError::OutOfSpace) return 7;
+    if (err == KvError::OutOfMem) return 8;
+    if (err == KvError::Corrupted) return 9;
     return 10;  // Unknown
 }
 
