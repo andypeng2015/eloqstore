@@ -96,16 +96,17 @@ impl ScanIterator {
         if let Some(ref data_page) = self.data_page {
 
             // Create an iterator and seek to find the position
-            let mut iter = DataPageIterator::new(data_page);
+            let mut iter = DataPageIterator::new(data_page.clone());
             let found = iter.seek(key);
 
             if found {
                 // Iterator is positioned at first key >= target
                 // Count how many entries we need to skip to get to this position
                 let mut count = 0;
-                let mut check_iter = DataPageIterator::new(data_page);
-                while let Some((check_key, _, _, _)) = check_iter.next() {
-                    if check_key.as_ref() >= key.as_ref() {
+                let mut check_iter = DataPageIterator::new(data_page.clone());
+                while check_iter.next() {
+                    let check_key = check_iter.key();
+                    if check_key >= key.as_ref() {
                         break;
                     }
                     count += 1;
@@ -143,15 +144,15 @@ impl ScanIterator {
             if let Some(pos) = self.current_position {
 
                 // Try to advance position
-                let mut iter = DataPageIterator::new(data_page);
+                let mut iter = DataPageIterator::new(data_page.clone());
                 // Skip to current position
                 for _ in 0..=pos {
-                    if iter.next().is_none() {
+                    if !iter.next() {
                         break;
                     }
                 }
                 // Try one more next
-                if iter.next().is_some() {
+                if iter.next() {
                     self.current_position = Some(pos + 1);
                     return Ok(());
                 }
@@ -198,14 +199,18 @@ impl ScanIterator {
     /// Get current key
     pub fn key(&self) -> Option<Bytes> {
         if let (Some(ref data_page), Some(pos)) = (&self.data_page, self.current_position) {
-            let mut iter = DataPageIterator::new(data_page);
+            let mut iter = DataPageIterator::new(data_page.clone());
             // Skip to current position
             for _ in 0..pos {
-                if iter.next().is_none() {
+                if !iter.next() {
                     return None;
                 }
             }
-            iter.key()
+            // Now call next one more time to be at position pos
+            if !iter.next() {
+                return None;
+            }
+            Some(Bytes::from(iter.key().to_vec()))
         } else {
             None
         }
@@ -214,14 +219,18 @@ impl ScanIterator {
     /// Get current value
     pub fn value(&self) -> Option<Bytes> {
         if let (Some(ref data_page), Some(pos)) = (&self.data_page, self.current_position) {
-            let mut iter = DataPageIterator::new(data_page);
+            let mut iter = DataPageIterator::new(data_page.clone());
             // Skip to current position
             for _ in 0..pos {
-                if iter.next().is_none() {
+                if !iter.next() {
                     return None;
                 }
             }
-            iter.value()
+            // Now call next one more time to be at position pos
+            if !iter.next() {
+                return None;
+            }
+            iter.value().cloned()
         } else {
             None
         }
@@ -230,12 +239,16 @@ impl ScanIterator {
     /// Check if current value is overflow
     pub fn is_overflow(&self) -> bool {
         if let (Some(ref data_page), Some(pos)) = (&self.data_page, self.current_position) {
-            let mut iter = DataPageIterator::new(data_page);
+            let mut iter = DataPageIterator::new(data_page.clone());
             // Skip to current position
             for _ in 0..pos {
-                if iter.next().is_none() {
+                if !iter.next() {
                     return false;
                 }
+            }
+            // Now call next one more time to be at position pos
+            if !iter.next() {
+                return false;
             }
             iter.is_overflow()
         } else {
@@ -246,12 +259,16 @@ impl ScanIterator {
     /// Get expiration timestamp
     pub fn expire_ts(&self) -> Option<u64> {
         if let (Some(ref data_page), Some(pos)) = (&self.data_page, self.current_position) {
-            let mut iter = DataPageIterator::new(data_page);
+            let mut iter = DataPageIterator::new(data_page.clone());
             // Skip to current position
             for _ in 0..pos {
-                if iter.next().is_none() {
+                if !iter.next() {
                     return None;
                 }
+            }
+            // Now call next one more time to be at position pos
+            if !iter.next() {
+                return None;
             }
             iter.expire_ts()
         } else {
@@ -262,12 +279,16 @@ impl ScanIterator {
     /// Get timestamp
     pub fn timestamp(&self) -> u64 {
         if let (Some(ref data_page), Some(pos)) = (&self.data_page, self.current_position) {
-            let mut iter = DataPageIterator::new(data_page);
+            let mut iter = DataPageIterator::new(data_page.clone());
             // Skip to current position
             for _ in 0..pos {
-                if iter.next().is_none() {
+                if !iter.next() {
                     return 0;
                 }
+            }
+            // Now call next one more time to be at position pos
+            if !iter.next() {
+                return 0;
             }
             iter.timestamp()
         } else {
@@ -279,10 +300,10 @@ impl ScanIterator {
     pub fn has_next(&self) -> bool {
         // Check if current page has more entries
         if let (Some(ref data_page), Some(pos)) = (&self.data_page, self.current_position) {
-            let mut iter = DataPageIterator::new(data_page);
+            let mut iter = DataPageIterator::new(data_page.clone());
             // Skip to current position + 1
             for _ in 0..=pos {
-                if iter.next().is_none() {
+                if !iter.next() {
                     // Check if there are more pages
                     return data_page.next_page_id() != MAX_PAGE_ID;
                 }

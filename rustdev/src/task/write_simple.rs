@@ -43,23 +43,23 @@ pub async fn simple_write(
             Ok(page_data) => {
                 // Load existing data from the page
                 let existing_page = DataPage::from_page(page_id, page_data);
-                let mut iter = DataPageIterator::new(&existing_page);
+                let mut iter = DataPageIterator::new(existing_page);
 
                 // Copy existing entries to builder
-                while let (Some(existing_key), Some(existing_value)) = (iter.key(), iter.value()) {
+                while iter.next() {
+                    let existing_key = iter.key();
                     // Skip if it's the same key (update case)
-                    if existing_key.as_ref() != key {
+                    if existing_key != key {
                         // Try to add, but if page is full, we skip (data loss for testing)
-                        let _ = builder.add(
-                            existing_key.as_ref(),
-                            existing_value.as_ref(),
-                            iter.timestamp(),
-                            iter.expire_ts(),
-                            false,
-                        );
-                    }
-                    if iter.next().is_none() {
-                        break;
+                        if let Some(existing_value) = iter.value() {
+                            let _ = builder.add(
+                                existing_key,
+                                &existing_value,
+                                iter.timestamp(),
+                                iter.expire_ts(),
+                                false,
+                            );
+                        }
                     }
                 }
             }
@@ -140,14 +140,14 @@ pub async fn simple_read(
     // Try cache first
     if let Some(data_page) = page_cache.get(&Bytes::copy_from_slice(key)).await {
         // Use iterator to find the key
-        let mut iter = DataPageIterator::new(&data_page);
+        let mut iter = DataPageIterator::new(data_page.as_ref().clone());
         let value = if iter.seek(key) {
-            iter.value()
+            iter.value().cloned()
         } else {
             None
         };
         tracing::debug!("Found in cache: {:?}", value.as_ref().map(|v| String::from_utf8_lossy(v)));
-        return Ok(value.map(Bytes::from));
+        return Ok(value);
     }
 
     // Read from disk
@@ -166,14 +166,14 @@ pub async fn simple_read(
 
         let data_page = data_page_arc;
         // Use iterator to find the key
-        let mut iter = DataPageIterator::new(&data_page);
+        let mut iter = DataPageIterator::new(data_page.as_ref().clone());
         let value = if iter.seek(key) {
-            iter.value()
+            iter.value().cloned()
         } else {
             None
         };
         tracing::debug!("Found on disk: {:?}", value.as_ref().map(|v| String::from_utf8_lossy(v)));
-        return Ok(value.map(Bytes::from));
+        return Ok(value);
     }
 
     tracing::debug!("Key not found");

@@ -41,7 +41,7 @@ pub enum ValueLenBit {
 /// |data blob|restart array(N*2B)|restart num(2B)|padding bytes|
 /// +---------+-------------------+---------------+-------------+
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DataPage {
     /// Page ID
     page_id: PageId,
@@ -168,353 +168,7 @@ impl DataPage {
 
 } // End of first impl DataPage block
 
-/// Iterator over entries in a data page
-pub struct DataPageIterator<'a> {
-    /// Reference to the data page
-    page: &'a DataPage,
-    /// Current position in the page
-    current_pos: usize,
-    /// End position (exclusive)
-    end_pos: usize,
-}
 
-impl<'a> DataPageIterator<'a> {
-    /// Create a new iterator
-    pub fn new(page: &'a DataPage) -> Self {
-        let end_pos = HEADER_SIZE + page.content_length() as usize;
-        Self {
-            page,
-            current_pos: HEADER_SIZE,
-            end_pos,
-        }
-    }
-
-    /// Reset iterator to beginning
-    pub fn reset(&mut self) {
-        self.current_pos = HEADER_SIZE;
-    }
-
-    /// Seek to the first key >= target
-    pub fn seek(&mut self, target_key: &[u8]) -> bool {
-        // Binary search using restart points
-        let restart_count = self.page.restart_count();
-        if restart_count == 0 {
-            return false;
-        }
-
-        // Special case: only one restart point
-        if restart_count == 1 {
-            // Start from the beginning
-            if let Some(offset) = self.page.restart_point(0) {
-                self.current_pos = HEADER_SIZE + offset as usize;
-            }
-
-            // Linear search from the only restart point
-            while let Some((key, _, _, _)) = self.peek() {
-                match key.as_ref().cmp(target_key) {
-                    Ordering::Less => {
-                        self.next();
-                    }
-                    Ordering::Greater | Ordering::Equal => {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-
-        // Binary search for the right restart region
-        // Find the restart point whose key is <= target_key
-        let mut left = 0;
-        let mut right = restart_count - 1;
-        let mut best_restart = 0;
-
-        while left <= right {
-            let mid = left + (right - left) / 2;
-            if let Some(offset) = self.page.restart_point(mid) {
-                // Save current position
-                let saved_pos = self.current_pos;
-                self.current_pos = HEADER_SIZE + offset as usize;
-
-                if let Some((key, _, _, _)) = self.parse_entry() {
-                    match key.as_ref().cmp(target_key) {
-                        Ordering::Less | Ordering::Equal => {
-                            best_restart = mid;
-                            left = mid + 1;
-                        }
-                        Ordering::Greater => {
-                            if mid == 0 {
-                                break;
-                            }
-                            right = mid - 1;
-                        }
-                    }
-                }
-                // Restore position for next iteration
-                self.current_pos = saved_pos;
-            }
-        }
-
-        // Start linear search from the best restart point
-        if let Some(offset) = self.page.restart_point(best_restart) {
-            self.current_pos = HEADER_SIZE + offset as usize;
-        }
-
-        // Linear search from restart point
-        while let Some((key, _, _, _)) = self.peek() {
-            match key.as_ref().cmp(target_key) {
-                Ordering::Less => {
-                    self.next();
-                }
-                Ordering::Greater | Ordering::Equal => {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    /// Seek to the last key <= target
-    pub fn seek_floor(&mut self, target_key: &[u8]) -> bool {
-        let mut found = false;
-        let mut last_valid_pos = self.current_pos;
-
-        // Use binary search with restart points
-        let restart_count = self.page.restart_count();
-        if restart_count == 0 {
-            return false;
-        }
-
-        // Find the right restart point
-        let mut left = 0;
-        let mut right = restart_count - 1;
-
-        while left <= right && right < restart_count {
-            let mid = left + (right - left) / 2;
-            if let Some(offset) = self.page.restart_point(mid) {
-                self.current_pos = HEADER_SIZE + offset as usize;
-                if let Some((key, _, _, _)) = self.parse_entry() {
-                    match key.as_ref().cmp(target_key) {
-                        Ordering::Less | Ordering::Equal => {
-                            found = true;
-                            last_valid_pos = HEADER_SIZE + offset as usize;
-                            left = mid + 1;
-                        }
-                        Ordering::Greater => {
-                            if mid == 0 {
-                                break;
-                            }
-                            right = mid - 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        if found {
-            // Linear search from the restart point
-            self.current_pos = last_valid_pos;
-            let mut floor_pos = last_valid_pos;
-
-            while let Some((key, _, _, _)) = self.peek() {
-                if key.as_ref() <= target_key {
-                    floor_pos = self.current_pos;
-                    self.next();
-                } else {
-                    break;
-                }
-            }
-
-            self.current_pos = floor_pos;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Parse entry at current position
-    fn parse_entry(&self) -> Option<(Bytes, Bytes, u64, Option<u64>)> {
-        if self.current_pos >= self.end_pos {
-            return None;
-        }
-
-        let data = self.page.page().as_bytes();
-        let mut pos = self.current_pos;
-
-        // Read key length (varint)
-        let (key_len, bytes_read) = decode_varint(&data[pos..])?;
-        pos += bytes_read;
-
-        // Read value length and flags (varint)
-        let (val_len_with_flags, bytes_read) = decode_varint(&data[pos..])?;
-        pos += bytes_read;
-
-        // Extract flags
-        let is_overflow = (val_len_with_flags & (1 << ValueLenBit::Overflow as u32)) != 0;
-        let has_expire = (val_len_with_flags & (1 << ValueLenBit::Expire as u32)) != 0;
-        let val_len = val_len_with_flags >> 4;
-
-        // Read timestamp (varint)
-        let (timestamp, bytes_read) = decode_varint(&data[pos..]).map(|(v, b)| (v as u64, b))?;
-        pos += bytes_read;
-
-        // Read expiration if present
-        let expire_ts = if has_expire {
-            let (expire, bytes_read) = decode_varint(&data[pos..]).map(|(v, b)| (v as u64, b))?;
-            pos += bytes_read;
-            Some(expire)
-        } else {
-            None
-        };
-
-        // Read key
-        if pos + key_len as usize > data.len() {
-            return None;
-        }
-        let key = Bytes::copy_from_slice(&data[pos..pos + key_len as usize]);
-        pos += key_len as usize;
-
-        // Read value
-        if pos + val_len as usize > data.len() {
-            return None;
-        }
-        let value = if is_overflow {
-            // For overflow values, the data contains overflow page pointers
-            Bytes::copy_from_slice(&data[pos..pos + val_len as usize])
-        } else {
-            Bytes::copy_from_slice(&data[pos..pos + val_len as usize])
-        };
-
-        Some((key, value, timestamp, expire_ts))
-    }
-
-    /// Peek at current entry without advancing
-    pub fn peek(&self) -> Option<(Bytes, Bytes, u64, Option<u64>)> {
-        self.parse_entry()
-    }
-
-    /// Get current key
-    pub fn key(&self) -> Option<Bytes> {
-        self.peek().map(|(k, _, _, _)| k)
-    }
-
-    /// Get current value
-    pub fn value(&self) -> Option<Bytes> {
-        self.peek().map(|(_, v, _, _)| v)
-    }
-
-    /// Get expiration timestamp
-    pub fn expire_ts(&self) -> Option<u64> {
-        self.peek().and_then(|(_, _, _, expire)| expire)
-    }
-
-    /// Get timestamp
-    pub fn timestamp(&self) -> u64 {
-        self.peek().map(|(_, _, ts, _)| ts).unwrap_or(0)
-    }
-
-    /// Check if has more entries
-    pub fn has_next(&self) -> bool {
-        self.current_pos < self.end_pos
-    }
-
-    /// Check if current value is overflow
-    pub fn is_overflow(&self) -> bool {
-        if self.current_pos >= self.end_pos {
-            return false;
-        }
-
-        let data = self.page.page().as_bytes();
-        let mut pos = self.current_pos;
-
-        // Skip key length
-        if let Some((_, bytes_read)) = decode_varint(&data[pos..]) {
-            pos += bytes_read;
-
-            // Read value length and check overflow bit
-            if let Some((val_len_with_flags, _)) = decode_varint(&data[pos..]) {
-                return (val_len_with_flags & (1 << ValueLenBit::Overflow as u32)) != 0;
-            }
-        }
-
-        false
-    }
-}
-
-impl<'a> Iterator for DataPageIterator<'a> {
-    type Item = (Bytes, Bytes, u64, Option<u64>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let entry = self.parse_entry()?;
-
-        // Advance position
-        let data = self.page.page().as_bytes();
-        let mut pos = self.current_pos;
-
-        // Skip key length
-        let (key_len, bytes_read) = decode_varint(&data[pos..])?;
-        pos += bytes_read;
-
-        // Skip value length
-        let (val_len_with_flags, bytes_read) = decode_varint(&data[pos..])?;
-        pos += bytes_read;
-        let has_expire = (val_len_with_flags & (1 << ValueLenBit::Expire as u32)) != 0;
-        let val_len = val_len_with_flags >> 4;
-
-        // Skip timestamp
-        let (_, bytes_read) = decode_varint(&data[pos..])?;
-        pos += bytes_read;
-
-        // Skip expiration if present
-        if has_expire {
-            let (_, bytes_read) = decode_varint(&data[pos..])?;
-            pos += bytes_read;
-        }
-
-        // Skip key and value
-        pos += key_len as usize + val_len as usize;
-        self.current_pos = pos;
-
-        Some(entry)
-    }
-}
-
-/// Decode varint from bytes
-fn decode_varint(data: &[u8]) -> Option<(u32, usize)> {
-    let mut result = 0u32;
-    let mut shift = 0;
-
-    for (i, &byte) in data.iter().enumerate() {
-        if i >= 5 {
-            return None; // Varint too long
-        }
-
-        result |= ((byte & 0x7F) as u32) << shift;
-
-        if byte & 0x80 == 0 {
-            return Some((result, i + 1));
-        }
-
-        shift += 7;
-    }
-
-    None
-}
-
-/// Encode varint to bytes
-fn encode_varint(mut value: u32, buf: &mut [u8]) -> usize {
-    let mut i = 0;
-
-    while value >= 0x80 {
-        buf[i] = (value as u8) | 0x80;
-        value >>= 7;
-        i += 1;
-    }
-
-    buf[i] = value as u8;
-    i + 1
-}
 
 #[cfg(test)]
 mod tests {
@@ -528,47 +182,18 @@ mod tests {
         assert_eq!(page.restart_count(), 0);
     }
 
-    #[test]
-    fn test_varint_encoding() {
-        let mut buf = [0u8; 10];
-
-        // Test small value
-        let len = encode_varint(127, &mut buf);
-        assert_eq!(len, 1);
-        assert_eq!(buf[0], 127);
-
-        let (val, bytes) = decode_varint(&buf).unwrap();
-        assert_eq!(val, 127);
-        assert_eq!(bytes, 1);
-
-        // Test larger value
-        let len = encode_varint(300, &mut buf);
-        assert_eq!(len, 2);
-
-        let (val, bytes) = decode_varint(&buf).unwrap();
-        assert_eq!(val, 300);
-        assert_eq!(bytes, 2);
-
-        // Test maximum value
-        let len = encode_varint(u32::MAX, &mut buf);
-        assert_eq!(len, 5);
-
-        let (val, bytes) = decode_varint(&buf).unwrap();
-        assert_eq!(val, u32::MAX);
-        assert_eq!(bytes, 5);
-    }
 }
 
 impl DataPage {
     /// Get entry by key (following C++ Seek logic)
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let mut iter = DataPageIterator::new(self);
+        let mut iter = super::data_page_iterator::DataPageIterator::new(self.clone());
 
         // Use binary search to find the key
         if iter.seek(key) {
             // Check if we found exact match
-            if let Some((found_key, value, _, _)) = iter.peek() {
-                if found_key.as_ref() == key {
+            if iter.key() == key {
+                if let Some(value) = iter.value() {
                     return Ok(Some(value.to_vec()));
                 }
             }
@@ -593,18 +218,18 @@ impl DataPage {
     }
 
     /// Iterator over entries
-    pub fn iter(&self) -> DataPageIterator<'_> {
-        DataPageIterator::new(self)
+    pub fn iter(&self) -> super::data_page_iterator::DataPageIterator {
+        super::data_page_iterator::DataPageIterator::new(self.clone())
     }
 
     /// Find floor entry (largest key <= target) (following C++ SeekFloor)
     pub fn floor(&self, key: &[u8]) -> Result<Option<(Bytes, Bytes)>> {
-        let mut iter = DataPageIterator::new(self);
+        let mut iter = super::data_page_iterator::DataPageIterator::new(self.clone());
 
         // Use binary search to find floor
-        if iter.seek_floor(key) {
-            if let Some((found_key, value, _, _)) = iter.peek() {
-                return Ok(Some((found_key, value)));
+        if iter.seek(key) {
+            if let Some(value) = iter.value() {
+                return Ok(Some((Bytes::from(iter.key().to_vec()), value.clone())));
             }
         }
 
@@ -613,12 +238,14 @@ impl DataPage {
 
     /// Get last entry
     pub fn last_entry(&self) -> Result<Option<(Bytes, Bytes)>> {
-        let mut iter = DataPageIterator::new(self);
+        let mut iter = super::data_page_iterator::DataPageIterator::new(self.clone());
         let mut last_entry = None;
 
         // Iterate through all entries to find the last one
-        while let Some((key, value, _, _)) = iter.next() {
-            last_entry = Some((key, value));
+        while iter.next() {
+            if let Some(value) = iter.value() {
+                last_entry = Some((Bytes::from(iter.key().to_vec()), value.clone()));
+            }
         }
 
         Ok(last_entry)
@@ -626,17 +253,21 @@ impl DataPage {
 
     /// Get first key
     pub fn first_key(&self) -> Option<Bytes> {
-        let mut iter = DataPageIterator::new(self);
-        iter.next().map(|(key, _, _, _)| key)
+        let mut iter = super::data_page_iterator::DataPageIterator::new(self.clone());
+        if iter.next() {
+            Some(Bytes::from(iter.key().to_vec()))
+        } else {
+            None
+        }
     }
 
     /// Get last key
     pub fn last_key(&self) -> Option<Bytes> {
-        let mut iter = DataPageIterator::new(self);
+        let mut iter = super::data_page_iterator::DataPageIterator::new(self.clone());
         let mut last_key = None;
 
-        while let Some((key, _, _, _)) = iter.next() {
-            last_key = Some(key);
+        while iter.next() {
+            last_key = Some(Bytes::from(iter.key().to_vec()));
         }
 
         last_key
@@ -646,8 +277,8 @@ impl DataPage {
     pub fn entry_count(&self) -> usize {
         // Count entries by iterating through the page
         let mut count = 0;
-        let mut iter = DataPageIterator::new(self);
-        while iter.next().is_some() {
+        let mut iter = super::data_page_iterator::DataPageIterator::new(self.clone());
+        while iter.next() {
             count += 1;
         }
         count

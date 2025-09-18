@@ -143,7 +143,7 @@ impl ReadTask {
         let data_page = self.load_data_page(page_id, file_page).await?;
 
         // Following C++ line 33: Create DataPageIter
-        let mut iter = DataPageIterator::new(&data_page);
+        let mut iter = DataPageIterator::new(data_page.clone());
 
 
         // Following C++ line 34: Seek
@@ -155,23 +155,21 @@ impl ReadTask {
         }
 
         // Check exact match
-        if let Some(iter_key) = iter.key() {
+        {
             // Use comparator to check if keys match
-            if iter_key != self.key.as_ref() {
+            if iter.key() != self.key.as_ref() {
                 return Ok(None);
             }
-        } else {
-            return Ok(None);
         }
 
         // Following C++ line 40-49: Get value (handle overflow if needed)
         let value = if iter.is_overflow() {
             // Following C++ line 42-44: GetOverflowValue
-            let encoded_ptrs = iter.value().unwrap_or(Bytes::new());
+            let encoded_ptrs = iter.value().cloned().unwrap_or(Bytes::new());
             self.get_overflow_value(encoded_ptrs).await?
         } else {
             // Following C++ line 48
-            iter.value().unwrap_or(Bytes::new())
+            iter.value().cloned().unwrap_or(Bytes::new())
         };
 
         // Following C++ line 50-51: Get timestamp and expire_ts
@@ -216,10 +214,10 @@ impl ReadTask {
         let mut data_page = self.load_data_page(page_id, file_page).await?;
 
         // Following C++ line 78: Create DataPageIter
-        let mut iter = DataPageIterator::new(&data_page);
+        let mut iter = DataPageIterator::new(data_page.clone());
 
         // Following C++ line 79-93: SeekFloor with prev page handling
-        if !iter.seek_floor(&self.key) {
+        if !iter.seek(&self.key) {
             // Need to check previous page
             let prev_page_id = data_page.prev_page_id();
             if prev_page_id == MAX_PAGE_ID {
@@ -229,22 +227,24 @@ impl ReadTask {
             let prev_file_page = mapping.to_file_page(prev_page_id)?;
 
             data_page = self.load_data_page(prev_page_id, prev_file_page).await?;
-            iter = DataPageIterator::new(&data_page);
+            iter = DataPageIterator::new(data_page.clone());
 
-            if !iter.seek_floor(&self.key) {
+            // Seek to last entry in this page
+            while iter.next() {}
+            if iter.key().is_empty() {
                 return Ok(None);
             }
         }
 
         // Following C++ line 94: Get floor_key
-        let floor_key = iter.key().ok_or_else(|| Error::InvalidState("No key".into()))?;
+        let floor_key = Bytes::from(iter.key().to_vec());
 
         // Following C++ line 95-104: Get value
         let value = if iter.is_overflow() {
-            let encoded_ptrs = iter.value().unwrap_or(Bytes::new());
+            let encoded_ptrs = iter.value().cloned().unwrap_or(Bytes::new());
             self.get_overflow_value(encoded_ptrs).await?
         } else {
-            iter.value().unwrap_or(Bytes::new())
+            iter.value().cloned().unwrap_or(Bytes::new())
         };
 
         let timestamp = iter.timestamp();

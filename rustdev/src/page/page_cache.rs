@@ -368,8 +368,10 @@ impl PageCache {
         self.pages.insert(page_id, cached);
 
         // Update key index with all keys in the page
-        for (key, _, _, _) in page.iter() {
-            self.key_index.insert(Bytes::copy_from_slice(&key), page_id);
+        let mut iter = page.iter();
+        while iter.next() {
+            let key = iter.key();
+            self.key_index.insert(Bytes::copy_from_slice(key), page_id);
         }
 
         // Update LRU

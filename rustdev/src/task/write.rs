@@ -1117,8 +1117,12 @@ impl BatchWriteTask {
         // Solution: Process the page entries into a vector first
         let mut base_entries = Vec::new();
         if let Some(ref page) = self.applying_page {
-            let mut temp_iter = DataPageIterator::new(page);
-            while let Some((k, v, ts, exp)) = temp_iter.next() {
+            let mut temp_iter = DataPageIterator::new(page.clone());
+            while temp_iter.next() {
+                let k = Bytes::from(temp_iter.key().to_vec());
+                let v = temp_iter.value().cloned().unwrap_or(Bytes::new());
+                let ts = temp_iter.timestamp();
+                let exp = temp_iter.expire_ts();
                 tracing::info!("Loading base entry: key='{}'", String::from_utf8_lossy(&k));
                 base_entries.push((k, v, ts, exp));
             }
@@ -1624,9 +1628,10 @@ impl BatchWriteTask {
             page_id, data_page.content_length(), data_page.restart_count());
 
         // Debug: List entries in this page
-        let mut iter = DataPageIterator::new(&data_page);
+        let mut iter = DataPageIterator::new(data_page.clone());
         let mut count = 0;
-        while let Some((k, _, _, _)) = iter.next() {
+        while iter.next() {
+            let k = iter.key();
             if count < 3 {
                 tracing::info!("  Page {} entry[{}]: key='{}'", page_id, count, String::from_utf8_lossy(&k));
             }
@@ -1652,9 +1657,9 @@ impl BatchWriteTask {
             // Get the first key from the data page to use as index key
             let index_key = if count > 0 {
                 // Re-iterate to get first key
-                let mut temp_iter = DataPageIterator::new(&data_page);
-                if let Some((first_key, _, _, _)) = temp_iter.next() {
-                    Bytes::copy_from_slice(&first_key)
+                let mut temp_iter = DataPageIterator::new(data_page.clone());
+                if temp_iter.next() {
+                    Bytes::from(temp_iter.key().to_vec())
                 } else {
                     page_key.clone()
                 }
