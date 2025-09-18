@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
     options.fd_limit = 1000;
     options.max_write_batch_pages = 10;
     options.overflow_pointers = 4;
+    options.num_gc_threads = 2;  // Enable file GC with 2 threads
 
     // Create and start the store
     println!("Creating store...");
@@ -283,6 +284,7 @@ async fn main() -> Result<()> {
     options2.fd_limit = 1000;
     options2.max_write_batch_pages = 10;
     options2.overflow_pointers = 4;
+    options2.num_gc_threads = 2;  // Enable file GC with 2 threads
 
     let mut store2 = EloqStore::new(options2)?;
     store2.start().await?;

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::config::KvOptions;
-use crate::task::{Task, TaskScheduler, ReadTask, TaskResult};
+use crate::task::{Task, TaskScheduler, ReadTask, TaskResult, file_gc::FileGarbageCollector};
 use crate::page::{PageCache, PageMapper};
 use crate::storage::{AsyncFileManager, ManifestData, ManifestFile};
 use crate::io::backend::{IoBackendFactory, IoBackendType};
@@ -102,6 +102,8 @@ pub struct Shard {
     running: Arc<AtomicBool>,
     /// Statistics
     stats: Arc<ShardStats>,
+    /// File garbage collector reference (shared with store)
+    file_gc: Option<Arc<tokio::sync::Mutex<FileGarbageCollector>>>,
 }
 
 impl Shard {
@@ -148,6 +150,7 @@ impl Shard {
             request_rx: Arc::new(RwLock::new(Some(rx))),
             running: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(ShardStats::new()),
+            file_gc: None,
         }
     }
 
@@ -159,6 +162,16 @@ impl Shard {
             std::path::PathBuf::from(format!("/tmp/shard_{}", self.id))
         };
         base_dir.join(format!("shard_{}_manifest.bin", self.id))
+    }
+
+    /// Set file garbage collector reference
+    pub fn set_file_gc(&mut self, file_gc: Arc<tokio::sync::Mutex<FileGarbageCollector>>) {
+        self.file_gc = Some(file_gc);
+    }
+
+    /// Get file garbage collector reference
+    pub fn file_gc(&self) -> Option<Arc<tokio::sync::Mutex<FileGarbageCollector>>> {
+        self.file_gc.clone()
     }
 
     /// Initialize shard (following C++ Init)
@@ -452,6 +465,7 @@ impl Shard {
                         self.page_mapper.clone(),
                         self.file_manager.clone(),
                         index_manager.clone(),
+                        self.file_gc.clone(),
                     );
 
                     let ctx = crate::task::TaskContext {

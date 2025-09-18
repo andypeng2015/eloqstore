@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use crate::config::KvOptions;
 use crate::error::{Error, KvError};
 use crate::shard::Shard;
+use crate::task::file_gc::FileGarbageCollector;
 use crate::Result;
 
 use super::request;
@@ -29,8 +30,8 @@ pub struct EloqStore {
     /// Root file descriptors for data directories
     root_fds: Vec<i32>,
 
-    // Optional components (following C++)
-    // file_gc: Option<FileGarbageCollector>,
+    /// File garbage collector (following C++ file_gc)
+    file_gc: Option<Arc<tokio::sync::Mutex<FileGarbageCollector>>>,
     // archive_crond: Option<ArchiveCrond>,
     // obj_store: Option<ObjectStore>,
 }
@@ -75,6 +76,7 @@ impl EloqStore {
             shard_handles: Vec::new(),
             stopped: AtomicBool::new(true),
             root_fds: Vec::new(),
+            file_gc: None,
         })
     }
 
@@ -103,6 +105,18 @@ impl EloqStore {
             0
         };
 
+        // Start file GC if configured (before creating shards so we can share the reference)
+        let file_gc_ref = if self.options.data_append_mode && self.options.num_gc_threads > 0 {
+            let mut file_gc = FileGarbageCollector::new(self.options.clone());
+            file_gc.start(self.options.num_gc_threads as u16);
+            let file_gc_arc = Arc::new(tokio::sync::Mutex::new(file_gc));
+            self.file_gc = Some(file_gc_arc.clone());
+            tracing::info!("Started file garbage collector with {} threads", self.options.num_gc_threads);
+            Some(file_gc_arc)
+        } else {
+            None
+        };
+
         // Create shards (following C++ shard creation)
         self.shards.clear();
         for i in 0..self.options.num_threads {
@@ -111,6 +125,10 @@ impl EloqStore {
                 self.options.clone(),
                 shard_fd_limit as u32,
             );
+            // Set file GC reference if available
+            if let Some(ref gc) = file_gc_ref {
+                shard.set_file_gc(gc.clone());
+            }
             shard.init().await?;
             self.shards.push(Arc::new(shard));
         }
@@ -120,11 +138,6 @@ impl EloqStore {
 
         // Start optional components in append mode
         if self.options.data_append_mode {
-            // TODO: Start file GC if configured (following C++ eloq_store.cpp)
-            // if self.options.num_gc_threads > 0 {
-            //     self.file_gc = Some(FileGarbageCollector::new(&self.options));
-            //     self.file_gc.as_mut().unwrap().start(self.options.num_gc_threads);
-            // }
 
             // TODO: Start archive cron if configured (following C++ archive_cron.cpp)
             // if self.options.num_retained_archives > 0 && self.options.archive_interval_secs > 0 {
@@ -183,10 +196,11 @@ impl EloqStore {
         //     obj_store.stop().await;
         // }
 
-        // TODO: Stop file GC if running
-        // if let Some(ref mut file_gc) = self.file_gc {
-        //     file_gc.stop().await;
-        // }
+        // Stop file GC if running
+        if let Some(ref file_gc) = self.file_gc {
+            let mut gc = file_gc.lock().await;
+            gc.stop().await;
+        }
 
         // Clear resources
         self.shards.clear();

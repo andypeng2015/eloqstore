@@ -20,6 +20,7 @@ use crate::Result;
 use crate::error::Error;
 
 use super::traits::{Task, TaskResult, TaskPriority, TaskType, TaskContext};
+use super::file_gc::FileGarbageCollector;
 
 /// Write operation type
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +161,7 @@ impl Task for WriteTask {
             self.page_mapper.clone(),
             self.file_manager.clone(),
             self.index_manager.clone(),
+            None,  // file_gc not available in single write task
         );
 
         batch_task.execute(_ctx).await
@@ -219,6 +221,8 @@ pub struct BatchWriteTask {
     manifest_builder: ManifestBuilder,
     /// Overflow pointers buffer (following C++ overflow_ptrs_)
     overflow_ptrs: Vec<u8>,
+    /// File garbage collector reference (optional)
+    file_gc: Option<Arc<tokio::sync::Mutex<FileGarbageCollector>>>,
 }
 
 impl BatchWriteTask {
@@ -248,6 +252,7 @@ impl BatchWriteTask {
         page_mapper: Arc<PageMapper>,
         file_manager: Arc<AsyncFileManager>,
         index_manager: Arc<IndexPageManager>,
+        file_gc: Option<Arc<tokio::sync::Mutex<FileGarbageCollector>>>,
     ) -> Self {
         Self {
             entries,
@@ -266,6 +271,7 @@ impl BatchWriteTask {
             options: Arc::new(KvOptions::default()),
             manifest_builder: ManifestBuilder::new(),
             overflow_ptrs: Vec::new(),
+            file_gc,
         }
     }
 
@@ -1434,7 +1440,7 @@ impl BatchWriteTask {
         self.flush_manifest().await?;
 
         // Trigger compaction if needed (following C++ CompactIfNeeded)
-        self.compact_if_needed();
+        self.compact_if_needed().await;
 
         // Update the COW metadata in index manager
         if let Some(mut cow_meta) = self.cow_meta.take() {
@@ -1458,7 +1464,7 @@ impl BatchWriteTask {
     }
 
     /// Check and trigger compaction if needed (following C++ CompactIfNeeded)
-    fn compact_if_needed(&self) {
+    async fn compact_if_needed(&self) {
         // Check if compaction is enabled (use default factor of 2.0)
         let file_amplify_factor = 2.0;
         if !self.options.data_append_mode || file_amplify_factor == 0.0 {
@@ -1487,13 +1493,13 @@ impl BatchWriteTask {
                 //
                 // For now, we trigger file GC directly which performs similar cleanup
                 // but doesn't do the full data compaction that moves pages to new files.
-                self.trigger_file_gc();
+                self.trigger_file_gc().await;
             }
         }
     }
 
     /// Trigger file garbage collection (following C++ TriggerFileGC)
-    fn trigger_file_gc(&self) {
+    async fn trigger_file_gc(&self) {
         tracing::info!("Triggering file GC for table {:?}", self.table_id);
 
         // Get retained files from current mappings
@@ -1511,20 +1517,22 @@ impl BatchWriteTask {
         // Get current file ID
         let current_file_id = self.page_mapper.current_file_id();
 
-        // Create GC task
-        use crate::task::file_gc::GcTask;
-        let gc_task = GcTask::new(
-            self.table_id.clone(),
-            chrono::Utc::now().timestamp_micros() as u64,
-            current_file_id,
-            retained_files,
-        );
+        // Submit task to file GC worker if available (following C++ write_task.cpp:352)
+        if let Some(ref file_gc) = self.file_gc {
+            // Get timestamp for GC
+            let ts = chrono::Utc::now().timestamp_micros() as u64;
 
-        // TODO: Submit task to file GC worker (following C++ write_task.cpp:352)
-        // C++ calls: eloq_store->file_gc_->AddTask(tbl_ident_, ts, cur_file_id, retained_files)
-        // Need to access global file GC instance from here
-        tracing::info!("Would submit GC task for table {:?} with {} retained files",
-            self.table_id, gc_task.retained_files().len());
+            // Submit task to GC
+            let gc = file_gc.lock().await;
+            if gc.add_task(self.table_id.clone(), ts, current_file_id, retained_files.clone()) {
+                tracing::info!("Submitted GC task for table {:?} with {} retained files",
+                    self.table_id, retained_files.len());
+            } else {
+                tracing::warn!("Failed to submit GC task for table {:?}", self.table_id);
+            }
+        } else {
+            tracing::debug!("File GC not enabled, skipping GC task submission");
+        }
     }
 
     /// Flush manifest to disk (following C++ FlushManifest)
@@ -1888,6 +1896,7 @@ impl Clone for BatchWriteTask {
             options: Arc::new(KvOptions::default()),
             manifest_builder: ManifestBuilder::new(),
             overflow_ptrs: Vec::new(),
+            file_gc: self.file_gc.clone(),
         }
     }
 }
@@ -1961,6 +1970,7 @@ impl Task for DeleteTask {
                 self.file_manager.clone(),
                 ctx.options.clone(),
             )),
+            None,  // file_gc not available in delete task
         );
 
         // Execute the batch write
@@ -2093,6 +2103,7 @@ mod tests {
             page_mapper.clone(),
             file_manager.clone(),
             index_manager.clone(),
+            None,  // file_gc not available in test
         );
 
         // Execute
