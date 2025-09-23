@@ -70,8 +70,7 @@ std::unique_ptr<AsyncIoManager> AsyncIoManager::Instance(const EloqStore *store,
     }
     else
     {
-        ObjectStore *obj_store = store->obj_store_.get();
-        return std::make_unique<CloudStoreMgr>(opts, fd_limit, obj_store);
+        return std::make_unique<CloudStoreMgr>(opts, fd_limit);
     }
 }
 
@@ -527,6 +526,7 @@ KvError ToKvError(int err_no)
     case -ENOSPC:
         return KvError::OutOfSpace;
     default:
+        LOG(ERROR) << "ToKvError: " << err_no;
         return KvError::IoFail;
     }
 }
@@ -1565,10 +1565,8 @@ void IouringMgr::WriteReq::SetPage(VarPage page)
     }
 }
 
-CloudStoreMgr::CloudStoreMgr(const KvOptions *opts,
-                             uint32_t fd_limit,
-                             ObjectStore *obj_store)
-    : IouringMgr(opts, fd_limit), file_cleaner_(this), obj_store_(obj_store)
+CloudStoreMgr::CloudStoreMgr(const KvOptions *opts, uint32_t fd_limit)
+    : IouringMgr(opts, fd_limit), file_cleaner_(this), obj_store_(options_)
 {
     lru_file_head_.next_ = &lru_file_tail_;
     lru_file_tail_.prev_ = &lru_file_head_;
@@ -1596,31 +1594,18 @@ void CloudStoreMgr::Stop()
     file_cleaner_.Shutdown();
 }
 
+void CloudStoreMgr::Submit()
+{
+    obj_store_.GetHttpManager()->PerformRequests();
+
+    IouringMgr::Submit();
+}
+
 void CloudStoreMgr::PollComplete()
 {
-    IouringMgr::PollComplete();
+    obj_store_.GetHttpManager()->ProcessCompletedRequests();
 
-    std::array<KvTask *, 128> buf;
-    size_t n = obj_complete_q_.try_dequeue_bulk(buf.data(), buf.size());
-    while (n > 0)
-    {
-        for (size_t i = 0; i < n; i++)
-        {
-            buf[i]->Resume();
-        }
-        if (n == buf.size())
-        {
-            n = obj_complete_q_.try_dequeue_bulk(buf.data(), buf.size());
-        }
-        else
-        {
-            assert(n < buf.size());
-            // There is a high likelihood that the queue has been exhausted by
-            // the previous dequeue operation and no new entries was added
-            // during KvTask::Resume because it is fast.
-            break;
-        }
-    }
+    IouringMgr::PollComplete();
 }
 
 KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
@@ -1699,11 +1684,6 @@ KvError CloudStoreMgr::CreateArchive(const TableIdent &tbl_id,
     used_local_space_ += options_->manifest_limit;
     EnqueClosedFile(FileKey(tbl_id, name));
     return err;
-}
-
-void CloudStoreMgr::OnObjectStoreComplete(KvTask *task)
-{
-    obj_complete_q_.enqueue(task);
 }
 
 int CloudStoreMgr::CreateFile(LruFD::Ref dir_fd, FileId file_id)
@@ -1920,12 +1900,19 @@ int CloudStoreMgr::ReserveCacheSpace(size_t size)
 
 KvError CloudStoreMgr::DownloadFile(const TableIdent &tbl_id, FileId file_id)
 {
+    KvTask *current_task = ThdTask();
     std::string filename = ToFilename(file_id);
-    ObjectStore::DownloadTask obj_task(this, ThdTask(), &tbl_id, filename);
-    obj_store_->submit_q_.enqueue(&obj_task);
-    ThdTask()->status_ = TaskStatus::Blocked;
-    ThdTask()->Yield();
-    return obj_task.error_;
+
+    ObjectStore::DownloadTask download_task(&tbl_id, filename);
+
+    // Set KvTask pointer and initialize inflight_io_
+    download_task.SetKvTask(current_task);
+
+    obj_store_.GetHttpManager()->SubmitRequest(&download_task);
+    current_task->status_ = TaskStatus::Blocked;
+    current_task->Yield();
+
+    return download_task.error_;
 }
 
 KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
@@ -1935,12 +1922,110 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
     {
         return KvError::NoError;
     }
-    ObjectStore::UploadTask obj_task(
-        this, ThdTask(), &tbl_id, std::move(filenames));
-    obj_store_->submit_q_.enqueue(&obj_task);
-    ThdTask()->status_ = TaskStatus::Blocked;
-    ThdTask()->Yield();
-    return obj_task.error_;
+
+    KvTask *current_task = ThdTask();
+
+    ObjectStore::UploadTask upload_task(&tbl_id, std::move(filenames));
+
+    // Set KvTask pointer and initialize inflight_io_
+    upload_task.SetKvTask(current_task);
+
+    obj_store_.GetHttpManager()->SubmitRequest(&upload_task);
+    current_task->status_ = TaskStatus::Blocked;
+    current_task->Yield();
+
+    return upload_task.error_;
+}
+
+KvError CloudStoreMgr::ReadArchiveFileAndDelete(const std::string &file_path,
+                                                std::string &content)
+{
+    KvTask *current_task = ThdTask();
+
+    // Step 1: Async open file
+    io_uring_sqe *open_sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_openat(
+        open_sqe, AT_FDCWD, file_path.c_str(), O_RDONLY | O_CLOEXEC, 0);
+
+    int fd = current_task->WaitIoResult();
+
+    if (fd < 0)
+    {
+        LOG(ERROR) << "Failed to open file: " << file_path << ", error: " << fd;
+        return ToKvError(fd);
+    }
+
+    // Step 2: Get file size via io_uring statx on the opened fd
+    struct statx stx = {};
+    int sres = Statx(fd, "", &stx);
+    if (sres < 0)
+    {
+        io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+        io_uring_prep_close(sqe, fd);
+        int res = current_task->WaitIoResult();
+        if (res < 0)
+        {
+            LOG(ERROR) << "Failed to close file: " << file_path
+                       << ", error: " << res;
+        }
+        LOG(ERROR) << "Failed to statx file: " << file_path
+                   << ", error: " << sres;
+        return ToKvError(sres);
+    }
+
+    size_t file_size = stx.stx_size;
+    content.resize(file_size);
+
+    // Step 3: Async read file content (handle partial reads)
+    size_t off = 0;
+    while (off < file_size)
+    {
+        size_t to_read = file_size - off;
+        io_uring_sqe *read_sqe = GetSQE(UserDataType::KvTask, current_task);
+        io_uring_prep_read(read_sqe, fd, content.data() + off, to_read, off);
+        int rres = current_task->WaitIoResult();
+        if (rres < 0)
+        {
+            io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+            io_uring_prep_close(sqe, fd);
+            (void) current_task->WaitIoResult();
+            LOG(ERROR) << "Failed to read file: " << file_path
+                       << ", error: " << rres;
+            return ToKvError(rres);
+        }
+        if (rres == 0)
+        {
+            LOG(ERROR) << "Unexpected EOF: expected " << file_size << ", got "
+                       << off;
+            return KvError::EndOfFile;
+        }
+        off += static_cast<size_t>(rres);
+    }
+
+    // Step 4: Close file
+    io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_close(sqe, fd);
+    int res = current_task->WaitIoResult();
+    if (res < 0)
+    {
+        LOG(ERROR) << "Failed to close file: " << file_path
+                   << ", error: " << res;
+    }
+
+    // Step 5: Async unlink file
+    io_uring_sqe *unlink_sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_unlinkat(unlink_sqe, AT_FDCWD, file_path.c_str(), 0);
+
+    int unlink_res = current_task->WaitIoResult();
+
+    if (unlink_res < 0)
+    {
+        LOG(WARNING) << "Failed to unlink file: " << file_path
+                     << ", error: " << unlink_res;
+        // Don't return error for unlink failure, as we already got the content
+    }
+
+    return KvError::NoError;
 }
 
 TaskType CloudStoreMgr::FileCleaner::Type() const

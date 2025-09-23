@@ -10,8 +10,7 @@ using namespace test_util;
 const eloqstore::KvOptions cloud_options = {
     .manifest_limit = 1 << 20,
     .fd_limit = 30 + eloqstore::num_reserved_fd,
-    .num_gc_threads = 0,
-    .local_space_limit = 100 << 20,  // 100MB
+    .local_space_limit = 200 << 20,  // 100MB
     .store_path = {"/tmp/test-data"},
     .cloud_store_path = "docker-minio:eloqstore/unit-test",
     .pages_per_file_shift = 8,  // 1MB per datafile
@@ -57,10 +56,7 @@ TEST_CASE("cloud store with restart", "[cloud]")
             part->WriteRnd(0, 1000);
         }
         store->Stop();
-        for (const std::string &db_path : cloud_options.store_path)
-        {
-            std::filesystem::remove_all(db_path);
-        }
+        CleanupLocalStore(cloud_options);
         store->Start();
         for (auto &part : partitions)
         {
@@ -73,7 +69,7 @@ TEST_CASE("cloud store cached file LRU", "[cloud]")
 {
     eloqstore::KvOptions options = cloud_options;
     options.manifest_limit = 8 << 10;
-    options.fd_limit = 20 + eloqstore::num_reserved_fd;
+    options.fd_limit = 2;
     options.local_space_limit = 2 << 20;
     options.num_retained_archives = 1;
     options.archive_interval_secs = 3;
@@ -108,7 +104,6 @@ TEST_CASE("concurrent test with cloud", "[cloud]")
 {
     eloqstore::KvOptions options = cloud_options;
     options.num_threads = 4;
-    options.rclone_threads = 8;
     options.fd_limit = 100 + eloqstore::num_reserved_fd;
     options.reserve_space_ratio = 5;
     options.local_space_limit = 500 << 22;  // 100MB

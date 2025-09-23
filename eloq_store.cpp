@@ -53,13 +53,6 @@ bool EloqStore::ValidateOptions(const KvOptions &opts)
 
     if (!opts.cloud_store_path.empty())
     {
-        // Cloud storage is enabled.
-        if (opts.num_gc_threads > 0)
-        {
-            LOG(ERROR)
-                << "num_gc_threads must be 0 when cloud store is enabled";
-            return false;
-        }
         if (opts.local_space_limit == 0)
         {
             LOG(ERROR)
@@ -68,8 +61,18 @@ bool EloqStore::ValidateOptions(const KvOptions &opts)
         }
         if (!opts.data_append_mode)
         {
-            LOG(WARNING) << "append write mode should be enabled when cloud "
-                            "storage is enabled";
+            LOG(ERROR) << "append write mode should be enabled when cloud "
+                          "storage is enabled";
+            return false;
+        }
+        if (opts.fd_limit * opts.data_page_size *
+                (1 << opts.pages_per_file_shift) >
+            opts.local_space_limit)
+        {
+            LOG(ERROR) << "fd_limit * data_page_size * (1 << "
+                          "pages_per_file_shift) should be smaller than "
+                       << "local_space_limit";
+            return false;
         }
     }
 
@@ -122,10 +125,6 @@ KvError EloqStore::Start()
         KvError err = InitStoreSpace();
         CHECK_KV_ERR(err);
     }
-    if (!options_.cloud_store_path.empty())
-    {
-        obj_store_ = std::make_unique<ObjectStore>(&options_);
-    }
 
     // There are files opened at very early stage like stdin/stdout/stderr, glog
     // file, and root directories of data.
@@ -153,14 +152,29 @@ KvError EloqStore::Start()
 
     if (options_.data_append_mode)
     {
-        if (options_.num_gc_threads > 0)
+        // Initialize file garbage collector for both local and cloud modes
+        if (file_gc_ == nullptr)
         {
-            if (file_gc_ == nullptr)
-            {
-                file_gc_ = std::make_unique<FileGarbageCollector>(&options_);
-            }
-            file_gc_->Start(options_.num_gc_threads);
+            file_gc_ = std::make_unique<FileGarbageCollector>(&options_);
         }
+
+        // Only start thread pool in local mode
+        if (options_.cloud_store_path.empty() && options_.num_gc_threads > 0)
+        {
+            LOG(INFO) << "local file gc thread pool started";
+            file_gc_->StartLocalThreadPool(options_.num_gc_threads);
+        }
+        else if (!options_.cloud_store_path.empty())
+        {
+            LOG(INFO) << "file gc initialized for cloud mode";
+            if (options_.num_gc_threads > 0)
+            {
+                LOG(WARNING)
+                    << "num_gc_threads=" << options_.num_gc_threads
+                    << " is ignored in cloud mode; GC executes via cloud path.";
+            }
+        }
+
         if (options_.num_retained_archives > 0 &&
             options_.archive_interval_secs > 0)
         {
@@ -170,11 +184,6 @@ KvError EloqStore::Start()
             }
             archive_crond_->Start();
         }
-    }
-
-    if (!options_.cloud_store_path.empty())
-    {
-        obj_store_->Start();
     }
 
     for (auto &shard : shards_)
@@ -215,7 +224,7 @@ KvError EloqStore::InitStoreSpace()
     }
 
     const bool cloud_store = !options_.cloud_store_path.empty();
-    for (const fs::path &store_path : options_.store_path)
+    for (const fs::path store_path : options_.store_path)
     {
         if (fs::exists(store_path))
         {
@@ -226,7 +235,9 @@ KvError EloqStore::InitStoreSpace()
             }
             if (cloud_store && !std::filesystem::is_empty(store_path))
             {
-                LOG(ERROR) << store_path << " is not empty in cloud store mode";
+                LOG(ERROR) << store_path
+                           << " is not empty in cloud store mode, clear "
+                              "the directory";
                 return KvError::InvalidArgs;
             }
             for (auto &ent : fs::directory_iterator{store_path})
@@ -245,14 +256,14 @@ KvError EloqStore::InitStoreSpace()
     }
 
     assert(root_fds_.empty());
-    for (const fs::path &store_path : options_.store_path)
+    for (const fs::path store_path : options_.store_path)
     {
-        int res = open(store_path.c_str(), IouringMgr::oflags_dir);
+        res = open(store_path.c_str(), IouringMgr::oflags_dir);
         if (res < 0)
         {
             for (int fd : root_fds_)
             {
-                int r = close(fd);
+                [[maybe_unused]] int r = close(fd);
                 assert(r == 0);
             }
             root_fds_.clear();
@@ -315,10 +326,6 @@ void EloqStore::Stop()
         shard->Stop();
     }
 
-    if (obj_store_ != nullptr)
-    {
-        obj_store_->Stop();
-    }
     if (file_gc_ != nullptr)
     {
         file_gc_->Stop();
@@ -330,7 +337,7 @@ void EloqStore::Stop()
 
     for (int fd : root_fds_)
     {
-        int res = close(fd);
+        [[maybe_unused]] int res = close(fd);
         assert(res == 0);
     }
     root_fds_.clear();
