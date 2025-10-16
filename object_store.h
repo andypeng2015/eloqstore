@@ -119,8 +119,11 @@ public:
     class DeleteTask : public Task
     {
     public:
-        explicit DeleteTask(std::vector<std::string> file_paths)
-            : file_paths_(std::move(file_paths)), current_index_(0)
+        explicit DeleteTask(std::vector<std::string> file_paths,
+                            bool is_dir = false)
+            : file_paths_(std::move(file_paths)),
+              current_index_(0),
+              is_dir_(is_dir)
         {
             headers_list_.resize(file_paths_.size(), nullptr);
             json_data_list_.resize(file_paths_.size());
@@ -128,12 +131,27 @@ public:
         Type TaskType() override
         {
             return Type::AsyncDelete;
-        };
+        }
+
+        // Check if this batch is for directories
+        bool IsDir() const
+        {
+            return is_dir_;
+        }
+
+        // Set whether this batch is for directories
+        void SetIsDir(bool is_dir)
+        {
+            is_dir_ = is_dir;
+        }
+
         std::vector<std::string> file_paths_;  // Support batch delete
         size_t current_index_;  // Current index being processed in file_paths_
 
         std::vector<struct curl_slist *> headers_list_;
         std::vector<std::string> json_data_list_;
+        bool is_dir_{false};  // Track whether this batch is for directories
+                              // (default: false for files)
 
         bool has_error_{false};
         KvError first_error_{KvError::NoError};
@@ -186,6 +204,7 @@ private:
     const std::string daemon_download_url_;
     const std::string daemon_list_url_;
     const std::string daemon_delete_url_;
+    const std::string daemon_purge_url_;
     const KvOptions *options_;
     int running_handles_{0};
 };

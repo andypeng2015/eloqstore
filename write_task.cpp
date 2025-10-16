@@ -284,21 +284,14 @@ void WriteTask::CompactIfNeeded(PageMapper *mapper) const
 
     auto allocator = static_cast<AppendAllocator *>(mapper->FilePgAllocator());
     uint32_t mapping_cnt = mapper->MappingCount();
-    if (mapping_cnt == 0)
+    size_t space_size = allocator->SpaceSize();
+    assert(space_size >= mapping_cnt);
+    if (mapping_cnt == 0 ||
+        (space_size >= allocator->PagesPerFile() &&
+         static_cast<double>(space_size) / static_cast<double>(mapping_cnt) >
+             static_cast<double>(opts->file_amplify_factor)))
     {
-        // Update statistic.
-        allocator->UpdateStat(MaxFileId, 0);
-    }
-    else
-    {
-        size_t space_size = allocator->SpaceSize();
-        assert(space_size >= mapping_cnt);
-        if (space_size >= allocator->PagesPerFile() &&
-            double(space_size) / double(mapping_cnt) >
-                double(opts->file_amplify_factor))
-        {
-            shard->AddPendingCompact(tbl_ident_);
-        }
+        shard->AddPendingCompact(tbl_ident_);
     }
 }
 
@@ -327,11 +320,6 @@ void WriteTask::TriggerTTL()
 
 void WriteTask::TriggerFileGC() const
 {
-    if (eloq_store->file_gc_ == nullptr)
-    {
-        // File garbage collector is not enabled.
-        return;
-    }
     assert(Options()->data_append_mode);
 
     auto [meta, err] = shard->IndexManager()->FindRoot(tbl_ident_);
@@ -347,9 +335,6 @@ void WriteTask::TriggerFileGC() const
         GetRetainedFiles(retained_files, mapping->mapping_tbl_, shift);
     }
 
-    const uint64_t ts = utils::UnixTs<chrono::microseconds>();
-    FileId cur_file_id = meta->mapper_->FilePgAllocator()->CurrentFileId();
-
     // Check if we're in cloud mode or local mode
     if (!Options()->cloud_store_path.empty())
     {
@@ -362,8 +347,8 @@ void WriteTask::TriggerFileGC() const
             return;
         }
 
-        KvError gc_err = eloq_store->file_gc_->ExecuteCloudGC(
-            tbl_ident_, ts, cur_file_id, retained_files, cloud_mgr);
+        KvError gc_err = FileGarbageCollector::ExecuteCloudGC(
+            tbl_ident_, retained_files, cloud_mgr);
 
         if (gc_err != KvError::NoError)
         {
@@ -372,9 +357,16 @@ void WriteTask::TriggerFileGC() const
     }
     else
     {
-        // Local mode: add task to thread pool
-        eloq_store->file_gc_->AddTask(
-            tbl_ident_, ts, cur_file_id, std::move(retained_files));
+        // Local mode: execute GC directly
+        DLOG(INFO) << "Begin GC in Local mode";
+        IouringMgr *io_mgr = static_cast<IouringMgr *>(shard->IoManager());
+        KvError gc_err = FileGarbageCollector::ExecuteLocalGC(
+            tbl_ident_, retained_files, io_mgr);
+
+        if (gc_err != KvError::NoError)
+        {
+            LOG(ERROR) << "Local GC failed for table " << tbl_ident_.ToString();
+        }
     }
 }
 

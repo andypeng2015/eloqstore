@@ -133,6 +133,7 @@ public:
 
     void UpdateStat(FileId min_file_id, uint32_t hole_cnt);
     FileId MinFileId() const;
+
     /**
      * @brief Calculates number of pages this allocator occupied.
      * This result includes pages that is not actually used by mapping but
@@ -202,7 +203,6 @@ public:
     MappingSnapshot *GetMapping() const;
     void UpdateMapping(PageId page_id, FilePageId file_page_id);
     uint32_t UseCount();
-    void FreeMappingSnapshot();
 #ifndef NDEBUG
     bool DebugStat() const;
 #endif

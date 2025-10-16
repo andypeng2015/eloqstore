@@ -3,6 +3,7 @@
 #include <boost/context/continuation_fcontext.hpp>
 #include <cassert>
 
+#include "list_object_task.h"
 #include "read_task.h"
 #include "task.h"
 
@@ -38,6 +39,12 @@ ScanTask *TaskManager::GetScanTask()
     return scan_pool_.GetTask();
 }
 
+ListObjectTask *TaskManager::GetListObjectTask()
+{
+    num_active_++;
+    return list_object_pool_.GetTask();
+}
+
 void TaskManager::FreeTask(KvTask *task)
 {
     assert(task->status_ == TaskStatus::Finished);
@@ -56,6 +63,9 @@ void TaskManager::FreeTask(KvTask *task)
         break;
     case TaskType::BackgroundWrite:
         bg_write_pool_.FreeTask(static_cast<BackgroundWrite *>(task));
+        break;
+    case TaskType::ListObject:
+        list_object_pool_.FreeTask(static_cast<ListObjectTask *>(task));
         break;
     case TaskType::EvictFile:
         assert(false && "EvictFile task should not be freed here");

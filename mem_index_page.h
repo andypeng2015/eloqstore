@@ -19,7 +19,7 @@ namespace eloqstore
 {
 class IndexPageManager;
 class MappingSnapshot;
-class TableIdent;
+struct TableIdent;
 
 class MemIndexPage
 {

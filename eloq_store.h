@@ -2,6 +2,9 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "error.h"
 #include "kv_options.h"
@@ -16,8 +19,10 @@ enum class RequestType : uint8_t
     Read,
     Floor,
     Scan,
+    ListObject,
     BatchWrite,
     Truncate,
+    DropTable,
     Archive,
     Compact,
     CleanExpired
@@ -171,6 +176,28 @@ private:
     friend class ScanTask;
 };
 
+class ListObjectRequest : public KvRequest
+{
+public:
+    RequestType Type() const override
+    {
+        return RequestType::ListObject;
+    }
+
+    explicit ListObjectRequest(std::vector<std::string> *objects)
+        : objects_(objects)
+    {
+    }
+
+    std::vector<std::string> *GetObjects()
+    {
+        return objects_;
+    }
+
+private:
+    std::vector<std::string> *objects_;
+};
+
 class WriteRequest : public KvRequest
 {
 public:
@@ -212,6 +239,25 @@ public:
     std::string_view position_;
 };
 
+class DropTableRequest : public KvRequest
+{
+public:
+    RequestType Type() const override
+    {
+        return RequestType::DropTable;
+    }
+    void SetArgs(std::string table_name);
+    const std::string &TableName() const;
+
+private:
+    std::string table_name_;
+    std::vector<std::unique_ptr<TruncateRequest>> truncate_reqs_;
+    std::atomic<uint32_t> pending_{0};
+    std::atomic<uint8_t> first_error_{static_cast<uint8_t>(KvError::NoError)};
+
+    friend class EloqStore;
+};
+
 class ArchiveRequest : public WriteRequest
 {
 public:
@@ -239,7 +285,6 @@ public:
     }
 };
 
-class FileGarbageCollector;
 class ArchiveCrond;
 class ObjectStore;
 class EloqStoreModule;
@@ -275,6 +320,9 @@ public:
 
 private:
     bool SendRequest(KvRequest *req);
+    void HandleDropTableRequest(DropTableRequest *req);
+    KvError CollectTablePartitions(const std::string &table_name,
+                                   std::vector<TableIdent> &partitions) const;
     KvError InitStoreSpace();
 
     const KvOptions options_;
@@ -282,9 +330,7 @@ private:
     std::vector<std::unique_ptr<Shard>> shards_;
     std::atomic<bool> stopped_{true};
 
-    std::unique_ptr<FileGarbageCollector> file_gc_{nullptr};
     std::unique_ptr<ArchiveCrond> archive_crond_{nullptr};
-    std::unique_ptr<ObjectStore> obj_store_{nullptr};
 #ifdef ELOQ_MODULE_ENABLED
     std::unique_ptr<EloqStoreModule> module_{nullptr};
 #endif

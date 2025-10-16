@@ -7,6 +7,7 @@
 #include <liburing/io_uring.h>
 #include <linux/openat2.h>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
@@ -21,7 +22,6 @@
 
 #include "common.h"
 #include "eloq_store.h"
-#include "error.h"
 #include "kill_point.h"
 #include "kv_options.h"
 #include "object_store.h"
@@ -495,10 +495,63 @@ KvError IouringMgr::AbortWrite(const TableIdent &tbl_id)
     return KvError::NoError;
 }
 
-void IouringMgr::CleanTable(const TableIdent &tbl_id)
+void IouringMgr::CleanManifest(const TableIdent &tbl_id)
 {
-    // TODO: io_uring_prep_unlinkat
-    assert(false);
+    {
+        // Close manifest file if it's open
+        LruFD::Ref manifest_fd = GetOpenedFD(tbl_id, LruFD::kManifest);
+        if (manifest_fd.Get() != nullptr)
+        {
+            KvError err = CloseFile(std::move(manifest_fd));
+            if (err != KvError::NoError)
+            {
+                LOG(WARNING) << "Failed to close manifest file for table";
+            }
+        }
+
+        // Get directory fd and delete manifest file
+        auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
+        if (err == KvError::NoError)
+        {
+            int res = UnlinkAt(dir_fd.FdPair(), "manifest", false);
+            if (res < 0 && res != -ENOENT)
+            {
+                LOG(ERROR) << "Failed to delete manifest file for table "
+                           << tbl_id << ": " << strerror(-res);
+            }
+            else
+            {
+                DLOG(INFO) << "Successfully deleted manifest file for table "
+                           << tbl_id;
+            }
+        }
+        else
+        {
+            LOG(ERROR) << "Failed to open directory for table " << tbl_id
+                       << " during cleanup";
+        }
+    }
+    // Get directory fd and delete manifest file
+    auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
+    if (err == KvError::NoError)
+    {
+        int res = UnlinkAt(dir_fd.FdPair(), "manifest", false);
+        if (res < 0 && res != -ENOENT)
+        {
+            LOG(ERROR) << "Failed to delete manifest file for table " << tbl_id
+                       << ": " << strerror(-res);
+        }
+        else
+        {
+            DLOG(INFO) << "Successfully deleted manifest file for table "
+                       << tbl_id;
+        }
+    }
+    else
+    {
+        LOG(ERROR) << "Failed to open directory for table " << tbl_id
+                   << " during cleanup";
+    }
 }
 
 KvError ToKvError(int err_no)
@@ -1523,17 +1576,17 @@ void IouringMgr::LruFD::Ref::Clear()
 {
     if (--fd_->ref_count_ == 0)
     {
-        PartitionFiles *tbl = fd_->tbl_;
+        PartitionFiles *partition_files = fd_->tbl_;
         if (fd_->fd_ >= 0)
         {
             io_mgr_->lru_fd_head_.EnqueNext(fd_);
         }
         else
         {
-            tbl->fds_.erase(fd_->file_id_);
-            if (tbl->fds_.empty())
+            partition_files->fds_.erase(fd_->file_id_);
+            if (partition_files->fds_.empty())
             {
-                io_mgr_->tables_.erase(*tbl->tbl_id_);
+                io_mgr_->tables_.erase(*partition_files->tbl_id_);
             }
         }
     }
@@ -1563,6 +1616,128 @@ void IouringMgr::WriteReq::SetPage(VarPage page)
         page_.emplace<Page>(std::move(std::get<Page>(page)));
         break;
     }
+}
+KvError IouringMgr::ReadArchiveFile(const std::string &file_path,
+                                    std::string &content)
+{
+    KvTask *current_task = ThdTask();
+
+    // Step 1: Async open file
+    io_uring_sqe *open_sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_openat(
+        open_sqe, AT_FDCWD, file_path.c_str(), O_RDONLY | O_CLOEXEC, 0);
+
+    int fd = current_task->WaitIoResult();
+
+    if (fd < 0)
+    {
+        LOG(ERROR) << "Failed to open file: " << file_path << ", error: " << fd;
+        return ToKvError(fd);
+    }
+
+    // Step 2: Get file size via io_uring statx on the opened fd
+    struct statx stx = {};
+    int sres = Statx(fd, "", &stx);
+    if (sres < 0)
+    {
+        io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+        io_uring_prep_close(sqe, fd);
+        int res = current_task->WaitIoResult();
+        if (res < 0)
+        {
+            LOG(ERROR) << "Failed to close file: " << file_path
+                       << ", error: " << res;
+        }
+        LOG(ERROR) << "Failed to statx file: " << file_path
+                   << ", error: " << sres;
+        return ToKvError(sres);
+    }
+
+    size_t file_size = stx.stx_size;
+    content.resize(file_size);
+
+    // Step 3: Async read file content (handle partial reads)
+    size_t off = 0;
+    while (off < file_size)
+    {
+        size_t to_read = file_size - off;
+        io_uring_sqe *read_sqe = GetSQE(UserDataType::KvTask, current_task);
+        io_uring_prep_read(read_sqe, fd, content.data() + off, to_read, off);
+        int rres = current_task->WaitIoResult();
+        if (rres < 0)
+        {
+            io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+            io_uring_prep_close(sqe, fd);
+            (void) current_task->WaitIoResult();
+            LOG(ERROR) << "Failed to read file: " << file_path
+                       << ", error: " << rres;
+            return ToKvError(rres);
+        }
+        if (rres == 0)
+        {
+            LOG(ERROR) << "Unexpected EOF: expected " << file_size << ", got "
+                       << off;
+            // Close before returning
+            io_uring_sqe *csqe = GetSQE(UserDataType::KvTask, current_task);
+            io_uring_prep_close(csqe, fd);
+            (void) current_task->WaitIoResult();
+            return KvError::EndOfFile;
+        }
+        off += static_cast<size_t>(rres);
+    }
+
+    // Step 4: Close file
+    io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
+    io_uring_prep_close(sqe, fd);
+    int res = current_task->WaitIoResult();
+    if (res < 0)
+    {
+        LOG(ERROR) << "Failed to close file: " << file_path
+                   << ", error: " << res;
+    }
+
+    return KvError::NoError;
+}
+
+KvError IouringMgr::DeleteFiles(const std::vector<std::string> &file_paths)
+{
+    if (file_paths.empty())
+    {
+        return KvError::NoError;
+    }
+
+    KvTask *current_task = ThdTask();
+    struct UnlinkReq : BaseReq
+    {
+        std::string path;
+    };
+    std::vector<UnlinkReq> reqs;
+    reqs.reserve(file_paths.size());
+
+    // Submit all unlink operations
+    for (const std::string &file_path : file_paths)
+    {
+        reqs.emplace_back();
+        reqs.back().task_ = current_task;
+        reqs.back().path = file_path;
+        io_uring_sqe *unlink_sqe = GetSQE(UserDataType::BaseReq, &reqs.back());
+        io_uring_prep_unlinkat(unlink_sqe, AT_FDCWD, file_path.c_str(), 0);
+    }
+
+    current_task->WaitIo();
+
+    KvError first_error = KvError::NoError;
+    for (const auto &req : reqs)
+    {
+        if (req.res_ < 0 && first_error == KvError::NoError)
+        {
+            LOG(ERROR) << "Failed to unlink file: " << req.path
+                       << ", error: " << req.res_;
+            first_error = ToKvError(req.res_);
+        }
+    }
+
+    return first_error;
 }
 
 CloudStoreMgr::CloudStoreMgr(const KvOptions *opts, uint32_t fd_limit)
@@ -1940,89 +2115,20 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
 KvError CloudStoreMgr::ReadArchiveFileAndDelete(const std::string &file_path,
                                                 std::string &content)
 {
-    KvTask *current_task = ThdTask();
-
-    // Step 1: Async open file
-    io_uring_sqe *open_sqe = GetSQE(UserDataType::KvTask, current_task);
-    io_uring_prep_openat(
-        open_sqe, AT_FDCWD, file_path.c_str(), O_RDONLY | O_CLOEXEC, 0);
-
-    int fd = current_task->WaitIoResult();
-
-    if (fd < 0)
+    // Use the base class ReadArchiveFile method to read the file
+    KvError read_err = ReadArchiveFile(file_path, content);
+    if (read_err != KvError::NoError)
     {
-        LOG(ERROR) << "Failed to open file: " << file_path << ", error: " << fd;
-        return ToKvError(fd);
+        return read_err;
     }
 
-    // Step 2: Get file size via io_uring statx on the opened fd
-    struct statx stx = {};
-    int sres = Statx(fd, "", &stx);
-    if (sres < 0)
+    // Use the base class DeleteFiles method to delete the file
+    KvError delete_err = DeleteFiles({file_path});
+    if (delete_err != KvError::NoError)
     {
-        io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
-        io_uring_prep_close(sqe, fd);
-        int res = current_task->WaitIoResult();
-        if (res < 0)
-        {
-            LOG(ERROR) << "Failed to close file: " << file_path
-                       << ", error: " << res;
-        }
-        LOG(ERROR) << "Failed to statx file: " << file_path
-                   << ", error: " << sres;
-        return ToKvError(sres);
-    }
-
-    size_t file_size = stx.stx_size;
-    content.resize(file_size);
-
-    // Step 3: Async read file content (handle partial reads)
-    size_t off = 0;
-    while (off < file_size)
-    {
-        size_t to_read = file_size - off;
-        io_uring_sqe *read_sqe = GetSQE(UserDataType::KvTask, current_task);
-        io_uring_prep_read(read_sqe, fd, content.data() + off, to_read, off);
-        int rres = current_task->WaitIoResult();
-        if (rres < 0)
-        {
-            io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
-            io_uring_prep_close(sqe, fd);
-            (void) current_task->WaitIoResult();
-            LOG(ERROR) << "Failed to read file: " << file_path
-                       << ", error: " << rres;
-            return ToKvError(rres);
-        }
-        if (rres == 0)
-        {
-            LOG(ERROR) << "Unexpected EOF: expected " << file_size << ", got "
-                       << off;
-            return KvError::EndOfFile;
-        }
-        off += static_cast<size_t>(rres);
-    }
-
-    // Step 4: Close file
-    io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, current_task);
-    io_uring_prep_close(sqe, fd);
-    int res = current_task->WaitIoResult();
-    if (res < 0)
-    {
-        LOG(ERROR) << "Failed to close file: " << file_path
-                   << ", error: " << res;
-    }
-
-    // Step 5: Async unlink file
-    io_uring_sqe *unlink_sqe = GetSQE(UserDataType::KvTask, current_task);
-    io_uring_prep_unlinkat(unlink_sqe, AT_FDCWD, file_path.c_str(), 0);
-
-    int unlink_res = current_task->WaitIoResult();
-
-    if (unlink_res < 0)
-    {
-        LOG(WARNING) << "Failed to unlink file: " << file_path
-                     << ", error: " << unlink_res;
-        // Don't return error for unlink failure, as we already got the content
+        LOG(WARNING) << "Failed to delete file: " << file_path
+                     << ", error: " << static_cast<int>(delete_err);
+        // Don't return error for delete failure, as we already got the content
     }
 
     return KvError::NoError;
@@ -2240,9 +2346,8 @@ KvError MemStoreMgr::AbortWrite(const TableIdent &tbl_id)
     return KvError::NoError;
 }
 
-void MemStoreMgr::CleanTable(const TableIdent &tbl_id)
+void MemStoreMgr::CleanManifest(const TableIdent &tbl_id)
 {
-    store_.erase(tbl_id);
 }
 
 KvError MemStoreMgr::AppendManifest(const TableIdent &tbl_id,

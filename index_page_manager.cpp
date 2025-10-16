@@ -26,22 +26,9 @@ IndexPageManager::IndexPageManager(AsyncIoManager *io_manager)
 
 IndexPageManager::~IndexPageManager()
 {
-    // Destructs page mapper first, because destructing the mapping snapshot
-    // needs to access the root table in the index page manager.
-    std::vector<PageMapper *> mappers;
-    mappers.reserve(tbl_roots_.size());
-    for (auto &[tbl, meta] : tbl_roots_)
+    for (auto &[tbl_id, meta] : tbl_roots_)
     {
-        // We can not call FreeMappingSnapshot directly in this loop, because it
-        // may delete elements from the root table we are currently iterating.
-        if (meta.mapper_ != nullptr)
-        {
-            mappers.push_back(meta.mapper_.get());
-        }
-    }
-    for (PageMapper *mapper : mappers)
-    {
-        mapper->FreeMappingSnapshot();
+        meta.mapper_ = nullptr;
     }
 }
 
@@ -53,6 +40,7 @@ const Comparator *IndexPageManager::GetComparator() const
 MemIndexPage *IndexPageManager::AllocIndexPage()
 {
     MemIndexPage *next_free = free_head_.DequeNext();
+
     while (next_free == nullptr)
     {
         if (!IsFull())
@@ -86,7 +74,7 @@ void IndexPageManager::FreeIndexPage(MemIndexPage *page)
     free_head_.EnqueNext(page);
 }
 
-void IndexPageManager::EnqueuIndexPage(MemIndexPage *page)
+void IndexPageManager::EnqueueIndexPage(MemIndexPage *page)
 {
     if (page->prev_ != nullptr)
     {
@@ -272,14 +260,14 @@ std::pair<MemIndexPage *, KvError> IndexPageManager::FindPage(
             new_page->waiting_.WakeAll();
             return {new_page, KvError::NoError};
         }
-        else if (idx_page->IsDetached())
+        if (idx_page->IsDetached())
         {
             // This page is not loaded yet.
             idx_page->waiting_.Wait(ThdTask());
         }
         else
         {
-            EnqueuIndexPage(idx_page);
+            EnqueueIndexPage(idx_page);
             return {idx_page, KvError::NoError};
         }
     }
@@ -358,22 +346,56 @@ void IndexPageManager::EvictRootIfEmpty(
     std::unordered_map<TableIdent, RootMeta>::iterator root_it)
 {
     RootMeta &meta = root_it->second;
-    if (meta.ref_cnt_ == 0)
+
+    if (meta.mapper_ == nullptr)
     {
-        DLOG(INFO) << "metadata of " << root_it->first << " is evicted";
-        tbl_roots_.erase(root_it);
+        return;
     }
-    else if (meta.mapper_ != nullptr && meta.ref_cnt_ == 1)
+    CHECK(meta.ref_cnt_ != 0);
+
+    if (meta.ref_cnt_ == 1)
     {
-        if (meta.mapper_->UseCount() <= 1)
+        if (meta.mapper_->UseCount() == 1)
         {
-            meta.mapper_ = nullptr;
-            // Call ~MappingSnapshot and decrease ref_cnt_
-            // Call EvictRootIfEmpty again
+            // Check if mapping table is empty (no data pages)
+            if (meta.mapper_->MappingCount() == 0)
+            {
+                // Lock the rootmeta to prevent other FindRoot operations
+                meta.locked_ = true;
+
+                const TableIdent &tbl_id = root_it->first;
+
+                // Clean up the table from io manager first
+
+                // Note: it will also clean manifest when data_append = false
+                // although it is not remove datafile
+                IoMgr()->CleanManifest(tbl_id);
+
+                // Wake up any waiting threads before erasing
+                meta.waiting_.WakeAll();
+
+                // Erase from memory - this will automatically destroy
+                // meta.mapper_ and trigger MappingSnapshot destructor, but
+                // FreeMappingSnapshot will return early since the table is
+                // already erased
+                tbl_roots_.erase(root_it);
+
+                // Note: No need to unlock since we've erased the entry
+                return;
+            }
+
+            // If mapping is not empty, we can directly erase the root since
+            // ref_cnt == 1 means only the mapper itself holds the reference
+
+            DLOG(INFO) << "metadata of " << root_it->first
+                       << " is evicted (ref_cnt == 1)";
+            tbl_roots_.erase(root_it);
         }
         else
         {
             // This is rare.
+            LOG(ERROR) << "ref_cnt == 1 but mapper use count :"
+                       << meta.mapper_->UseCount();
         }
     }
 }
@@ -390,6 +412,7 @@ bool IndexPageManager::RecyclePage(MemIndexPage *page)
     {
         mapping->Unswizzling(page);
     }
+    meta.Unpin();
     EvictRootIfEmpty(tbl_it);
 
     // Removes the page from the active list.
@@ -420,7 +443,7 @@ void IndexPageManager::FinishIo(MappingSnapshot *mapping,
     {
         // index page is moved on physical position.
     }
-    EnqueuIndexPage(idx_page);
+    EnqueueIndexPage(idx_page);
 }
 
 KvError IndexPageManager::SeekIndex(MappingSnapshot *mapping,

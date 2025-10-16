@@ -1,6 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
-#include <filesystem>
 
 #include "common.h"
 #include "kv_options.h"
@@ -32,14 +31,6 @@ const eloqstore::KvOptions cloud_archive_opts = {
     .pages_per_file_shift = 8,
     .data_append_mode = true,
 };
-
-void SetStorePathS3(eloqstore::KvOptions &opts)
-{
-    // Add username to cloud path to avoid conflicts between users.
-    opts.cloud_store_path = "eloq-s3:eloqstore-test";
-    opts.cloud_store_path.push_back('/');
-    opts.cloud_store_path.append(getlogin());
-}
 
 TEST_CASE("simple cloud store", "[cloud]")
 {

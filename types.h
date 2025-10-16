@@ -51,7 +51,7 @@ struct TableIdent
     bool IsValid() const;
 
     std::string tbl_name_;
-    uint32_t partition_id_;
+    uint32_t partition_id_{};
 };
 
 std::ostream &operator<<(std::ostream &out, const TableIdent &tid);

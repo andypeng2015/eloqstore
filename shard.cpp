@@ -1,5 +1,8 @@
 #include "shard.h"
 
+#include "list_object_task.h"
+#include "utils.h"
+
 #ifdef ELOQ_MODULE_ENABLED
 #include <bthread/eloq_module.h>
 #endif
@@ -238,6 +241,40 @@ void Shard::ProcessReq(KvRequest *req)
     {
         ScanTask *task = task_mgr_.GetScanTask();
         auto lbd = [task]() -> KvError { return task->Scan(); };
+        StartTask(task, req, lbd);
+        break;
+    }
+    case RequestType::ListObject:
+    {
+        ListObjectTask *task = task_mgr_.GetListObjectTask();
+        auto lbd = [req, task]() -> KvError
+        {
+            KvTask *current_task = ThdTask();
+            auto list_object_req = static_cast<ListObjectRequest *>(req);
+            ObjectStore::ListTask list_task("");
+
+            list_task.SetKvTask(task);
+            auto cloud_mgr = static_cast<CloudStoreMgr *>(shard->io_mgr_.get());
+            cloud_mgr->GetObjectStore().GetHttpManager()->SubmitRequest(
+                &list_task);
+            current_task->status_ = TaskStatus::Blocked;
+            current_task->Yield();
+
+            if (list_task.error_ != KvError::NoError)
+            {
+                LOG(ERROR) << "Failed to list objects, error: "
+                           << static_cast<int>(list_task.error_);
+                return list_task.error_;
+            }
+
+            if (!utils::ParseRCloneListObjectsResponse(
+                    list_task.response_data_, *list_object_req->GetObjects()))
+            {
+                LOG(ERROR) << "Failed to parse ListObjects response";
+                return KvError::IoFail;
+            }
+            return KvError::NoError;
+        };
         StartTask(task, req, lbd);
         break;
     }
