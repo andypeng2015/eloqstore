@@ -299,21 +299,21 @@ void WriteTask::CompactIfNeeded(PageMapper *mapper) const
     uint32_t mapping_cnt = mapper->MappingCount();
     size_t space_size = allocator->SpaceSize();
     assert(space_size >= mapping_cnt);
-    if (mapping_cnt == 0)
+    // When mapping_cnt == 0 and space_size == 0, compaction should NOT be
+    // triggered.
+    // This usually means the manifest does not exist yet or the table has not
+    // been initialized.
+
+    // Two cases trigger compaction:
+    // (1) The table has been completely cleared (mapping_cnt == 0 but
+    // space_size > 0); (2) The space amplification factor has been exceeded.
+    if ((mapping_cnt == 0 && space_size != 0) ||
+        (mapping_cnt != 0 && space_size >= allocator->PagesPerFile() &&
+         static_cast<double>(space_size) / static_cast<double>(mapping_cnt) >
+             static_cast<double>(opts->file_amplify_factor)))
     {
-        if (space_size == 0)
-        {
-            return;
-        }
         shard->AddPendingCompact(tbl_ident_);
         return;
-    }
-
-    if (space_size >= allocator->PagesPerFile() &&
-        static_cast<double>(space_size) / static_cast<double>(mapping_cnt) >
-            static_cast<double>(opts->file_amplify_factor))
-    {
-        shard->AddPendingCompact(tbl_ident_);
     }
 }
 
