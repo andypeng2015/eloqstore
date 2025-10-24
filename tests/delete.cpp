@@ -18,7 +18,7 @@ TEST_CASE("simple delete", "[delete]")
     verify.Delete(500, 1200);
 }
 
-TEST_CASE("repeat delete", "[delete]")
+TEST_CASE("delete from an empty table", "[delete]")
 {
     eloqstore::EloqStore *store = InitStore(append_opts);
     MapVerifier verify(test_tbl_id, store);
