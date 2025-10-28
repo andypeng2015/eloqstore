@@ -48,9 +48,8 @@ KvError Replayer::Replay(ManifestFile *file)
             }
             if (err == KvError::Corrupted)
             {
-                LOG(ERROR)
-                    << "Manifest replay stopped at offset " << file_size_
-                    << ", ignoring trailing corrupted records.";
+                LOG(ERROR) << "Manifest replay stopped at offset " << file_size_
+                           << ", ignoring trailing corrupted records.";
                 break;
             }
             return err;

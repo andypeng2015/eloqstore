@@ -4,11 +4,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
-#include <tuple>
 #include <thread>
+#include <tuple>
 
-#include "replayer.h"
 #include "kv_options.h"
+#include "replayer.h"
 #include "test_utils.h"
 #include "tests/common.h"
 #include "utils.h"
