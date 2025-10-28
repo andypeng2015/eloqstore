@@ -163,6 +163,7 @@ public:
     void Snapshot();
 
     void Verify();
+    std::string ManifestContent() const;
     uint32_t Size() const;
 
 private:

@@ -30,6 +30,7 @@ KvError Replayer::Replay(ManifestFile *file)
     file_size_ = 0;
     max_fp_id_ = MaxFilePageId;
     dict_bytes_.clear();
+    payload_ = {};
 
     KvError err = ParseNextRecord(file);
     CHECK_KV_ERR(err);
@@ -45,6 +46,13 @@ KvError Replayer::Replay(ManifestFile *file)
             {
                 break;
             }
+            if (err == KvError::Corrupted)
+            {
+                LOG(ERROR)
+                    << "Manifest replay stopped at offset " << file_size_
+                    << ", ignoring trailing corrupted records.";
+                break;
+            }
             return err;
         }
         ReplayLog();
@@ -54,6 +62,9 @@ KvError Replayer::Replay(ManifestFile *file)
 
 KvError Replayer::ParseNextRecord(ManifestFile *file)
 {
+    payload_ = {};
+    log_buf_.resize(ManifestBuilder::header_bytes);
+
     // Read header
     KvError err = file->Read(log_buf_.data(), ManifestBuilder::header_bytes);
     CHECK_KV_ERR(err);
@@ -63,7 +74,15 @@ KvError Replayer::ParseNextRecord(ManifestFile *file)
         DecodeFixed32(log_buf_.data() + ManifestBuilder::offset_len);
     log_buf_.resize(ManifestBuilder::header_bytes + len);
     err = file->Read(log_buf_.data() + ManifestBuilder::header_bytes, len);
-    CHECK_KV_ERR(err);
+    if (err != KvError::NoError)
+    {
+        if (err == KvError::EndOfFile)
+        {
+            LOG(ERROR) << "Manifest file truncated while reading payload.";
+            return KvError::Corrupted;
+        }
+        return err;
+    }
 
     std::string_view content = log_buf_;
     // Verify checksum
@@ -73,6 +92,13 @@ KvError Replayer::ParseNextRecord(ManifestFile *file)
         return KvError::Corrupted;
     }
     content = content.substr(checksum_bytes);
+    constexpr size_t kHeaderBytes =
+        sizeof(PageId) + sizeof(PageId) + sizeof(uint32_t);
+    if (content.size() < kHeaderBytes)
+    {
+        LOG(ERROR) << "Manifest record too small to decode header fields.";
+        return KvError::Corrupted;
+    }
 
     root_ = DecodeFixed32(content.data());
     content = content.substr(sizeof(PageId));

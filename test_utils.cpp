@@ -1023,4 +1023,9 @@ void ManifestVerifier::Verify()
         it_recovered++;
     }
 }
+
+std::string ManifestVerifier::ManifestContent() const
+{
+    return file_;
+}
 }  // namespace test_util
