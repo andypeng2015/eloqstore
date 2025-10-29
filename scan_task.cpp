@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "error.h"
 #include "page_mapper.h"
@@ -29,17 +30,8 @@ KvError ScanIterator::Seek(std::string_view key, bool ttl)
     compression_ = meta->compression_.get();
     mapping_ = meta->mapper_->GetMappingSnapshot();
 
-    PageId page_id;
-    err =
-        shard->IndexManager()->SeekIndex(mapping_.get(), root_id, key, page_id);
+    err = PrefetchPages(root_id, key);
     CHECK_KV_ERR(err);
-    assert(page_id != MaxPageId);
-    FilePageId file_page = mapping_->ToFilePage(page_id);
-    auto [page, err_load] = LoadDataPage(tbl_id_, page_id, file_page);
-    CHECK_KV_ERR(err_load);
-
-    data_page_ = std::move(page);
-    iter_.Reset(&data_page_, Options()->data_page_size);
 
     if (!iter_.Seek(key))
     {
@@ -53,17 +45,25 @@ KvError ScanIterator::Next()
 {
     if (!iter_.HasNext())
     {
-        PageId page_id = data_page_.NextPageId();
-        if (page_id == MaxPageId)
+        if (prefetched_offset_ < prefetched_pages_.size())
         {
-            return KvError::EndOfFile;
+            data_page_ = std::move(prefetched_pages_[prefetched_offset_]);
+            ++prefetched_offset_;
         }
-        FilePageId file_page = mapping_->ToFilePage(page_id);
-        assert(file_page != MaxFilePageId);
-        auto [page, err] = LoadDataPage(tbl_id_, page_id, file_page);
-        CHECK_KV_ERR(err);
+        else
+        {
+            PageId page_id = data_page_.NextPageId();
+            if (page_id == MaxPageId)
+            {
+                return KvError::EndOfFile;
+            }
+            FilePageId file_page = mapping_->ToFilePage(page_id);
+            assert(file_page != MaxFilePageId);
+            auto [page, err] = LoadDataPage(tbl_id_, page_id, file_page);
+            CHECK_KV_ERR(err);
 
-        data_page_ = std::move(page);
+            data_page_ = std::move(page);
+        }
         iter_.Reset(&data_page_, Options()->data_page_size);
         assert(iter_.HasNext());
     }
@@ -93,14 +93,49 @@ uint64_t ScanIterator::Timestamp() const
     return iter_.Timestamp();
 }
 
-bool ScanIterator::HasNext() const
-{
-    return iter_.HasNext() || data_page_.NextPageId() != MaxPageId;
-}
-
 MappingSnapshot *ScanIterator::Mapping() const
 {
     return mapping_.get();
+}
+
+KvError ScanIterator::PrefetchPages(PageId root_id, std::string_view key)
+{
+    std::vector<PageId> page_ids;
+    KvError err = shard->IndexManager()->SeekIndexMultiplePages(
+        mapping_.get(), root_id, key, kPrefetchPageCount, page_ids);
+    CHECK_KV_ERR(err);
+    assert(!page_ids.empty());
+
+    prefetched_pages_.reserve(page_ids.size());
+    err = AppendPages(page_ids);
+    CHECK_KV_ERR(err);
+
+    data_page_ = std::move(prefetched_pages_[prefetched_offset_]);
+    ++prefetched_offset_;
+    iter_.Reset(&data_page_, Options()->data_page_size);
+    return KvError::NoError;
+}
+
+KvError ScanIterator::AppendPages(std::span<PageId> page_ids)
+{
+    std::vector<FilePageId> file_page_ids;
+    file_page_ids.reserve(page_ids.size());
+
+    for (PageId page_id : page_ids)
+    {
+        file_page_ids.emplace_back(mapping_->ToFilePage(page_id));
+    }
+
+    std::vector<Page> data_pages;
+    KvError err = IoMgr()->ReadPages(tbl_id_, file_page_ids, data_pages);
+    CHECK_KV_ERR(err);
+
+    for (size_t i = 0; i < data_pages.size(); ++i)
+    {
+        prefetched_pages_.emplace_back(page_ids[i], std::move(data_pages[i]));
+    }
+
+    return KvError::NoError;
 }
 
 KvError ScanTask::Scan()

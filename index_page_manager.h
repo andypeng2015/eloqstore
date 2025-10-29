@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdint>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -63,7 +62,13 @@ public:
     KvError SeekIndex(MappingSnapshot *mapping,
                       PageId page_id,
                       std::string_view key,
-                      uint32_t &result);
+                      PageId &result);
+
+    KvError SeekIndexMultiplePages(MappingSnapshot *mapping,
+                                   PageId page_id,
+                                   std::string_view key,
+                                   size_t limit,
+                                   std::vector<PageId> &results);
 
     const KvOptions *Options() const;
     AsyncIoManager *IoMgr() const;

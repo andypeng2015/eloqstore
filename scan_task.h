@@ -1,8 +1,11 @@
 #pragma once
 
+#include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "data_page.h"
 #include "error.h"
@@ -23,15 +26,21 @@ public:
     uint64_t ExpireTs() const;
     uint64_t Timestamp() const;
 
-    bool HasNext() const;
     MappingSnapshot *Mapping() const;
 
 private:
+    static constexpr size_t kPrefetchPageCount = 5;
+
     const TableIdent tbl_id_;
     std::shared_ptr<MappingSnapshot> mapping_;
+    std::vector<DataPage> prefetched_pages_;
+    size_t prefetched_offset_{0};
     DataPage data_page_;
     DataPageIter iter_;
     const compression::DictCompression *compression_{nullptr};
+
+    KvError PrefetchPages(PageId root_id, std::string_view key);
+    KvError AppendPages(std::span<PageId> page_ids);
 };
 
 class ScanRequest;
