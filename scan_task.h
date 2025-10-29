@@ -1,7 +1,5 @@
 #pragma once
 
-#include <memory>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -40,7 +38,6 @@ private:
     const compression::DictCompression *compression_{nullptr};
 
     KvError PrefetchPages(PageId root_id, std::string_view key);
-    KvError AppendPages(std::span<PageId> page_ids);
 };
 
 class ScanRequest;

@@ -107,17 +107,6 @@ KvError ScanIterator::PrefetchPages(PageId root_id, std::string_view key)
     assert(!page_ids.empty());
 
     prefetched_pages_.reserve(page_ids.size());
-    err = AppendPages(page_ids);
-    CHECK_KV_ERR(err);
-
-    data_page_ = std::move(prefetched_pages_[prefetched_offset_]);
-    ++prefetched_offset_;
-    iter_.Reset(&data_page_, Options()->data_page_size);
-    return KvError::NoError;
-}
-
-KvError ScanIterator::AppendPages(std::span<PageId> page_ids)
-{
     std::vector<FilePageId> file_page_ids;
     file_page_ids.reserve(page_ids.size());
 
@@ -127,7 +116,7 @@ KvError ScanIterator::AppendPages(std::span<PageId> page_ids)
     }
 
     std::vector<Page> data_pages;
-    KvError err = IoMgr()->ReadPages(tbl_id_, file_page_ids, data_pages);
+    err = IoMgr()->ReadPages(tbl_id_, file_page_ids, data_pages);
     CHECK_KV_ERR(err);
 
     for (size_t i = 0; i < data_pages.size(); ++i)
@@ -135,6 +124,9 @@ KvError ScanIterator::AppendPages(std::span<PageId> page_ids)
         prefetched_pages_.emplace_back(page_ids[i], std::move(data_pages[i]));
     }
 
+    data_page_ = std::move(prefetched_pages_[prefetched_offset_]);
+    ++prefetched_offset_;
+    iter_.Reset(&data_page_, Options()->data_page_size);
     return KvError::NoError;
 }
 
