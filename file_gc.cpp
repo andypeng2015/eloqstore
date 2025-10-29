@@ -391,9 +391,9 @@ KvError DeleteUnreferencedCloudFiles(
         }
         else
         {
-            LOG(INFO) << "skip file since file_id=" << file_id
-                      << ", least_not_archived_file_id="
-                      << least_not_archived_file_id;
+            DLOG(INFO) << "skip file since file_id=" << file_id
+                       << ", least_not_archived_file_id="
+                       << least_not_archived_file_id;
         }
     }
 

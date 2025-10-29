@@ -57,8 +57,8 @@ KvError BackgroundWrite::CompactDataFile()
         static_cast<AppendAllocator *>(meta->mapper_->FilePgAllocator());
     uint32_t mapping_cnt = meta->mapper_->MappingCount();
 
-    // Ensure consistency between root_id and mapping_cnt
-    // When root_id == MaxPageId, mapping_cnt must be 0, and vice versa
+    // mapping_cnt counts pages from both the data tree and the TTL tree.
+    // If both trees are empty the mapper should have 0 live mappings.
     if (mapping_cnt == 0)
     {
         // Update statistic.
@@ -67,7 +67,7 @@ KvError BackgroundWrite::CompactDataFile()
         TriggerFileGC();
         return KvError::NoError;
     }
-    CHECK((meta->root_id_ != MaxPageId) && (mapping_cnt != 0));
+    CHECK(meta->root_id_ != MaxPageId || meta->ttl_root_id_ != MaxPageId);
 
     const uint32_t pages_per_file = allocator->PagesPerFile();
     const double file_saf_limit = opts->file_amplify_factor;
@@ -86,7 +86,8 @@ KvError BackgroundWrite::CompactDataFile()
 
     err = shard->IndexManager()->MakeCowRoot(tbl_ident_, cow_meta_);
     CHECK_KV_ERR(err);
-    assert(cow_meta_.root_id_ != MaxPageId);
+    assert(cow_meta_.root_id_ != MaxPageId ||
+           cow_meta_.ttl_root_id_ != MaxPageId);
     PageMapper *mapper = cow_meta_.mapper_.get();
 
     allocator = static_cast<AppendAllocator *>(mapper->FilePgAllocator());
