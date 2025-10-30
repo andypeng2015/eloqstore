@@ -538,7 +538,6 @@ KvError AsyncHttpManager::ClassifyCurlError(CURLcode code) const
     case CURLE_COULDNT_RESOLVE_PROXY:
     case CURLE_RECV_ERROR:
     case CURLE_SEND_ERROR:
-        return KvError::Timeout;
     case CURLE_OPERATION_TIMEDOUT:
     case CURLE_GOT_NOTHING:
         return KvError::Timeout;
