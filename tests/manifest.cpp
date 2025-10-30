@@ -86,12 +86,12 @@ TEST_CASE("manifest with cleared root but dangling mappings", "[manifest]")
     std::string manifest;
 
     // Persist a snapshot containing the mapping and a non-empty root.
-    std::string_view snapshot = builder.Snapshot(page_id,
-                                                 eloqstore::MaxPageId,
-                                                 mapper.GetMapping(),
-                                                 mapper.FilePgAllocator()
-                                                     ->MaxFilePageId(),
-                                                 std::string_view{});
+    std::string_view snapshot =
+        builder.Snapshot(page_id,
+                         eloqstore::MaxPageId,
+                         mapper.GetMapping(),
+                         mapper.FilePgAllocator()->MaxFilePageId(),
+                         std::string_view{});
     manifest.append(snapshot);
     builder.Reset();
 
