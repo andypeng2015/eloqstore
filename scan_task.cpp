@@ -1,6 +1,11 @@
 #include "scan_task.h"
 
+#include <bvar/bvar.h>
+#include <bvar/latency_recorder.h>
+#include <bvar/recorder.h>
+
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -10,6 +15,8 @@
 #include "error.h"
 #include "page_mapper.h"
 #include "shard.h"
+
+bvar::LatencyRecorder g_eloqstore_scan_recorder("yf_eloqstore_scan");
 
 namespace eloqstore
 {
@@ -132,6 +139,7 @@ KvError ScanIterator::PrefetchPages(PageId root_id, std::string_view key)
 
 KvError ScanTask::Scan()
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
     const TableIdent &tbl_id = req_->TableId();
     auto req = static_cast<ScanRequest *>(req_);
     assert(req->page_entries_ > 0 && req->page_size_ > 0);
@@ -196,9 +204,20 @@ KvError ScanTask::Scan()
         err = iter.Next();
         if (err != KvError::NoError)
         {
+            auto stop_time = std::chrono::high_resolution_clock::now();
+            auto time = std::chrono::duration_cast<std::chrono::microseconds>(
+                            stop_time - start_time)
+                            .count();
+            g_eloqstore_scan_recorder << time;
             return err == KvError::EndOfFile ? KvError::NoError : err;
         }
     }
+
+    auto stop_time = std::chrono::high_resolution_clock::now();
+    auto time = std::chrono::duration_cast<std::chrono::microseconds>(
+                    stop_time - start_time)
+                    .count();
+    g_eloqstore_scan_recorder << time;
     return KvError::NoError;
 }
 }  // namespace eloqstore
