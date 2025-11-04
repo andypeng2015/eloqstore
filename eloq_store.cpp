@@ -181,7 +181,7 @@ KvError EloqStore::Start()
         shard->Start();
     }
 
-    PrewarmCloudCache();
+    StartPrewarmThread();
 
 #ifdef ELOQ_MODULE_ENABLED
     module_ = std::make_unique<EloqStoreModule>(&shards_);
@@ -287,6 +287,52 @@ void EloqStore::ExecSync(KvRequest *req)
     }
 }
 
+bool EloqStore::IsPrewarmCancelled() const
+{
+    return prewarm_cancelled_.load(std::memory_order_relaxed);
+}
+
+void EloqStore::StartPrewarmThread()
+{
+    if (prewarm_running_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+    if (options_.cloud_store_path.empty() || !options_.prewarm_cloud_cache)
+    {
+        prewarm_cancelled_.store(true, std::memory_order_relaxed);
+        prewarm_running_.store(false, std::memory_order_relaxed);
+        return;
+    }
+    prewarm_cancelled_.store(false, std::memory_order_release);
+    prewarm_running_.store(true, std::memory_order_release);
+    prewarm_thread_ = std::thread([this]() { PrewarmThreadMain(); });
+}
+
+void EloqStore::PrewarmThreadMain()
+{
+    PrewarmCloudCache();
+    prewarm_running_.store(false, std::memory_order_release);
+    prewarm_cancelled_.store(true, std::memory_order_relaxed);
+}
+
+void EloqStore::CancelPrewarm()
+{
+    prewarm_cancelled_.store(true, std::memory_order_release);
+}
+
+bool EloqStore::ShouldCancelPrewarmForRequest(RequestType type) const
+{
+    switch (type)
+    {
+    case RequestType::Prewarm:
+    case RequestType::ListObject:
+        return false;
+    default:
+        return true;
+    }
+}
+
 KvError EloqStore::CollectTablePartitions(
     const std::string &table_name, std::vector<TableIdent> &partitions) const
 {
@@ -374,6 +420,10 @@ bool EloqStore::ListCloudObjects(const std::string &remote_path,
                                  std::vector<std::string> *names,
                                  std::vector<utils::CloudObjectInfo> *details)
 {
+    if (IsPrewarmCancelled())
+    {
+        return false;
+    }
     if (shards_.empty())
     {
         return false;
@@ -392,6 +442,10 @@ bool EloqStore::ListCloudObjects(const std::string &remote_path,
         return false;
     }
     request.Wait();
+    if (IsPrewarmCancelled())
+    {
+        return false;
+    }
     return request.Error() == KvError::NoError;
 }
 
@@ -401,7 +455,7 @@ void EloqStore::PrewarmCloudCache()
     {
         return;
     }
-    if (shards_.empty())
+    if (shards_.empty() || IsPrewarmCancelled())
     {
         return;
     }
@@ -433,9 +487,17 @@ void EloqStore::PrewarmCloudCache()
 
     std::vector<std::string> root_names;
     std::vector<utils::CloudObjectInfo> root_infos;
+    if (IsPrewarmCancelled())
+    {
+        return;
+    }
+
     if (!ListCloudObjects("", &root_names, &root_infos))
     {
-        LOG(WARNING) << "Skip cloud prewarm: failed to list cloud root";
+        if (!IsPrewarmCancelled())
+        {
+            LOG(WARNING) << "Skip cloud prewarm: failed to list cloud root";
+        }
         return;
     }
 
@@ -455,7 +517,7 @@ void EloqStore::PrewarmCloudCache()
         partitions.push_back(std::move(ident));
     }
 
-    if (partitions.empty())
+    if (partitions.empty() || IsPrewarmCancelled())
     {
         return;
     }
@@ -475,6 +537,11 @@ void EloqStore::PrewarmCloudCache()
 
     for (const TableIdent &partition : partitions)
     {
+        if (IsPrewarmCancelled())
+        {
+            break;
+        }
+
         size_t shard_idx = partition.ShardIndex(shards_.size());
         if (shard_idx >= shard_remaining.size())
         {
@@ -488,10 +555,18 @@ void EloqStore::PrewarmCloudCache()
 
         std::vector<std::string> file_names;
         std::vector<utils::CloudObjectInfo> file_infos;
+        if (IsPrewarmCancelled())
+        {
+            break;
+        }
+
         if (!ListCloudObjects(partition.ToString(), &file_names, &file_infos))
         {
-            LOG(WARNING) << "Prewarm skip partition " << partition
-                         << ": list request failed";
+            if (!IsPrewarmCancelled())
+            {
+                LOG(WARNING) << "Prewarm skip partition " << partition
+                             << ": list request failed";
+            }
             continue;
         }
 
@@ -569,6 +644,11 @@ void EloqStore::PrewarmCloudCache()
         PrewarmRequest prewarm_req;
         prewarm_req.SetArgs(
             partition, include_manifest, std::move(selected_ids));
+        if (IsPrewarmCancelled())
+        {
+            break;
+        }
+
         ExecSync(&prewarm_req);
         KvError err = prewarm_req.Error();
 
@@ -576,6 +656,11 @@ void EloqStore::PrewarmCloudCache()
         {
             remaining = projected_remaining;
             continue;
+        }
+
+        if (err == KvError::Aborted)
+        {
+            break;
         }
 
         if (err == KvError::OutOfSpace || err == KvError::OpenFileLimit ||
@@ -661,6 +746,12 @@ bool EloqStore::SendRequest(KvRequest *req)
         return false;
     }
 
+    if (prewarm_running_.load(std::memory_order_relaxed) &&
+        ShouldCancelPrewarmForRequest(req->Type()))
+    {
+        CancelPrewarm();
+    }
+
     req->err_ = KvError::NoError;
     req->done_.store(false, std::memory_order_relaxed);
 
@@ -683,6 +774,12 @@ void EloqStore::Stop()
     if (archive_crond_ != nullptr)
     {
         archive_crond_->Stop();
+    }
+
+    CancelPrewarm();
+    if (prewarm_thread_.joinable())
+    {
+        prewarm_thread_.join();
     }
 
     stopped_.store(true, std::memory_order_relaxed);

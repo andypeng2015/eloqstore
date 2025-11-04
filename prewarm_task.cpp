@@ -18,11 +18,23 @@ KvError PrewarmTask::Prewarm(const PrewarmRequest &request)
     {
         return KvError::NoError;
     }
+    if (eloq_store->IsPrewarmCancelled())
+    {
+        return KvError::Aborted;
+    }
 
     const TableIdent &tbl_id = request.TableId();
     auto open_file = [&](FileId file_id, bool is_manifest) -> KvError
     {
+        if (eloq_store->IsPrewarmCancelled())
+        {
+            return KvError::Aborted;
+        }
         KvError err = cloud_mgr->EnsureCached(tbl_id, file_id);
+        if (err == KvError::Aborted)
+        {
+            return err;
+        }
         if (err == KvError::NoError)
         {
             return KvError::NoError;
@@ -59,6 +71,10 @@ KvError PrewarmTask::Prewarm(const PrewarmRequest &request)
 
     if (request.ShouldPrewarmManifest())
     {
+        if (eloq_store->IsPrewarmCancelled())
+        {
+            return KvError::Aborted;
+        }
         KvError err = open_file(CloudStoreMgr::ManifestFileId(), true);
         if (err != KvError::NoError)
         {
@@ -68,6 +84,10 @@ KvError PrewarmTask::Prewarm(const PrewarmRequest &request)
 
     for (FileId file_id : request.DataFiles())
     {
+        if (eloq_store->IsPrewarmCancelled())
+        {
+            return KvError::Aborted;
+        }
         KvError err = open_file(file_id, false);
         if (err != KvError::NoError)
         {

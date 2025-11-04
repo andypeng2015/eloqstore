@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "error.h"
@@ -378,11 +379,17 @@ public:
     bool ExecAsyn(KvRequest *req);
     void ExecSync(KvRequest *req);
 
+    bool IsPrewarmCancelled() const;
+
 private:
     bool SendRequest(KvRequest *req);
     void HandleDropTableRequest(DropTableRequest *req);
     KvError CollectTablePartitions(const std::string &table_name,
                                    std::vector<TableIdent> &partitions) const;
+    void StartPrewarmThread();
+    void PrewarmThreadMain();
+    void CancelPrewarm();
+    bool ShouldCancelPrewarmForRequest(RequestType type) const;
     bool ListCloudObjects(const std::string &remote_path,
                           std::vector<std::string> *names,
                           std::vector<utils::CloudObjectInfo> *details);
@@ -403,5 +410,9 @@ private:
     friend class AsyncIoManager;
     friend class IouringMgr;
     friend class WriteTask;
+
+    std::thread prewarm_thread_;
+    std::atomic<bool> prewarm_cancelled_{true};
+    std::atomic<bool> prewarm_running_{false};
 };
 }  // namespace eloqstore

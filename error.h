@@ -25,6 +25,7 @@ enum struct KvError : uint8_t
     Busy,
     Timeout,
     NoPermission,
+    Aborted,
     CloudErr,
     IoFail,
 
@@ -67,6 +68,8 @@ constexpr const char *ErrorString(KvError err)
         return "Operation timeout";
     case KvError::NoPermission:
         return "Operation not permitted";
+    case KvError::Aborted:
+        return "Operation aborted";
     }
     return "Unknown error";
 }

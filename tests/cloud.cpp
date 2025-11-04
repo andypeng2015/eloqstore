@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <filesystem>
 #include <map>
+#include <thread>
 
 #include "common.h"
 #include "kv_options.h"
@@ -20,6 +22,78 @@ TEST_CASE("simple cloud store", "[cloud]")
     tester.Upsert(0, 50);
     tester.WriteRnd(0, 200);
     tester.WriteRnd(0, 200);
+}
+
+TEST_CASE("cloud prewarm cancels on foreground activity", "[cloud][prewarm]")
+{
+    eloqstore::KvOptions options = cloud_options;
+    options.prewarm_cloud_cache = true;
+    options.local_space_limit = 64 << 22;  // keep budgets small for test
+    eloqstore::EloqStore *store = InitStore(options);
+
+    MapVerifier writer(test_tbl_id, store);
+    writer.SetValueSize(4096);
+    writer.WriteRnd(0, 8000);
+    writer.Validate();
+
+    store->Stop();
+    CleanupLocalStore(options);
+
+    REQUIRE(store->Start() == eloqstore::KvError::NoError);
+    writer.SetStore(store);
+
+    const std::filesystem::path partition_path =
+        std::filesystem::path(options.store_path[0]) / test_tbl_id.ToString();
+
+    bool prewarm_active = false;
+    for (int i = 0; i < 100; i++)
+    {
+        if (!store->IsPrewarmCancelled())
+        {
+            prewarm_active = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(prewarm_active);
+
+    bool download_started = false;
+    for (int i = 0; i < 300; i++)
+    {
+        if (store->IsPrewarmCancelled())
+        {
+            break;
+        }
+        if (std::filesystem::exists(partition_path) &&
+            !std::filesystem::is_empty(partition_path))
+        {
+            download_started = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(download_started);
+
+    auto begin = std::chrono::steady_clock::now();
+    writer.Read(0);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - begin)
+                       .count();
+    REQUIRE(elapsed < 1000);  // request should not be blocked by prewarm
+
+    bool cancelled = false;
+    for (int i = 0; i < 200; i++)
+    {
+        if (store->IsPrewarmCancelled())
+        {
+            cancelled = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(cancelled);
+
+    writer.Validate();
 }
 
 TEST_CASE("cloud gc preserves archived data after truncate",
