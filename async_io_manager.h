@@ -26,6 +26,7 @@ namespace eloqstore
 class WriteReq;
 class WriteTask;
 class MemIndexPage;
+class PrewarmTask;
 
 class ManifestFile
 {
@@ -135,7 +136,6 @@ public:
     KvError CreateArchive(const TableIdent &tbl_id,
                           std::string_view snapshot,
                           uint64_t ts) override;
-    KvError EnsureCached(const TableIdent &tbl_id, FileId file_id);
     std::pair<ManifestFilePtr, KvError> GetManifest(
         const TableIdent &tbl_id) override;
 
@@ -378,8 +378,6 @@ public:
         return obj_store_;
     }
 
-    KvError EnsureCached(const TableIdent &tbl_id, FileId file_id);
-
     KvError ReadArchiveFileAndDelete(const std::string &file_path,
                                      std::string &content);
 
@@ -461,6 +459,8 @@ private:
     FileCleaner file_cleaner_;
 
     ObjectStore obj_store_;
+
+    friend class PrewarmTask;
 };
 
 class MemStoreMgr : public AsyncIoManager

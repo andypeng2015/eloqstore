@@ -30,19 +30,16 @@ KvError PrewarmTask::Prewarm(const PrewarmRequest &request)
         {
             return KvError::Aborted;
         }
-        KvError err = cloud_mgr->EnsureCached(tbl_id, file_id);
-        if (err == KvError::Aborted)
-        {
-            return err;
-        }
+
+        auto [fd_ref, err] = cloud_mgr->OpenFD(tbl_id, file_id);
         if (err == KvError::NoError)
         {
+            fd_ref = nullptr;
             return KvError::NoError;
         }
 
         if (err == KvError::NotFound)
         {
-            // File missing in cloud is not fatal; skip silently.
             LOG(WARNING) << "Prewarm skip missing file "
                          << (is_manifest ? "manifest" : "data file")
                          << " for table " << tbl_id;
@@ -61,6 +58,11 @@ KvError PrewarmTask::Prewarm(const PrewarmRequest &request)
         {
             LOG(WARNING) << "Prewarm retryable failure for " << tbl_id << ": "
                          << ErrorString(err);
+            return err;
+        }
+
+        if (err == KvError::Aborted)
+        {
             return err;
         }
 

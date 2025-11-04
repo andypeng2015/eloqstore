@@ -253,6 +253,7 @@ void Shard::ProcessReq(KvRequest *req)
             KvTask *current_task = ThdTask();
             auto list_object_req = static_cast<ListObjectRequest *>(req);
             ObjectStore::ListTask list_task(list_object_req->RemotePath());
+            list_task.SetRecursive(list_object_req->Recursive());
 
             list_task.SetKvTask(task);
             auto cloud_mgr = static_cast<CloudStoreMgr *>(shard->io_mgr_.get());

@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <boost/algorithm/string/predicate.hpp>
 #include <cassert>
 #include <cstddef>
 #include <filesystem>
@@ -14,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -418,7 +418,8 @@ KvError EloqStore::CollectTablePartitions(
 
 bool EloqStore::ListCloudObjects(const std::string &remote_path,
                                  std::vector<std::string> *names,
-                                 std::vector<utils::CloudObjectInfo> *details)
+                                 std::vector<utils::CloudObjectInfo> *details,
+                                 bool recursive)
 {
     if (IsPrewarmCancelled())
     {
@@ -429,9 +430,13 @@ bool EloqStore::ListCloudObjects(const std::string &remote_path,
         return false;
     }
 
-    ListObjectRequest request(names);
+    std::vector<std::string> dummy_names;
+    auto *names_ptr = names != nullptr ? names : &dummy_names;
+
+    ListObjectRequest request(names_ptr);
     request.SetRemotePath(remote_path);
     request.SetDetailStorage(details);
+    request.SetRecursive(recursive);
     request.err_ = KvError::NoError;
     request.done_.store(false, std::memory_order_relaxed);
     request.callback_ = nullptr;
@@ -485,14 +490,13 @@ void EloqStore::PrewarmCloudCache()
         return;
     }
 
-    std::vector<std::string> root_names;
-    std::vector<utils::CloudObjectInfo> root_infos;
     if (IsPrewarmCancelled())
     {
         return;
     }
 
-    if (!ListCloudObjects("", &root_names, &root_infos))
+    std::vector<utils::CloudObjectInfo> all_infos;
+    if (!ListCloudObjects("", nullptr, &all_infos, true))
     {
         if (!IsPrewarmCancelled())
         {
@@ -501,25 +505,117 @@ void EloqStore::PrewarmCloudCache()
         return;
     }
 
-    std::vector<TableIdent> partitions;
-    partitions.reserve(root_infos.size());
-    for (const auto &info : root_infos)
+    struct PartitionListing
     {
-        if (!info.is_dir)
+        bool has_manifest{false};
+        std::vector<FileId> data_ids;
+    };
+
+    auto extract_partition = [](const std::string &path,
+                                TableIdent &tbl_id,
+                                std::string &filename) -> bool
+    {
+        size_t start = 0;
+        while (start < path.size())
+        {
+            size_t slash = path.find('/', start);
+            size_t len = slash == std::string::npos ? path.size() - start
+                                                    : slash - start;
+            if (len == 0)
+            {
+                if (slash == std::string::npos)
+                {
+                    break;
+                }
+                start = slash + 1;
+                continue;
+            }
+            std::string component = path.substr(start, len);
+            if (component.find('.') != std::string::npos)
+            {
+                TableIdent ident = TableIdent::FromString(component);
+                if (!ident.IsValid())
+                {
+                    return false;
+                }
+                tbl_id = std::move(ident);
+                if (slash == std::string::npos || slash + 1 >= path.size())
+                {
+                    return false;
+                }
+                filename = path.substr(slash + 1);
+                return !filename.empty();
+            }
+            if (slash == std::string::npos)
+            {
+                break;
+            }
+            start = slash + 1;
+        }
+        return false;
+    };
+
+    std::unordered_map<TableIdent, PartitionListing> partition_files;
+    partition_files.reserve(all_infos.size());
+
+    for (const auto &info : all_infos)
+    {
+        if (info.is_dir)
         {
             continue;
         }
-        TableIdent ident = TableIdent::FromString(info.name);
-        if (!ident.IsValid())
+        const std::string &path = !info.path.empty() ? info.path : info.name;
+        if (path.empty())
         {
             continue;
         }
-        partitions.push_back(std::move(ident));
+        TableIdent tbl_id;
+        std::string filename;
+        if (!extract_partition(path, tbl_id, filename))
+        {
+            continue;
+        }
+        if (filename.ends_with(TmpSuffix))
+        {
+            continue;
+        }
+        PartitionListing &listing = partition_files[tbl_id];
+        if (filename == FileNameManifest)
+        {
+            listing.has_manifest = true;
+            continue;
+        }
+        if (filename.rfind(FileNameData, 0) == 0)
+        {
+            size_t underscore = filename.find_first_of(FileNameSeparator);
+            if (underscore == std::string::npos ||
+                underscore + 1 >= filename.size())
+            {
+                continue;
+            }
+            std::string id_str = filename.substr(underscore + 1);
+            try
+            {
+                FileId file_id = std::stoull(id_str);
+                listing.data_ids.push_back(file_id);
+            }
+            catch (const std::exception &)
+            {
+                continue;
+            }
+        }
     }
 
-    if (partitions.empty() || IsPrewarmCancelled())
+    if (partition_files.empty() || IsPrewarmCancelled())
     {
         return;
+    }
+
+    std::vector<TableIdent> partitions;
+    partitions.reserve(partition_files.size());
+    for (const auto &pair : partition_files)
+    {
+        partitions.push_back(pair.first);
     }
 
     std::sort(partitions.begin(),
@@ -553,58 +649,15 @@ void EloqStore::PrewarmCloudCache()
             continue;
         }
 
-        std::vector<std::string> file_names;
-        std::vector<utils::CloudObjectInfo> file_infos;
-        if (IsPrewarmCancelled())
+        const auto listing_it = partition_files.find(partition);
+        if (listing_it == partition_files.end())
         {
-            break;
-        }
-
-        if (!ListCloudObjects(partition.ToString(), &file_names, &file_infos))
-        {
-            if (!IsPrewarmCancelled())
-            {
-                LOG(WARNING) << "Prewarm skip partition " << partition
-                             << ": list request failed";
-            }
             continue;
         }
 
-        bool has_manifest = false;
-        std::vector<FileId> data_ids;
-        data_ids.reserve(file_infos.size());
-        for (const auto &file : file_infos)
-        {
-            if (file.is_dir)
-            {
-                continue;
-            }
-            if (boost::algorithm::ends_with(file.name, TmpSuffix))
-            {
-                continue;
-            }
-            auto [type, suffix] = ParseFileName(file.name);
-            if (type == FileNameManifest)
-            {
-                if (suffix.empty())
-                {
-                    has_manifest = true;
-                }
-                continue;
-            }
-            if (type == FileNameData && !suffix.empty())
-            {
-                try
-                {
-                    FileId file_id = std::stoull(std::string(suffix));
-                    data_ids.push_back(file_id);
-                }
-                catch (const std::exception &)
-                {
-                    continue;
-                }
-            }
-        }
+        const PartitionListing &listing = listing_it->second;
+        bool has_manifest = listing.has_manifest;
+        std::vector<FileId> data_ids = listing.data_ids;
 
         const size_t manifest_cost = options_.manifest_limit;
         const size_t data_cost = options_.DataFileSize();

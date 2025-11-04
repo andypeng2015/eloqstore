@@ -2115,21 +2115,6 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
     return upload_task.error_;
 }
 
-KvError CloudStoreMgr::EnsureCached(const TableIdent &tbl_id, FileId file_id)
-{
-    if (eloq_store->IsPrewarmCancelled())
-    {
-        return KvError::Aborted;
-    }
-    auto [fd_ref, err] = OpenFD(tbl_id, file_id);
-    if (err != KvError::NoError)
-    {
-        return err;
-    }
-    fd_ref = nullptr;
-    return KvError::NoError;
-}
-
 KvError CloudStoreMgr::ReadArchiveFileAndDelete(const std::string &file_path,
                                                 std::string &content)
 {

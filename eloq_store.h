@@ -200,6 +200,10 @@ public:
     {
         remote_path_ = std::move(remote_path);
     }
+    void SetRecursive(bool recursive)
+    {
+        recursive_ = recursive;
+    }
 
     const std::string &RemotePath() const
     {
@@ -220,11 +224,16 @@ public:
     {
         return details_;
     }
+    bool Recursive() const
+    {
+        return recursive_;
+    }
 
 private:
     std::vector<std::string> *objects_;
     std::vector<utils::CloudObjectInfo> *details_{nullptr};
     std::string remote_path_;
+    bool recursive_{false};
 };
 
 class PrewarmRequest : public KvRequest
@@ -392,7 +401,8 @@ private:
     bool ShouldCancelPrewarmForRequest(RequestType type) const;
     bool ListCloudObjects(const std::string &remote_path,
                           std::vector<std::string> *names,
-                          std::vector<utils::CloudObjectInfo> *details);
+                          std::vector<utils::CloudObjectInfo> *details,
+                          bool recursive = false);
     void PrewarmCloudCache();
     KvError InitStoreSpace();
 
