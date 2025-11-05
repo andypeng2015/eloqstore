@@ -73,10 +73,7 @@ void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)
     {
         LOG(ERROR) << "Failed to initialize cURL easy handle";
         task->error_ = KvError::CloudErr;
-        if (task->kv_task_)
-        {
-            task->kv_task_->Resume();
-        }
+        task->kv_task_->Resume();
         return;
     }
 
@@ -118,16 +115,13 @@ void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)
                    << curl_multi_strerror(mres);
         curl_easy_cleanup(easy);
         task->error_ = KvError::CloudErr;
-        if (task->kv_task_)
-        {
-            task->kv_task_->Resume();
-        }
+        task->kv_task_->Resume();
         return;
     }
 
     // record the active request using CURL handle as key
     active_requests_[easy] = task;
-    if (task->kv_task_ && !is_retry)
+    if (!is_retry)
     {
         task->kv_task_->inflight_io_++;
     }
@@ -327,21 +321,13 @@ void AsyncHttpManager::ProcessCompletedRequests()
                 continue;
             }
 
-            if (task->kv_task_)
-            {
-                task->kv_task_->FinishIo();
-            }
+            task->kv_task_->FinishIo();
         }
     }
 }
 
 void AsyncHttpManager::CleanupTaskResources(ObjectStore::Task *task)
 {
-    if (!task)
-    {
-        return;
-    }
-
     if (task->headers_)
     {
         curl_slist_free_all(task->headers_);
@@ -373,7 +359,7 @@ void AsyncHttpManager::Cleanup()
         // clean cURL easy handle
         curl_easy_cleanup(easy);
 
-        if (task->kv_task_ && task->kv_task_->inflight_io_ > 0)
+        if (task->kv_task_->inflight_io_ > 0)
         {
             task->error_ = KvError::CloudErr;
             task->kv_task_->FinishIo();
