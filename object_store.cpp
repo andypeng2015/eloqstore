@@ -328,21 +328,12 @@ void AsyncHttpManager::ProcessCompletedRequests()
 
 void AsyncHttpManager::CleanupTaskResources(ObjectStore::Task *task)
 {
-    if (task->headers_)
-    {
-        curl_slist_free_all(task->headers_);
-        task->headers_ = nullptr;
-    }
-    task->json_data_.clear();
+    curl_slist_free_all(task->headers_);
 
     if (task->TaskType() == ObjectStore::Task::Type::AsyncUpload)
     {
         auto upload_task = static_cast<ObjectStore::UploadTask *>(task);
-        if (upload_task->mime_)
-        {
-            curl_mime_free(upload_task->mime_);
-            upload_task->mime_ = nullptr;
-        }
+        curl_mime_free(upload_task->mime_);
     }
 }
 
@@ -365,8 +356,6 @@ void AsyncHttpManager::Cleanup()
             task->kv_task_->FinishIo();
         }
     }
-    active_requests_.clear();
-    pending_retries_.clear();
 }
 
 void AsyncHttpManager::ProcessPendingRetries()
