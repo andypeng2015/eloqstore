@@ -24,7 +24,8 @@ public:
         return "leveldb.BytewiseComparator";
     }
 
-    int Compare(std::string_view a, std::string_view b) const override
+    __attribute__((target("avx512f,avx512bw,avx512vl"))) int Compare(
+        std::string_view a, std::string_view b) const override
     {
         size_t lena = a.size();
         size_t lenb = b.size();
