@@ -216,10 +216,8 @@ void IndexPageIter::Invalidate()
     page_id_ = MaxPageId;
 }
 
-const char *IndexPageIter::DecodeEntry(const char *ptr,
-                                       const char *limit,
-                                       uint32_t *shared,
-                                       uint32_t *non_shared)
+__attribute__((always_inline)) inline const char *IndexPageIter::DecodeEntry(
+    const char *ptr, const char *limit, uint32_t *shared, uint32_t *non_shared)
 {
     if (limit - ptr < 2)
     {
