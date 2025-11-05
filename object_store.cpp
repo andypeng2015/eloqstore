@@ -86,7 +86,7 @@ void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(easy, CURLOPT_WRITEDATA, &task->response_data_);
     curl_easy_setopt(easy, CURLOPT_PRIVATE, task);
-    curl_easy_setopt(easy, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(easy, CURLOPT_TIMEOUT, 300L);
 
     switch (task->TaskType())
     {
@@ -342,48 +342,21 @@ void AsyncHttpManager::CleanupTaskResources(ObjectStore::Task *task)
         return;
     }
 
+    if (task->headers_)
+    {
+        curl_slist_free_all(task->headers_);
+        task->headers_ = nullptr;
+    }
+    task->json_data_.clear();
+
     if (task->TaskType() == ObjectStore::Task::Type::AsyncUpload)
     {
         auto upload_task = static_cast<ObjectStore::UploadTask *>(task);
         if (upload_task->mime_)
         {
-            curl_mime_free(upload_task->mime_);  // free the mime object
+            curl_mime_free(upload_task->mime_);
             upload_task->mime_ = nullptr;
         }
-        if (upload_task->headers_)
-        {
-            // free the header list
-            curl_slist_free_all(upload_task->headers_);
-            upload_task->headers_ = nullptr;
-        }
-    }
-    else if (task->TaskType() == ObjectStore::Task::Type::AsyncDownload)
-    {
-        auto download_task = static_cast<ObjectStore::DownloadTask *>(task);
-        if (download_task->headers_)
-        {
-            curl_slist_free_all(download_task->headers_);
-            download_task->headers_ = nullptr;
-        }
-    }
-    else if (task->TaskType() == ObjectStore::Task::Type::AsyncList)
-    {
-        auto list_task = static_cast<ObjectStore::ListTask *>(task);
-        if (list_task->headers_)
-        {
-            curl_slist_free_all(list_task->headers_);
-            list_task->headers_ = nullptr;
-        }
-    }
-    else if (task->TaskType() == ObjectStore::Task::Type::AsyncDelete)
-    {
-        auto delete_task = static_cast<ObjectStore::DeleteTask *>(task);
-        if (delete_task->headers_)
-        {
-            curl_slist_free_all(delete_task->headers_);
-            delete_task->headers_ = nullptr;
-        }
-        delete_task->json_data_.clear();
     }
 }
 
@@ -451,22 +424,14 @@ void AsyncHttpManager::ScheduleRetry(ObjectStore::Task *task,
 
 uint32_t AsyncHttpManager::ComputeBackoffMs(uint8_t attempt) const
 {
-    uint32_t base = std::max<uint32_t>(1, kInitialRetryDelayMs);
-    uint32_t cap = std::max<uint32_t>(base, kMaxRetryDelayMs);
-    uint64_t delay = base;
     if (attempt == 0)
     {
-        return base;
+        return kInitialRetryDelayMs;
     }
-    for (uint8_t i = 1; i < attempt; ++i)
-    {
-        delay = std::min<uint64_t>(delay * 2, cap);
-        if (delay == cap)
-        {
-            break;
-        }
-    }
-    delay = std::min<uint64_t>(delay, cap);
+
+    uint64_t delay = static_cast<uint64_t>(kInitialRetryDelayMs)
+                     << (attempt - 1);
+    delay = std::min<uint64_t>(delay, kMaxRetryDelayMs);
     return static_cast<uint32_t>(delay);
 }
 

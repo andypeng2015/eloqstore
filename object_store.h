@@ -51,6 +51,8 @@ public:
 
         KvError error_{KvError::NoError};
         std::string response_data_{};
+        std::string json_data_{};
+        curl_slist *headers_{nullptr};
 
         uint8_t retry_count_ = 0;
         uint8_t max_retries_ = 3;
@@ -79,8 +81,6 @@ public:
         };
         const TableIdent *tbl_id_;
         std::string_view filename_;
-        curl_slist *headers_{nullptr};
-        std::string json_data_;
     };
 
     class UploadTask : public Task
@@ -98,7 +98,6 @@ public:
 
         // cURL related members
         curl_mime *mime_{nullptr};
-        curl_slist *headers_{nullptr};
     };
 
     class ListTask : public Task
@@ -111,8 +110,6 @@ public:
             return Type::AsyncList;
         }
         std::string remote_path_;
-        curl_slist *headers_{nullptr};
-        std::string json_data_;
     };
 
     class DeleteTask : public Task
@@ -127,8 +124,6 @@ public:
 
         std::string remote_path_;
         bool is_dir_{false};
-        curl_slist *headers_{nullptr};
-        std::string json_data_;
     };
 
 private:
@@ -179,8 +174,8 @@ private:
                size * nmemb;
     }
 
-    static constexpr uint32_t kInitialRetryDelayMs = 200;
-    static constexpr uint32_t kMaxRetryDelayMs = 5000;
+    static constexpr uint32_t kInitialRetryDelayMs = 10'000;
+    static constexpr uint32_t kMaxRetryDelayMs = 40'000;
 
     CURLM *multi_handle_{nullptr};
     std::unordered_map<CURL *, ObjectStore::Task *> active_requests_;

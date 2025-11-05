@@ -13,6 +13,7 @@
 #include "eloq_store.h"
 #include "error.h"
 #include "kv_options.h"
+#include "object_store.h"
 #include "replayer.h"
 #include "task.h"
 #include "utils.h"
@@ -423,27 +424,26 @@ KvError DeleteUnreferencedCloudFiles(
         return KvError::NoError;
     }
 
-    std::vector<std::unique_ptr<ObjectStore::DeleteTask>> delete_tasks;
+    std::vector<ObjectStore::DeleteTask> delete_tasks;
     delete_tasks.reserve(files_to_delete.size());
 
     for (const std::string &remote_path : files_to_delete)
     {
-        auto task =
-            std::make_unique<ObjectStore::DeleteTask>(remote_path, false);
-        task->SetKvTask(current_task);
-        http_mgr->SubmitRequest(task.get());
-        delete_tasks.emplace_back(std::move(task));
+        ObjectStore::DeleteTask task(remote_path, false);
+        task.SetKvTask(current_task);
+        http_mgr->SubmitRequest(&task);
+        delete_tasks.push_back(std::move(task));
     }
 
     current_task->WaitIo();
 
     for (const auto &task : delete_tasks)
     {
-        if (task->error_ != KvError::NoError)
+        if (task.error_ != KvError::NoError)
         {
-            LOG(ERROR) << "Failed to delete file " << task->remote_path_ << ": "
-                       << ErrorString(task->error_);
-            return task->error_;
+            LOG(ERROR) << "Failed to delete file " << task.remote_path_ << ": "
+                       << ErrorString(task.error_);
+            return task.error_;
         }
     }
 
