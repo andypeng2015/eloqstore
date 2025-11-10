@@ -26,6 +26,7 @@ namespace eloqstore
 class WriteReq;
 class WriteTask;
 class MemIndexPage;
+struct FilePageIdTermMapping;
 
 class ManifestFile
 {
@@ -86,14 +87,21 @@ public:
                                    std::string_view log,
                                    uint64_t manifest_size) = 0;
     virtual KvError SwitchManifest(const TableIdent &tbl_id,
-                                   std::string_view snapshot) = 0;
+                                   std::string_view snapshot,
+                                   Term term) = 0;
     virtual KvError CreateArchive(const TableIdent &tbl_id,
                                   std::string_view snapshot,
-                                  uint64_t ts) = 0;
+                                  uint64_t ts,
+                                  Term term) = 0;
     virtual std::pair<ManifestFilePtr, KvError> GetManifest(
         const TableIdent &tbl_id) = 0;
 
     virtual void CleanManifest(const TableIdent &tbl_id) = 0;
+    virtual void UpdateTermMapping(
+        const TableIdent &tbl_id,
+        std::shared_ptr<FilePageIdTermMapping> mapping)
+    {
+    }
 
     const KvOptions *options_;
 
@@ -131,10 +139,12 @@ public:
                            std::string_view log,
                            uint64_t manifest_size) override;
     KvError SwitchManifest(const TableIdent &tbl_id,
-                           std::string_view snapshot) override;
+                           std::string_view snapshot,
+                           Term term) override;
     KvError CreateArchive(const TableIdent &tbl_id,
                           std::string_view snapshot,
-                          uint64_t ts) override;
+                          uint64_t ts,
+                          Term term) override;
     std::pair<ManifestFilePtr, KvError> GetManifest(
         const TableIdent &tbl_id) override;
 
@@ -142,6 +152,8 @@ public:
     KvError DeleteFiles(const std::vector<std::string> &file_paths);
 
     void CleanManifest(const TableIdent &tbl_id) override;
+    void UpdateTermMapping(const TableIdent &tbl_id,
+                           std::shared_ptr<FilePageIdTermMapping> mapping) override;
 
     static constexpr uint64_t oflags_dir = O_DIRECTORY | O_RDONLY;
 
@@ -186,16 +198,17 @@ protected:
         /**
          * @brief mu_ avoids open/close file concurrently.
          */
-        Mutex mu_;
+        bool dirty_{false};
         int fd_{FdEmpty};
         int reg_idx_{-1};
-        bool dirty_{false};
+        uint32_t ref_count_{0};
+        Term term_{0};
 
         PartitionFiles *const tbl_;
         const FileId file_id_;
-        uint32_t ref_count_{0};
         LruFD *prev_{nullptr};
         LruFD *next_{nullptr};
+        Mutex mu_;
     };
 
     enum class UserDataType : uint8_t
@@ -228,6 +241,7 @@ protected:
     public:
         const TableIdent *tbl_id_ = nullptr;
         std::unordered_map<FileId, LruFD> fds_;
+        std::shared_ptr<FilePageIdTermMapping> term_mapping_{nullptr};
     };
 
     class Manifest : public ManifestFile
@@ -256,6 +270,8 @@ protected:
      * @brief Convert file page id to <file_id, file_offset>
      */
     std::pair<FileId, uint32_t> ConvFilePageId(FilePageId file_page_id) const;
+    std::shared_ptr<FilePageIdTermMapping> GetTermMapping(
+        const TableIdent &tbl_id);
 
     uint32_t AllocRegisterIndex();
     void FreeRegisterIndex(uint32_t idx);
@@ -286,8 +302,13 @@ protected:
     virtual int WriteSnapshot(LruFD::Ref dir_fd,
                               std::string_view name,
                               std::string_view content);
-    virtual int CreateFile(LruFD::Ref dir_fd, FileId file_id);
-    virtual int OpenFile(const TableIdent &tbl_id, FileId file_id, bool direct);
+    virtual int CreateFile(LruFD::Ref dir_fd,
+                           FileId file_id,
+                           Term term);
+    virtual int OpenFile(const TableIdent &tbl_id,
+                         FileId file_id,
+                         bool direct,
+                         Term term);
     virtual KvError SyncFile(LruFD::Ref fd);
     virtual KvError SyncFiles(const TableIdent &tbl_id,
                               std::span<LruFD::Ref> fds);
@@ -304,7 +325,8 @@ protected:
      */
     std::pair<LruFD::Ref, KvError> OpenFD(const TableIdent &tbl_id,
                                           FileId file_id,
-                                          bool direct = false);
+                                          bool direct = false,
+                                          Term term = 0);
     /**
      * @brief Open file or create it if not exists. This method can be used to
      * open data-file/manifest or create data-file, but not create manifest.
@@ -314,7 +336,8 @@ protected:
     std::pair<LruFD::Ref, KvError> OpenOrCreateFD(const TableIdent &tbl_id,
                                                   FileId file_id,
                                                   bool direct = false,
-                                                  bool create = true);
+                                                  bool create = true,
+                                                  Term term = 0);
     bool EvictFD();
 
     class WriteReqPool
@@ -363,10 +386,14 @@ public:
     void Submit() override;
     void PollComplete() override;
     KvError SwitchManifest(const TableIdent &tbl_id,
-                           std::string_view snapshot) override;
+                           std::string_view snapshot,
+                           Term term) override;
     KvError CreateArchive(const TableIdent &tbl_id,
                           std::string_view snapshot,
-                          uint64_t ts) override;
+                          uint64_t ts,
+                          Term term) override;
+    std::pair<ManifestFilePtr, KvError> GetManifest(
+        const TableIdent &tbl_id) override;
 
     ObjectStore &GetObjectStore()
     {
@@ -377,25 +404,29 @@ public:
                                      std::string &content);
 
 private:
-    int CreateFile(LruFD::Ref dir_fd, FileId file_id) override;
+    int CreateFile(LruFD::Ref dir_fd, FileId file_id, Term term) override;
     int OpenFile(const TableIdent &tbl_id,
                  FileId file_id,
-                 bool direct) override;
+                 bool direct,
+                 Term term) override;
     KvError SyncFile(LruFD::Ref fd) override;
     KvError SyncFiles(const TableIdent &tbl_id,
                       std::span<LruFD::Ref> fds) override;
     KvError CloseFile(LruFD::Ref fd) override;
 
-    KvError DownloadFile(const TableIdent &tbl_id, FileId file_id);
+    KvError DownloadFile(const TableIdent &tbl_id, FileId file_id, Term term);
     KvError UploadFiles(const TableIdent &tbl_id,
                         std::vector<std::string> filenames);
+    KvError RefreshManifestFromCloud(const TableIdent &tbl_id);
+    KvError DownloadManifestObject(const TableIdent &tbl_id,
+                                   const std::string &remote_name);
 
     bool DequeClosedFile(const FileKey &key);
     void EnqueClosedFile(FileKey key);
     bool HasEvictableFile() const;
     int ReserveCacheSpace(size_t size);
 
-    static std::string ToFilename(FileId file_id);
+    static std::string ToFilename(FileId file_id, Term term = 0);
     size_t EstimateFileSize(FileId file_id) const;
     size_t EstimateFileSize(std::string_view filename) const;
 

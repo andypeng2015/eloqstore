@@ -102,6 +102,8 @@ void Replayer::DeserializeSnapshot(std::string_view snapshot)
         dict_bytes_.clear();
     }
 
+    term_mapping_ = std::make_shared<FilePageIdTermMapping>();
+    term_mapping_->Deserialize(snapshot);
     mapping_tbl_.reserve(opts_->init_page_count);
     while (!snapshot.empty())
     {

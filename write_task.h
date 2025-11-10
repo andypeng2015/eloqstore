@@ -55,6 +55,9 @@ protected:
 
     FilePageId ToFilePage(PageId page_id);
 
+    void SetManifestTerm(Term term);
+    Term ManifestTerm() const;
+
     TableIdent tbl_ident_;
 
     CowRootMeta cow_meta_;
@@ -77,6 +80,8 @@ protected:
      * @brief First file page id of this batch of pages.
      */
     FilePageId batch_fp_id_{MaxFilePageId};
+
+    Term manifest_term_{0};
 };
 
 }  // namespace eloqstore

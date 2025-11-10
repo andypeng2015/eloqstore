@@ -181,16 +181,18 @@ void ClassifyFiles(const std::vector<std::string> &files,
 
         if (ret.first == FileNameManifest)
         {
-            // archive file: manifest_<timestamp>
-            // Only manifest files with timestamp are archive files.
-            std::string_view ts_str = ret.second;
-            if (!ts_str.empty())
+            std::optional<uint64_t> ts;
+            Term term = 0;
+            if (!ParseManifestComponents(file_name, ts, term))
             {
-                uint64_t timestamp = std::stoull(std::string(ts_str));
-                archive_files.push_back(file_name);
-                archive_timestamps.push_back(timestamp);
+                continue;
             }
-            // Manifest files without timestamp are current manifest, ignore.
+            if (ts.has_value())
+            {
+                archive_files.push_back(file_name);
+                archive_timestamps.push_back(*ts);
+            }
+            // Current manifests (without archive timestamp) are ignored.
         }
         else if (ret.first == FileNameData)
         {
@@ -376,7 +378,12 @@ KvError DeleteUnreferencedCloudFiles(
             continue;
         }
 
-        FileId file_id = std::stoull(std::string(ret.second));
+        FileId file_id = 0;
+        [[maybe_unused]] Term term = 0;
+        if (!ParseDataFileComponents(ret.second, file_id, term))
+        {
+            continue;
+        }
 
         // Only delete files that meet the following conditions:
         // 1. File ID >= least_not_archived_file_id (greater than the archived
@@ -471,7 +478,12 @@ KvError DeleteUnreferencedLocalFiles(
             continue;
         }
 
-        FileId file_id = std::stoull(std::string(ret.second));
+        FileId file_id = 0;
+        [[maybe_unused]] Term term = 0;
+        if (!ParseDataFileComponents(ret.second, file_id, term))
+        {
+            continue;
+        }
 
         // Only delete files that meet the following conditions:
         // 1. File ID >= least_not_archived_file_id (greater than or equal to

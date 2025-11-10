@@ -243,11 +243,21 @@ KvError BackgroundWrite::CreateArchive()
     {
         dict_bytes = meta->compression_->DictionaryBytes();
     }
-    std::string_view snapshot =
-        wal_builder_.Snapshot(root, ttl_root, mapping, max_fp_id, dict_bytes);
+    std::string_view snapshot = wal_builder_.Snapshot(root,
+                                                     ttl_root,
+                                                     mapping,
+                                                     max_fp_id,
+                                                     dict_bytes,
+                                                     meta->page_id_term_mapping_.get());
 
     uint64_t current_ts = utils::UnixTs<chrono::microseconds>();
-    err = IoMgr()->CreateArchive(tbl_ident_, snapshot, current_ts);
+    Term manifest_term = 0;
+    if (Options()->data_append_mode && meta->page_id_term_mapping_ != nullptr)
+    {
+        manifest_term = meta->CurrentTerm();
+    }
+    err = IoMgr()->CreateArchive(
+        tbl_ident_, snapshot, current_ts, manifest_term);
     CHECK_KV_ERR(err);
 
     // Update the cached max file id.

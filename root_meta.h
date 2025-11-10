@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 #include "compression.h"
 #include "mem_index_page.h"
@@ -13,6 +14,8 @@
 
 namespace eloqstore
 {
+struct FilePageIdTermMapping;
+
 class ManifestBuilder
 {
 public:
@@ -23,7 +26,8 @@ public:
                               PageId ttl_root,
                               const MappingSnapshot *mapping,
                               FilePageId max_fp_id,
-                              std::string_view dict_bytes);
+                              std::string_view dict_bytes,
+                              const FilePageIdTermMapping *term_mapping);
 
     std::string_view Finalize(PageId new_root, PageId ttl_root);
     std::string_view BuffView() const;
@@ -41,13 +45,17 @@ public:
 
 private:
     std::string buff_;
+    std::string term_mapping_buf_;
 };
 
 struct FilePageIdTermMapping
 {
     void Append(FilePageId file_page_id, Term term);
 
-    Term MaxTerm();
+    Term CurrentTerm();
+    Term TermOf(FilePageId file_page_id) const;
+    void Serialize(std::string &dst) const;
+    void Deserialize(std::string_view &src);
     /**
      * Used to get the term a file page id belongs to.
      * Find max i that file_page_id >= page_id_term_mapping_[i].first, then term
@@ -73,7 +81,9 @@ struct CowRootMeta
 
 struct RootMeta
 {
-    RootMeta() : compression_(std::make_shared<compression::DictCompression>())
+    RootMeta()
+        : compression_(std::make_shared<compression::DictCompression>()),
+          page_id_term_mapping_(std::make_shared<FilePageIdTermMapping>())
     {
     }
     RootMeta(const RootMeta &rhs) = delete;

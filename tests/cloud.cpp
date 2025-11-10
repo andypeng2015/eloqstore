@@ -51,21 +51,24 @@ TEST_CASE("cloud gc preserves archived data after truncate",
         ListCloudFiles(daemon_url, cloud_root, partition);
     REQUIRE_FALSE(cloud_files.empty());
 
-    std::string archive_name;
+    eloqstore::Term current_term = 0;
+    std::string current_manifest =
+        FindManifestFile(cloud_files, false, &current_term);
+    eloqstore::Term original_term = current_term;
+    eloqstore::Term archive_term = 0;
+    std::string archive_name =
+        FindManifestFile(cloud_files, true, &archive_term);
     std::string protected_data_file;
     for (const std::string &filename : cloud_files)
     {
-        if (filename.rfind("manifest_", 0) == 0)
-        {
-            archive_name = filename;
-        }
-        else if (protected_data_file.empty() && filename.rfind("data_", 0) == 0)
+        if (protected_data_file.empty() && filename.rfind("data_", 0) == 0)
         {
             protected_data_file = filename;
         }
     }
     REQUIRE(!archive_name.empty());
     REQUIRE(!protected_data_file.empty());
+    REQUIRE(!current_manifest.empty());
 
     store->Stop();
     CleanupLocalStore(cloud_archive_opts);
@@ -91,15 +94,19 @@ TEST_CASE("cloud gc preserves archived data after truncate",
     store->Stop();
 
     uint64_t backup_ts = utils::UnixTs<chrono::seconds>();
-    std::string backup_name = "manifest_" + std::to_string(backup_ts);
+    std::string backup_name = eloqstore::ArchiveName(backup_ts, current_term);
 
-    bool backup_ok =
-        MoveCloudFile(daemon_url, partition_remote, "manifest", backup_name);
+    bool backup_ok = MoveCloudFile(
+        daemon_url, partition_remote, current_manifest, backup_name);
     REQUIRE(backup_ok);
 
-    bool rollback_ok =
-        MoveCloudFile(daemon_url, partition_remote, archive_name, "manifest");
+    std::string rolled_manifest =
+        eloqstore::ManifestFileName(std::nullopt, archive_term);
+    bool rollback_ok = MoveCloudFile(
+        daemon_url, partition_remote, archive_name, rolled_manifest);
     REQUIRE(rollback_ok);
+    current_manifest = rolled_manifest;
+    current_term = archive_term;
 
     CleanupLocalStore(cloud_archive_opts);
 
@@ -108,13 +115,17 @@ TEST_CASE("cloud gc preserves archived data after truncate",
     tester.Validate();
     store->Stop();
 
-    bool restore_archive =
-        MoveCloudFile(daemon_url, partition_remote, "manifest", archive_name);
+    bool restore_archive = MoveCloudFile(
+        daemon_url, partition_remote, current_manifest, archive_name);
     REQUIRE(restore_archive);
 
-    bool restore_manifest =
-        MoveCloudFile(daemon_url, partition_remote, backup_name, "manifest");
+    std::string restored_manifest =
+        eloqstore::ManifestFileName(std::nullopt, original_term);
+    bool restore_manifest = MoveCloudFile(
+        daemon_url, partition_remote, backup_name, restored_manifest);
     REQUIRE(restore_manifest);
+    current_manifest = restored_manifest;
+    current_term = original_term;
 
     CleanupLocalStore(cloud_archive_opts);
 
@@ -234,16 +245,15 @@ TEST_CASE("easy cloud rollback to archive", "[cloud][archive]")
         cloud_archive_opts.cloud_store_daemon_url,
         cloud_archive_opts.cloud_store_path + "/" + test_tbl_id.ToString());
 
-    std::string archive_name;
-    for (const auto &filename : cloud_files)
-    {
-        if (filename.find("manifest_") == 0)
-        {
-            archive_name = filename;
-            break;
-        }
-    }
+    eloqstore::Term current_term = 0;
+    std::string current_manifest =
+        FindManifestFile(cloud_files, false, &current_term);
+    eloqstore::Term original_term = current_term;
+    eloqstore::Term archive_term = 0;
+    std::string archive_name =
+        FindManifestFile(cloud_files, true, &archive_term);
     REQUIRE(!archive_name.empty());
+    REQUIRE(!current_manifest.empty());
 
     // Insert more data after archive
     tester.Upsert(100, 200);
@@ -257,23 +267,29 @@ TEST_CASE("easy cloud rollback to archive", "[cloud][archive]")
 
     // Create backup with timestamp
     uint64_t backup_ts = utils::UnixTs<chrono::seconds>();
-    std::string backup_name = "manifest_" + std::to_string(backup_ts);
+    std::string backup_name = eloqstore::ArchiveName(backup_ts, current_term);
 
     // Move current manifest to backup
+    const std::string cloud_partition =
+        cloud_archive_opts.cloud_store_path + "/" + test_tbl_id.ToString();
     bool backup_success = MoveCloudFile(
         cloud_archive_opts.cloud_store_daemon_url,
-        cloud_archive_opts.cloud_store_path + "/" + test_tbl_id.ToString(),
-        "manifest",
+        cloud_partition,
+        current_manifest,
         backup_name);
     REQUIRE(backup_success);
 
     // Move archive to manifest
+    std::string rolled_manifest =
+        eloqstore::ManifestFileName(std::nullopt, archive_term);
     bool rollback_success = MoveCloudFile(
         cloud_archive_opts.cloud_store_daemon_url,
-        cloud_archive_opts.cloud_store_path + "/" + test_tbl_id.ToString(),
+        cloud_partition,
         archive_name,
-        "manifest");
+        rolled_manifest);
     REQUIRE(rollback_success);
+    current_manifest = rolled_manifest;
+    current_term = archive_term;
 
     // Clean local cache and restart store
     CleanupLocalStore(cloud_archive_opts);
@@ -290,9 +306,9 @@ TEST_CASE("easy cloud rollback to archive", "[cloud][archive]")
     // Restore to full dataset by moving backup back to manifest
     bool restore_success = MoveCloudFile(
         cloud_archive_opts.cloud_store_daemon_url,
-        cloud_archive_opts.cloud_store_path + "/" + test_tbl_id.ToString(),
+        cloud_partition,
         backup_name,
-        "manifest");
+        eloqstore::ManifestFileName(std::nullopt, original_term));
     REQUIRE(restore_success);
 
     CleanupLocalStore(cloud_archive_opts);
@@ -361,35 +377,40 @@ TEST_CASE("enhanced cloud rollback with mix operations", "[cloud][archive]")
         cloud_archive_opts.cloud_store_path + "/" + test_tbl_id.ToString();
 
     // Create backup with timestamp
+    std::vector<std::string> initial_cloud_files =
+        ListCloudFiles(daemon_url, cloud_path);
+    eloqstore::Term current_term = 0;
+    std::string current_manifest =
+        FindManifestFile(initial_cloud_files, false, &current_term);
+    REQUIRE(!current_manifest.empty());
+    eloqstore::Term original_term = current_term;
+
     uint64_t backup_ts = utils::UnixTs<chrono::seconds>();
-    std::string backup_name = "manifest_" + std::to_string(backup_ts);
+    std::string backup_name = eloqstore::ArchiveName(backup_ts, current_term);
 
     // Backup current manifest
     bool backup_ok =
-        MoveCloudFile(daemon_url, cloud_path, "manifest", backup_name);
+        MoveCloudFile(daemon_url, cloud_path, current_manifest, backup_name);
     REQUIRE(backup_ok);
 
     // List cloud files to find the archive file
     std::vector<std::string> cloud_files =
         ListCloudFiles(daemon_url, cloud_path);
 
-    // Find archive file (starts with "manifest_")
-    std::string archive_name;
-    for (const auto &filename : cloud_files)
-    {
-        if (filename.starts_with("manifest_") && filename != backup_name)
-        {
-            archive_name = filename;
-            break;
-        }
-    }
+    eloqstore::Term archive_term = 0;
+    std::string archive_name =
+        FindManifestFile(cloud_files, true, &archive_term);
 
     // Rollback to archive if found
     bool rollback_ok = false;
     if (!archive_name.empty())
     {
-        rollback_ok =
-            MoveCloudFile(daemon_url, cloud_path, archive_name, "manifest");
+        std::string rolled_manifest =
+            eloqstore::ManifestFileName(std::nullopt, archive_term);
+        rollback_ok = MoveCloudFile(
+            daemon_url, cloud_path, archive_name, rolled_manifest);
+        current_manifest = rolled_manifest;
+        current_term = archive_term;
     }
 
     // Clean up local store
@@ -407,8 +428,11 @@ TEST_CASE("enhanced cloud rollback with mix operations", "[cloud][archive]")
         store->Stop();
 
         // Restore backup to get back to phase 2 dataset
-        bool restore_ok =
-            MoveCloudFile(daemon_url, cloud_path, backup_name, "manifest");
+        bool restore_ok = MoveCloudFile(daemon_url,
+                                        cloud_path,
+                                        backup_name,
+                                        eloqstore::ManifestFileName(
+                                            std::nullopt, original_term));
         REQUIRE(restore_ok);
 
         CleanupLocalStore(cloud_archive_opts);

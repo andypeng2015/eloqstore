@@ -121,6 +121,25 @@ std::pair<RootMeta *, KvError> IndexPageManager::FindRoot(
         meta->manifest_size_ = replayer.file_size_;
         meta->next_expire_ts_ = 0;
         meta->compression_->LoadDictionary(std::move(replayer.dict_bytes_));
+        if (Options()->data_append_mode)
+        {
+            if (replayer.term_mapping_ != nullptr)
+            {
+                meta->page_id_term_mapping_ = replayer.term_mapping_;
+            }
+            else if (meta->page_id_term_mapping_ == nullptr)
+            {
+                meta->page_id_term_mapping_ =
+                    std::make_shared<FilePageIdTermMapping>();
+            }
+        }
+        else
+        {
+            meta->page_id_term_mapping_.reset();
+        }
+        IoMgr()->UpdateTermMapping(
+            tbl_id,
+            Options()->data_append_mode ? meta->page_id_term_mapping_ : nullptr);
         if (meta->ttl_root_id_ != MaxPageId)
         {
             // For simplicity, we initialize next_expire_ts_ to 1,
@@ -196,7 +215,6 @@ KvError IndexPageManager::MakeCowRoot(const TableIdent &tbl_ident,
                 cow_meta.page_id_term_mapping_ =
                     std::make_shared<FilePageIdTermMapping>(
                         *meta->page_id_term_mapping_);
-                cow_meta.page_id_term_mapping_
             }
             else
             {
@@ -263,6 +281,9 @@ void IndexPageManager::UpdateRoot(const TableIdent &tbl_ident,
     meta.next_expire_ts_ = new_meta.next_expire_ts_;
     meta.compression_ = std::move(new_meta.compression_);
     meta.page_id_term_mapping_ = std::move(new_meta.page_id_term_mapping_);
+    IoMgr()->UpdateTermMapping(
+        tbl_ident,
+        Options()->data_append_mode ? meta.page_id_term_mapping_ : nullptr);
 }
 
 std::pair<MemIndexPage *, KvError> IndexPageManager::FindPage(
@@ -386,6 +407,7 @@ void IndexPageManager::EvictRootIfEmpty(
     std::unordered_map<TableIdent, RootMeta>::iterator root_it)
 {
     RootMeta &meta = root_it->second;
+    const TableIdent &tbl_id = root_it->first;
 
     if (meta.mapper_ == nullptr)
     {
@@ -403,8 +425,6 @@ void IndexPageManager::EvictRootIfEmpty(
                 // Lock the rootmeta to prevent other FindRoot operations
                 meta.locked_ = true;
 
-                const TableIdent &tbl_id = root_it->first;
-
                 // Clean up the table from io manager first
 
                 // Note: it will also clean manifest when data_append = false
@@ -418,6 +438,7 @@ void IndexPageManager::EvictRootIfEmpty(
                 // meta.mapper_ and trigger MappingSnapshot destructor, but
                 // FreeMappingSnapshot will return early since the table is
                 // already erased
+                IoMgr()->UpdateTermMapping(tbl_id, nullptr);
                 tbl_roots_.erase(root_it);
 
                 // Note: No need to unlock since we've erased the entry
@@ -427,8 +448,9 @@ void IndexPageManager::EvictRootIfEmpty(
             // If mapping is not empty, we can directly erase the root since
             // ref_cnt == 1 means only the mapper itself holds the reference
 
-            DLOG(INFO) << "metadata of " << root_it->first
+            DLOG(INFO) << "metadata of " << tbl_id
                        << " is evicted (ref_cnt == 1)";
+            IoMgr()->UpdateTermMapping(tbl_id, nullptr);
             tbl_roots_.erase(root_it);
         }
         else

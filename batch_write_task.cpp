@@ -187,6 +187,7 @@ KvError BatchWriteTask::LeafLinkDelete()
 void BatchWriteTask::SetTerm(size_t term)
 {
     term_ = term;
+    SetManifestTerm(term);
 }
 
 

@@ -30,6 +30,25 @@ void WriteTask::Reset(const TableIdent &tbl_id)
     tbl_ident_ = tbl_id;
     write_err_ = KvError::NoError;
     wal_builder_.Reset();
+    manifest_term_ = 0;
+}
+
+void WriteTask::SetManifestTerm(Term term)
+{
+    manifest_term_ = term;
+}
+
+Term WriteTask::ManifestTerm() const
+{
+    if (manifest_term_ != 0)
+    {
+        return manifest_term_;
+    }
+    if (cow_meta_.page_id_term_mapping_ != nullptr)
+    {
+        return cow_meta_.page_id_term_mapping_->CurrentTerm();
+    }
+    return 0;
 }
 
 void WriteTask::Abort()
@@ -244,8 +263,10 @@ KvError WriteTask::FlushManifest()
                                   cow_meta_.ttl_root_id_,
                                   mapping,
                                   max_fp_id,
-                                  dict_bytes);
-        err = IoMgr()->SwitchManifest(tbl_ident_, snapshot);
+                                  dict_bytes,
+                                  cow_meta_.page_id_term_mapping_.get());
+        err = IoMgr()->SwitchManifest(
+            tbl_ident_, snapshot, ManifestTerm());
         CHECK_KV_ERR(err);
         cow_meta_.manifest_size_ = snapshot.size();
         cow_meta_.compression_->ClearDirty();

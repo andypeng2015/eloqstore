@@ -6,6 +6,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 #include "../common.h"
@@ -91,6 +92,47 @@ inline void CleanupStore(eloqstore::KvOptions opts)
     }
 }
 
+inline bool ParseManifestParts(const std::string &filename,
+                               std::optional<uint64_t> &ts,
+                               eloqstore::Term &term)
+{
+    return eloqstore::ParseManifestComponents(filename, ts, term);
+}
+
+inline std::string FindManifestFile(const std::vector<std::string> &files,
+                                    bool want_archive,
+                                    eloqstore::Term *term_out = nullptr)
+{
+    std::string best;
+    std::optional<uint64_t> best_ts;
+    eloqstore::Term best_term = 0;
+    for (const auto &name : files)
+    {
+        std::optional<uint64_t> ts;
+        eloqstore::Term term = 0;
+        if (!ParseManifestParts(name, ts, term))
+        {
+            continue;
+        }
+        if (want_archive != ts.has_value())
+        {
+            continue;
+        }
+        if (best.empty() || term > best_term ||
+            (term == best_term && ts.value_or(0) > best_ts.value_or(0)))
+        {
+            best = name;
+            best_term = term;
+            best_ts = ts;
+        }
+    }
+    if (term_out)
+    {
+        *term_out = best.empty() ? 0 : best_term;
+    }
+    return best;
+}
+
 // Helper function to send HTTP request to rclone server
 inline bool SendRcloneRequest(const std::string &daemon_url,
                               const std::string &operation,
@@ -105,19 +147,60 @@ inline bool SendRcloneRequest(const std::string &daemon_url,
     return result == 0;
 }
 
+std::vector<std::string> ListCloudFiles(const std::string &daemon_url,
+                                        const std::string &cloud_path,
+                                        const std::string &remote_path = "");
+
 // Helper function to move cloud file using rclone server
 inline bool MoveCloudFile(const std::string &daemon_url,
                           const std::string &cloud_path,
                           const std::string &src_file,
                           const std::string &dst_file)
 {
-    std::string src_path = cloud_path + "/" + src_file;
-    std::string dst_path = cloud_path + "/" + dst_file;
+    std::string actual_src = src_file;
+    std::string actual_dst = dst_file;
+
+    auto slash = cloud_path.find_last_of('/');
+    std::string fs_path = cloud_path;
+    std::string remote_dir;
+    if (slash != std::string::npos)
+    {
+        fs_path = cloud_path.substr(0, slash);
+        remote_dir = cloud_path.substr(slash + 1);
+    }
+
+    if (src_file == eloqstore::FileNameManifest)
+    {
+        auto files = ListCloudFiles(daemon_url, fs_path, remote_dir);
+        eloqstore::Term term = 0;
+        actual_src = FindManifestFile(files, false, &term);
+        if (actual_src.empty())
+        {
+            return false;
+        }
+    }
+
+    if (dst_file == eloqstore::FileNameManifest)
+    {
+        std::optional<uint64_t> ts;
+        eloqstore::Term term = 0;
+        if (ParseManifestParts(actual_src, ts, term))
+        {
+            actual_dst = eloqstore::ManifestFileName(std::nullopt, term);
+        }
+        else
+        {
+            actual_dst = eloqstore::ManifestFileName(std::nullopt, 0);
+        }
+    }
+
+    std::string src_path = cloud_path + "/" + actual_src;
+    std::string dst_path = cloud_path + "/" + actual_dst;
 
     std::string json_data = "{\"srcFs\":\"" + cloud_path +
-                            "\",\"srcRemote\":\"" + src_file +
+                            "\",\"srcRemote\":\"" + actual_src +
                             "\",\"dstFs\":\"" + cloud_path +
-                            "\",\"dstRemote\":\"" + dst_file + "\"}";
+                            "\",\"dstRemote\":\"" + actual_dst + "\"}";
 
     return SendRcloneRequest(daemon_url, "operations/movefile", json_data);
 }
@@ -126,7 +209,7 @@ inline bool MoveCloudFile(const std::string &daemon_url,
 inline std::vector<std::string> ListCloudFiles(
     const std::string &daemon_url,
     const std::string &cloud_path,
-    const std::string &remote_path = "")
+    const std::string &remote_path)
 {
     std::vector<std::string> files;
 

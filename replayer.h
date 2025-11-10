@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -11,6 +12,8 @@
 
 namespace eloqstore
 {
+struct FilePageIdTermMapping;
+
 class Replayer
 {
 public:
@@ -25,6 +28,7 @@ public:
     FilePageId max_fp_id_;
     uint64_t file_size_;
     std::string dict_bytes_;
+    std::shared_ptr<FilePageIdTermMapping> term_mapping_{nullptr};
 
 private:
     KvError ParseNextRecord(ManifestFile *file);
