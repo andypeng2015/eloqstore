@@ -26,6 +26,104 @@ ObjectStore::~ObjectStore()
     curl_global_cleanup();
 }
 
+void ObjectStore::DownloadTask::SetupHttpRequest(AsyncHttpManager *manager,
+                                                 CURL *easy)
+{
+    Json::Value request;
+    request["srcFs"] =
+        manager->options_->cloud_store_path + "/" + tbl_id_->ToString();
+    request["srcRemote"] = filename_.data();
+
+    fs::path dir_path = tbl_id_->StorePath(manager->options_->store_path);
+    request["dstFs"] = dir_path.string();
+    request["dstRemote"] = filename_.data();
+
+    Json::StreamWriterBuilder builder;
+    json_data_ = Json::writeString(builder, request);
+
+    curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(easy, CURLOPT_URL, manager->daemon_download_url_.c_str());
+    curl_easy_setopt(easy, CURLOPT_POSTFIELDS, json_data_.c_str());
+    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
+
+    headers_ = headers;
+}
+
+void ObjectStore::UploadTask::SetupHttpRequest(AsyncHttpManager *manager,
+                                               CURL *easy)
+{
+    fs::path dir_path = tbl_id_->StorePath(manager->options_->store_path);
+
+    curl_mime *mime = curl_mime_init(easy);
+
+    for (const std::string &filename : filenames_)
+    {
+        std::string filepath = (dir_path / filename).string();
+        if (std::filesystem::exists(filepath))
+        {
+            curl_mimepart *part = curl_mime_addpart(mime);
+            curl_mime_name(part, "file");
+            curl_mime_filedata(part, filepath.c_str());
+        }
+    }
+
+    std::string fs_param =
+        manager->options_->cloud_store_path + "/" + tbl_id_->ToString();
+    std::string url = manager->daemon_upload_url_ + fs_param;
+
+    curl_easy_setopt(easy, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(easy, CURLOPT_MIMEPOST, mime);
+
+    mime_ = mime;
+}
+
+void ObjectStore::ListTask::SetupHttpRequest(AsyncHttpManager *manager,
+                                             CURL *easy)
+{
+    Json::Value request;
+    request["fs"] = manager->options_->cloud_store_path;
+    request["remote"] = remote_path_;
+    request["opt"] = Json::Value(Json::objectValue);
+    request["opt"]["recurse"] = false;
+    request["opt"]["showHash"] = false;
+
+    Json::StreamWriterBuilder builder;
+    json_data_ = Json::writeString(builder, request);
+
+    curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(easy, CURLOPT_URL, manager->daemon_list_url_.c_str());
+    curl_easy_setopt(easy, CURLOPT_POSTFIELDS, json_data_.c_str());
+    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
+
+    headers_ = headers;
+}
+
+void ObjectStore::DeleteTask::SetupHttpRequest(AsyncHttpManager *manager,
+                                               CURL *easy)
+{
+    Json::Value request;
+    request["fs"] = manager->options_->cloud_store_path;
+    request["remote"] = remote_path_;
+
+    Json::StreamWriterBuilder builder;
+    json_data_ = Json::writeString(builder, request);
+
+    curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers_ = headers;
+
+    const char *url = is_dir_ ? manager->daemon_purge_url_.c_str()
+                              : manager->daemon_delete_url_.c_str();
+
+    curl_easy_setopt(easy, CURLOPT_URL, url);
+    curl_easy_setopt(easy, CURLOPT_POSTFIELDS, json_data_.c_str());
+    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
+}
+
 AsyncHttpManager::AsyncHttpManager(const KvOptions *options)
     : daemon_url_(options->cloud_store_daemon_url),
       daemon_upload_url_(daemon_url_ + "/operations/uploadfile?remote=&fs="),
@@ -85,27 +183,7 @@ void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)
     curl_easy_setopt(easy, CURLOPT_PRIVATE, task);
     curl_easy_setopt(easy, CURLOPT_TIMEOUT, 300L);
 
-    switch (task->TaskType())
-    {
-    case ObjectStore::Task::Type::AsyncDownload:
-        SetupDownloadRequest(static_cast<ObjectStore::DownloadTask *>(task),
-                             easy);
-        break;
-    case ObjectStore::Task::Type::AsyncUpload:
-        SetupMultipartUpload(static_cast<ObjectStore::UploadTask *>(task),
-                             easy);
-        break;
-    case ObjectStore::Task::Type::AsyncList:
-        SetupListRequest(static_cast<ObjectStore::ListTask *>(task), easy);
-        break;
-    case ObjectStore::Task::Type::AsyncDelete:
-        SetupDeleteRequest(static_cast<ObjectStore::DeleteTask *>(task), easy);
-        break;
-    default:
-        LOG(ERROR) << "Unknown async task type";
-        curl_easy_cleanup(easy);
-        return;
-    }
+    task->SetupHttpRequest(this, easy);
 
     // add to multi handle
     CURLMcode mres = curl_multi_add_handle(multi_handle_, easy);
@@ -125,105 +203,6 @@ void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)
     {
         task->kv_task_->inflight_io_++;
     }
-}
-
-void AsyncHttpManager::SetupDownloadRequest(ObjectStore::DownloadTask *task,
-                                            CURL *easy)
-{
-    Json::Value request;
-    request["srcFs"] =
-        options_->cloud_store_path + "/" + task->tbl_id_->ToString();
-    request["srcRemote"] = task->filename_.data();
-
-    fs::path dir_path = task->tbl_id_->StorePath(options_->store_path);
-    request["dstFs"] = dir_path.string();
-    request["dstRemote"] = task->filename_.data();
-
-    Json::StreamWriterBuilder builder;
-    task->json_data_ = Json::writeString(builder, request);
-
-    struct curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-
-    curl_easy_setopt(easy, CURLOPT_URL, daemon_download_url_.c_str());
-    curl_easy_setopt(easy, CURLOPT_POSTFIELDS, task->json_data_.c_str());
-    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
-
-    task->headers_ = headers;
-}
-
-void AsyncHttpManager::SetupMultipartUpload(ObjectStore::UploadTask *task,
-                                            CURL *easy)
-{
-    fs::path dir_path = task->tbl_id_->StorePath(options_->store_path);
-
-    // use the new MIME API
-    curl_mime *mime = curl_mime_init(easy);
-
-    for (const std::string &filename : task->filenames_)
-    {
-        std::string filepath = (dir_path / filename).string();
-        if (std::filesystem::exists(filepath))
-        {
-            curl_mimepart *part = curl_mime_addpart(mime);
-            curl_mime_name(part, "file");
-            curl_mime_filedata(part, filepath.c_str());
-        }
-    }
-
-    std::string fs_param =
-        options_->cloud_store_path + "/" + task->tbl_id_->ToString();
-    std::string url = daemon_upload_url_ + fs_param;
-
-    curl_easy_setopt(easy, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(easy, CURLOPT_MIMEPOST, mime);
-
-    // store mine object for later clean
-    task->mime_ = mime;
-}
-
-void AsyncHttpManager::SetupListRequest(ObjectStore::ListTask *task, CURL *easy)
-{
-    Json::Value request;
-    request["fs"] = options_->cloud_store_path;
-    request["remote"] = task->remote_path_;
-    request["opt"] = Json::Value(Json::objectValue);
-    request["opt"]["recurse"] = false;
-    request["opt"]["showHash"] = false;
-
-    Json::StreamWriterBuilder builder;
-    task->json_data_ = Json::writeString(builder, request);
-
-    curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-
-    curl_easy_setopt(easy, CURLOPT_URL, daemon_list_url_.c_str());
-    curl_easy_setopt(easy, CURLOPT_POSTFIELDS, task->json_data_.c_str());
-    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
-
-    task->headers_ = headers;
-}
-void AsyncHttpManager::SetupDeleteRequest(ObjectStore::DeleteTask *task,
-                                          CURL *easy)
-{
-    Json::Value request;
-    request["fs"] = options_->cloud_store_path;
-    request["remote"] = task->remote_path_;
-
-    Json::StreamWriterBuilder builder;
-    task->json_data_ = Json::writeString(builder, request);
-
-    curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    task->headers_ = headers;
-
-    // Choose URL based on whether it's a directory or file
-    const char *url =
-        task->is_dir_ ? daemon_purge_url_.c_str() : daemon_delete_url_.c_str();
-
-    curl_easy_setopt(easy, CURLOPT_URL, url);
-    curl_easy_setopt(easy, CURLOPT_POSTFIELDS, task->json_data_.c_str());
-    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
 }
 
 void AsyncHttpManager::ProcessCompletedRequests()
@@ -330,10 +309,15 @@ void AsyncHttpManager::CleanupTaskResources(ObjectStore::Task *task)
 {
     curl_slist_free_all(task->headers_);
 
-    if (task->TaskType() == ObjectStore::Task::Type::AsyncUpload)
+    if (task->needs_mime_cleanup_)
     {
         auto upload_task = static_cast<ObjectStore::UploadTask *>(task);
-        curl_mime_free(upload_task->mime_);
+        if (upload_task->mime_)
+        {
+            curl_mime_free(upload_task->mime_);
+            upload_task->mime_ = nullptr;
+        }
+        task->needs_mime_cleanup_ = false;
     }
 }
 

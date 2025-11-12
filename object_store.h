@@ -40,14 +40,9 @@ public:
     public:
         Task() = default;
         virtual ~Task() = default;
-        enum class Type : uint8_t
-        {
-            AsyncDownload = 0,
-            AsyncUpload,
-            AsyncList,
-            AsyncDelete
-        };
-        virtual Type TaskType() = 0;
+
+        virtual void SetupHttpRequest(AsyncHttpManager *manager,
+                                      CURL *easy) = 0;
 
         KvError error_{KvError::NoError};
         std::string response_data_{};
@@ -66,6 +61,7 @@ public:
         }
 
     protected:
+        bool needs_mime_cleanup_{false};
         friend class ObjectStore;
         friend class AsyncHttpManager;
     };
@@ -74,11 +70,8 @@ public:
     {
     public:
         DownloadTask(const TableIdent *tbl_id, std::string_view filename)
-            : tbl_id_(tbl_id), filename_(filename) {};
-        Type TaskType() override
-        {
-            return Type::AsyncDownload;
-        };
+            : tbl_id_(tbl_id), filename_(filename){};
+        void SetupHttpRequest(AsyncHttpManager *manager, CURL *easy) override;
         const TableIdent *tbl_id_;
         std::string_view filename_;
     };
@@ -87,11 +80,12 @@ public:
     {
     public:
         UploadTask(const TableIdent *tbl_id, std::vector<std::string> filenames)
-            : tbl_id_(tbl_id), filenames_(std::move(filenames)) {};
-        Type TaskType() override
+            : tbl_id_(tbl_id), filenames_(std::move(filenames))
         {
-            return Type::AsyncUpload;
+            needs_mime_cleanup_ = true;
         }
+
+        void SetupHttpRequest(AsyncHttpManager *manager, CURL *easy) override;
 
         const TableIdent *tbl_id_;
         std::vector<std::string> filenames_;
@@ -104,11 +98,8 @@ public:
     {
     public:
         explicit ListTask(std::string_view remote_path)
-            : remote_path_(remote_path) {};
-        Type TaskType() override
-        {
-            return Type::AsyncList;
-        }
+            : remote_path_(remote_path){};
+        void SetupHttpRequest(AsyncHttpManager *manager, CURL *easy) override;
         std::string remote_path_;
     };
 
@@ -116,11 +107,8 @@ public:
     {
     public:
         explicit DeleteTask(std::string remote_path, bool is_dir = false)
-            : remote_path_(std::move(remote_path)), is_dir_(is_dir) {};
-        Type TaskType() override
-        {
-            return Type::AsyncDelete;
-        }
+            : remote_path_(std::move(remote_path)), is_dir_(is_dir){};
+        void SetupHttpRequest(AsyncHttpManager *manager, CURL *easy) override;
 
         std::string remote_path_;
         bool is_dir_{false};
@@ -151,11 +139,12 @@ public:
     }
 
 private:
+    friend class ObjectStore::DownloadTask;
+    friend class ObjectStore::UploadTask;
+    friend class ObjectStore::ListTask;
+    friend class ObjectStore::DeleteTask;
+
     void CleanupTaskResources(ObjectStore::Task *task);
-    void SetupMultipartUpload(ObjectStore::UploadTask *task, CURL *easy);
-    void SetupDownloadRequest(ObjectStore::DownloadTask *task, CURL *easy);
-    void SetupListRequest(ObjectStore::ListTask *task, CURL *easy);
-    void SetupDeleteRequest(ObjectStore::DeleteTask *task, CURL *easy);
     void ProcessPendingRetries();
     void ScheduleRetry(ObjectStore::Task *task,
                        std::chrono::steady_clock::duration delay);
