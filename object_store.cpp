@@ -312,12 +312,7 @@ void AsyncHttpManager::CleanupTaskResources(ObjectStore::Task *task)
     if (task->needs_mime_cleanup_)
     {
         auto upload_task = static_cast<ObjectStore::UploadTask *>(task);
-        if (upload_task->mime_)
-        {
-            curl_mime_free(upload_task->mime_);
-            upload_task->mime_ = nullptr;
-        }
-        task->needs_mime_cleanup_ = false;
+        curl_mime_free(upload_task->mime_);
     }
 }
 

@@ -70,7 +70,7 @@ public:
     {
     public:
         DownloadTask(const TableIdent *tbl_id, std::string_view filename)
-            : tbl_id_(tbl_id), filename_(filename){};
+            : tbl_id_(tbl_id), filename_(filename) {};
         void SetupHttpRequest(AsyncHttpManager *manager, CURL *easy) override;
         const TableIdent *tbl_id_;
         std::string_view filename_;
@@ -98,7 +98,7 @@ public:
     {
     public:
         explicit ListTask(std::string_view remote_path)
-            : remote_path_(remote_path){};
+            : remote_path_(remote_path) {};
         void SetupHttpRequest(AsyncHttpManager *manager, CURL *easy) override;
         std::string remote_path_;
     };
@@ -107,7 +107,7 @@ public:
     {
     public:
         explicit DeleteTask(std::string remote_path, bool is_dir = false)
-            : remote_path_(std::move(remote_path)), is_dir_(is_dir){};
+            : remote_path_(std::move(remote_path)), is_dir_(is_dir) {};
         void SetupHttpRequest(AsyncHttpManager *manager, CURL *easy) override;
 
         std::string remote_path_;
