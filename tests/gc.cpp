@@ -1,12 +1,18 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "common.h"
 #include "kv_options.h"
+#include "page.h"
+#include "root_meta.h"
 #include "test_utils.h"
 
 using namespace test_util;
@@ -87,6 +93,76 @@ bool CheckCloudPartitionExists(const eloqstore::KvOptions &opts,
 void WaitForGC(int seconds = 1)
 {
     std::this_thread::sleep_for(chrono::seconds(seconds));
+}
+
+std::string ReadFileFully(const fs::path &path)
+{
+    std::ifstream in(path, std::ios::binary);
+    REQUIRE(in.is_open());
+    return {std::istreambuf_iterator<char>(in),
+            std::istreambuf_iterator<char>()};
+}
+
+void WriteFileFully(const fs::path &path, std::string_view data)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(out.is_open());
+    out.write(data.data(), static_cast<std::streamsize>(data.size()));
+}
+
+TEST_CASE("compact cleans stale mappings when roots cleared", "[gc][local]")
+{
+    eloqstore::KvOptions opts = local_gc_opts;
+    CleanupStore(opts);
+
+    auto start_store = [&](const eloqstore::KvOptions &options)
+    {
+        auto store = std::make_unique<eloqstore::EloqStore>(options);
+        REQUIRE(store->Start() == eloqstore::KvError::NoError);
+        return store;
+    };
+
+    eloqstore::TableIdent tbl_id = {"gc_stale_compact", 1};
+
+    auto store = start_store(opts);
+    {
+        MapVerifier writer(tbl_id, store.get(), false);
+        writer.SetAutoClean(false);
+        writer.SetValueSize(1000);
+        writer.Upsert(0, 100);
+        writer.Validate();
+    }
+
+    store->Stop();
+    store.reset();
+
+    fs::path manifest_path = tbl_id.StorePath(opts.store_path);
+    manifest_path /= "manifest";
+    REQUIRE(fs::exists(manifest_path));
+
+    std::string manifest = ReadFileFully(manifest_path);
+    REQUIRE(manifest.size() >= eloqstore::ManifestBuilder::header_bytes);
+
+    uint32_t max_page = eloqstore::MaxPageId;
+    std::memcpy(manifest.data() + eloqstore::ManifestBuilder::offset_root,
+                &max_page,
+                sizeof(max_page));
+    std::memcpy(manifest.data() + eloqstore::ManifestBuilder::offset_ttl_root,
+                &max_page,
+                sizeof(max_page));
+    eloqstore::SetChecksum({manifest.data(), manifest.size()});
+    WriteFileFully(manifest_path, manifest);
+
+    store = start_store(opts);
+
+    eloqstore::CompactRequest compact_req;
+    compact_req.SetTableId(tbl_id);
+    store->ExecSync(&compact_req);
+    REQUIRE(compact_req.Error() == eloqstore::KvError::NoError);
+
+    store->Stop();
+    store.reset();
+    CleanupStore(opts);
 }
 
 // TEST_CASE("local mode truncate directory cleanup", "[gc][local]")

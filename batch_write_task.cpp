@@ -957,6 +957,7 @@ KvError BatchWriteTask::FinishIndexPage(DirtyIndexPage &prev,
     MemIndexPage *cur_page = shard->IndexManager()->AllocIndexPage();
     if (cur_page == nullptr)
     {
+        LOG(WARNING) << "FinishIndexPage: OutOfMem";
         return KvError::OutOfMem;
     }
     memcpy(cur_page->PagePtr(), page_view.data(), page_view.size());
@@ -1544,12 +1545,16 @@ std::pair<MemIndexPage *, KvError> BatchWriteTask::TruncateIndexPage(
     if (builder.IsEmpty())
     {
         // This index page is wholly deleted
+        FreePage(page_id);
+        LOG(FATAL) << "truncate index page not free page";
+
         return {nullptr, KvError::NoError};
     }
     // This index page is partially truncated
     MemIndexPage *new_page = shard->IndexManager()->AllocIndexPage();
     if (new_page == nullptr)
     {
+        LOG(WARNING) << "TruncateIndexPage: out of memory";
         return {nullptr, KvError::OutOfMem};
     }
     std::string_view page_view = builder.Finish();

@@ -46,6 +46,7 @@ private:
 
 KvError BackgroundWrite::CompactDataFile()
 {
+    LOG(INFO) << "start CompactDataFile on" << this->tbl_ident_;
     const KvOptions *opts = Options();
     assert(opts->data_append_mode);
     assert(opts->file_amplify_factor != 0);
@@ -57,8 +58,9 @@ KvError BackgroundWrite::CompactDataFile()
         static_cast<AppendAllocator *>(meta->mapper_->FilePgAllocator());
     uint32_t mapping_cnt = meta->mapper_->MappingCount();
 
-    // Ensure consistency between root_id and mapping_cnt
-    // When root_id == MaxPageId, mapping_cnt must be 0, and vice versa
+    // Ensure consistency between the mapping count and the available trees.
+    // mapping_cnt counts both the primary tree and the TTL tree, so we only
+    // expect it to be zero when both roots are invalid.
     if (mapping_cnt == 0)
     {
         // Update statistic.
@@ -67,7 +69,42 @@ KvError BackgroundWrite::CompactDataFile()
         TriggerFileGC();
         return KvError::NoError;
     }
-    CHECK((meta->root_id_ != MaxPageId) && (mapping_cnt != 0));
+
+    if ((meta->root_id_ == MaxPageId) && (meta->ttl_root_id_ == MaxPageId))
+    {
+        err = shard->IndexManager()->MakeCowRoot(tbl_ident_, cow_meta_);
+        CHECK_KV_ERR(err);
+
+        allocator = static_cast<AppendAllocator *>(
+            cow_meta_.mapper_->FilePgAllocator());
+        assert(mapping_cnt == cow_meta_.mapper_->MappingCount());
+
+        // Legacy manifests may miss FreePage calls and leave stale mappings
+        // without any reachable tree. Walk the mapper and clear them so the
+        // manifest can be updated.
+        MappingSnapshot *mapping = cow_meta_.mapper_->GetMapping();
+        for (PageId page_id = 0; page_id < mapping->mapping_tbl_.size();
+             page_id++)
+        {
+            uint64_t val = mapping->mapping_tbl_[page_id];
+            auto type = MappingSnapshot::GetValType(val);
+            if (type == MappingSnapshot::ValType::FilePageId ||
+                type == MappingSnapshot::ValType::SwizzlingPointer)
+            {
+                FreePage(page_id);
+            }
+        }
+
+        mapping_cnt = cow_meta_.mapper_->MappingCount();
+        CHECK_EQ(mapping_cnt, 0);
+
+        FilePageId max_fp_id = allocator->MaxFilePageId();
+        allocator->UpdateStat(max_fp_id >> opts->pages_per_file_shift, 0);
+        err = UpdateMeta();
+        CHECK_KV_ERR(err);
+        TriggerFileGC();
+        return KvError::NoError;
+    }
 
     const uint32_t pages_per_file = allocator->PagesPerFile();
     const double file_saf_limit = opts->file_amplify_factor;
@@ -86,10 +123,12 @@ KvError BackgroundWrite::CompactDataFile()
 
     err = shard->IndexManager()->MakeCowRoot(tbl_ident_, cow_meta_);
     CHECK_KV_ERR(err);
-    assert(cow_meta_.root_id_ != MaxPageId);
+
     PageMapper *mapper = cow_meta_.mapper_.get();
 
     allocator = static_cast<AppendAllocator *>(mapper->FilePgAllocator());
+    assert((cow_meta_.root_id_ != MaxPageId) ||
+           (cow_meta_.ttl_root_id_ != MaxPageId));
     assert(mapping_cnt == mapper->MappingCount());
 
     // Get all file page ids that are used by this version.

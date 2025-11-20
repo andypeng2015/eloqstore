@@ -572,6 +572,7 @@ KvError ToKvError(int err_no)
     case -ENOBUFS:
         return KvError::TryAgain;
     case -ENOMEM:
+        LOG(WARNING) << "Got ENOMEM";
         return KvError::OutOfMem;
     case -EBUSY:
         return KvError::Busy;

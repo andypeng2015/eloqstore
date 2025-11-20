@@ -255,6 +255,7 @@ std::pair<MemIndexPage *, KvError> IndexPageManager::FindPage(
             MemIndexPage *new_page = AllocIndexPage();
             if (new_page == nullptr)
             {
+                LOG(WARNING) << "Find page: out of memory";
                 return {nullptr, KvError::OutOfMem};
             }
             FilePageId file_page_id = mapping->ToFilePage(page_id);
