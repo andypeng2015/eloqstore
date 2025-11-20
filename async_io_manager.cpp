@@ -1033,7 +1033,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
     struct CloseReq : BaseReq
     {
         CloseReq(KvTask *task, LruFD::Ref fd)
-            : BaseReq(task), fd_ref_(std::move(fd)){};
+            : BaseReq(task), fd_ref_(std::move(fd)) {};
         LruFD::Ref fd_ref_;
         int fd_{LruFD::FdEmpty};
     };
@@ -1106,7 +1106,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
     struct UnregisterReq : BaseReq
     {
         UnregisterReq(KvTask *task, PendingClose *pending)
-            : BaseReq(task), pending_(pending){};
+            : BaseReq(task), pending_(pending) {};
         PendingClose *pending_;
         int placeholder_{-1};
     };
@@ -1201,7 +1201,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
             }
         }
     }
-    LOG(INFO) << "Close files";
+    DLOG(INFO) << "Close files";
     return close_err;
 }
 
