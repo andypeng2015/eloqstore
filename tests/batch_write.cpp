@@ -60,7 +60,6 @@ TEST_CASE("truncate from the first key", "[batch_write]")
         verify.ExecWrite(&batch_write_req);
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(6000));
 }
 
 TEST_CASE("truncate twice overflow values", "[batch_write]")
@@ -88,14 +87,13 @@ TEST_CASE("truncate twice overflow values", "[batch_write]")
         batch_write_req.SetArgs(tbl_id, "40000");
         verify.ExecWrite(&batch_write_req);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(6000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     {
         eloqstore::TruncateRequest batch_write_req;
         std::vector<eloqstore::WriteDataEntry> entries;
         batch_write_req.SetArgs(tbl_id, "1");
         verify.ExecWrite(&batch_write_req);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(6000));
 }
 
 TEST_CASE("batch write with big key", "[batch_write]")
