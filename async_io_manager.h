@@ -148,7 +148,7 @@ public:
     KvError ReadArchiveFile(const std::string &file_path, std::string &content);
     KvError DeleteFiles(const std::vector<std::string> &file_paths);
     KvError CloseFiles(const TableIdent &tbl_id,
-                       std::span<const FileId> file_ids);
+                       const std::span<FileId> file_ids);
 
     void CleanManifest(const TableIdent &tbl_id) override;
 
@@ -300,14 +300,14 @@ protected:
     virtual KvError SyncFile(LruFD::Ref fd);
     virtual KvError SyncFiles(const TableIdent &tbl_id,
                               std::span<LruFD::Ref> fds);
-    virtual KvError CloseFiles(std::span<LruFD::Ref> fds);
+    KvError CloseFiles(std::span<LruFD::Ref> fds);
     virtual KvError CloseFile(LruFD::Ref fd_ref);
 
     static FdIdx GetRootFD(const TableIdent &tbl_id);
     /**
      * @brief Get file descripter if it is already opened.
      */
-    LruFD::Ref GetOpenedFD(const TableIdent &tbl_id, FileId file_id);
+    LruFD::Ref GetOpenedFD(const TableIdent &tbl_id, FileId file_id);   
     /**
      * @brief Open file if already exists. Only data file is opened with
      * O_DIRECT by default. Set `direct` to true to open manifest with O_DIRECT.

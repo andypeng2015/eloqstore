@@ -499,7 +499,7 @@ KvError IouringMgr::AbortWrite(const TableIdent &tbl_id)
 }
 
 KvError IouringMgr::CloseFiles(const TableIdent &tbl_id,
-                               std::span<const FileId> file_ids)
+                               const std::span<FileId> file_ids)
 {
     if (file_ids.empty())
     {
@@ -1040,10 +1040,9 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
 
     struct PendingClose
     {
-        size_t span_idx;
+        LruFD::Ref *fd_ref;
         LruFD *lru_fd;
         bool locked;
-        bool needs_unregister;
         int reg_idx;
     };
     // We need to do three things: flush dirty pages, unregister, and close.
@@ -1069,13 +1068,15 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
             continue;
         }
 
-        pendings.push_back(PendingClose{
-            i, lru_fd, true, lru_fd->reg_idx_ >= 0, lru_fd->reg_idx_});
+        pendings.push_back(
+            PendingClose{&fd_ref, lru_fd, true, lru_fd->reg_idx_});
         PendingClose &pending = pendings.back();
         if (lru_fd->dirty_)
         {
             const TableIdent *tbl_id = lru_fd->tbl_->tbl_id_;
-            dirty_groups[tbl_id].emplace_back(fd_ref);
+            auto [it, _] =
+                dirty_groups.try_emplace(tbl_id, std::vector<LruFD::Ref>{});
+            it->second.emplace_back(fd_ref);
         }
     }
 
@@ -1116,7 +1117,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
 
     for (PendingClose &pending : pendings)
     {
-        if (!pending.locked || !pending.needs_unregister || pending.reg_idx < 0)
+        if (!pending.locked || pending.reg_idx < 0)
         {
             continue;
         }
@@ -1145,7 +1146,6 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
             FreeRegisterIndex(pending->reg_idx);
             pending->lru_fd->reg_idx_ = -1;
             pending->reg_idx = -1;
-            pending->needs_unregister = false;
         }
     }
     if (unregister_err != KvError::NoError)
@@ -1165,7 +1165,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
             continue;
         }
         LruFD *lru_fd = pending.lru_fd;
-        LruFD::Ref &fd_ref = fds[pending.span_idx];
+        LruFD::Ref &fd_ref = *pending.fd_ref;
 
         CloseReq &req = reqs.emplace_back(ThdTask(), std::move(fd_ref));
         req.fd_ = lru_fd->fd_;
