@@ -1,5 +1,6 @@
 #include "shard.h"
 
+#include <butil/time.h>
 #include <glog/logging.h>
 
 #include <array>
@@ -396,6 +397,7 @@ void Shard::OnTaskFinished(KvTask *task)
 #ifdef ELOQ_MODULE_ENABLED
 void Shard::WorkOneRound()
 {
+    auto start_time = std::chrono::steady_clock::now();
     KvRequest *reqs[128];
     size_t nreqs = requests_.try_dequeue_bulk(reqs, std::size(reqs));
     for (size_t i = 0; i < nreqs; i++)
@@ -418,6 +420,13 @@ void Shard::WorkOneRound()
     io_mgr_->PollComplete();
 
     ExecuteReadyTasks();
+
+    auto stop_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                        stop_time - start_time)
+                        .count();
+    LOG(INFO) << "Shard#" << shard_id_ << " WorkOneRound took " << duration
+              << " us, processed " << nreqs << " requests.";
 }
 #endif
 
