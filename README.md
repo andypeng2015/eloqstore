@@ -127,7 +127,9 @@ make install
    eloq_store_cloud_store_path=eloqstore_cloud:dss-eloqstore-dev
    # Max amount of cached index pages (supports KB/MB/GB units, e.g., 32MB)
    eloq_store_index_buffer_pool_size=32MB
+   # Local disk space usage limit
    eloq_store_local_space_limit=10GB
+   # Cloud mode must use append mode.
    eloq_store_data_append_mode=true
    ```
 
