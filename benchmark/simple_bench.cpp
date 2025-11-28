@@ -27,6 +27,11 @@ DEFINE_uint32(write_interval, 0, "interval seconds between writes");
 DEFINE_uint32(read_per_part, 1, "concurrent read/scan requests per partition");
 DEFINE_uint32(test_secs, 60, "read/scan test time");
 DEFINE_uint32(read_thds, 1, "number of client threads send read/scan requests");
+DEFINE_bool(strict_seq_write,
+            false,
+            "strict sequential writes: step=1 and upsert-only to fill keys");
+// 新增：每次扫描的数据量（字节），为 0 表示沿用旧逻辑：随机起点，扫到末尾
+DEFINE_uint64(scan_bytes, 0, "bytes to scan per request; 0 scans to the end");
 
 using namespace std::chrono;
 
@@ -117,10 +122,10 @@ Writer::Writer(uint32_t id) : id_(id)
         std::string key;
         key.resize(sizeof(uint64_t));
         EncodeKey(key.data(), writing_key_);
-        writing_key_ += (rand_gen() % key_interval) + 1;
+        writing_key_ += FLAGS_strict_seq_write ? 1 : ((rand_gen() % key_interval) + 1);
         std::string value;
         value.resize(FLAGS_kv_size - sizeof(uint64_t));
-        if (rand_gen() % del_ratio == 0)
+        if (!FLAGS_strict_seq_write && (rand_gen() % del_ratio == 0))
         {
             entries.emplace_back(std::move(key),
                                  std::move(value),
@@ -147,10 +152,10 @@ void Writer::NextBatch()
     uint64_t ts = utils::UnixTs<milliseconds>();
     for (auto &entry : request_.batch_)
     {
-        writing_key_ += (rand_gen() % key_interval) + 1;
+        writing_key_ += FLAGS_strict_seq_write ? 1 : ((rand_gen() % key_interval) + 1);
         EncodeKey(entry.key_.data(), writing_key_);
         entry.timestamp_ = ts;
-        if (rand_gen() % del_ratio == 0)
+        if (!FLAGS_strict_seq_write && (rand_gen() % del_ratio == 0))
         {
             entry.op_ = eloqstore::WriteOp::Delete;
         }
@@ -215,8 +220,10 @@ void WriteLoop(eloqstore::EloqStore *store)
             const uint64_t num_kvs =
                 uint64_t(FLAGS_batch_size) * FLAGS_partitions;
             const uint64_t kvs_per_sec = num_kvs * 1000 / cost_ms;
+            const double upsert_ratio_current =
+                FLAGS_strict_seq_write ? 1.0 : upsert_ratio;
             const uint64_t mb_per_sec =
-                (static_cast<uint64_t>(kvs_per_sec * upsert_ratio) *
+                (static_cast<uint64_t>(kvs_per_sec * upsert_ratio_current) *
                  FLAGS_kv_size) >>
                 20;
             LOG(INFO) << "write speed " << kvs_per_sec << " kvs/s | cost "
@@ -242,8 +249,10 @@ void WriteLoop(eloqstore::EloqStore *store)
         const uint64_t num_kvs =
             static_cast<uint64_t>(FLAGS_batch_size) * FLAGS_write_batchs;
         const uint64_t kvs_per_sec = num_kvs * 1000 / total_cost_ms;
+        const double upsert_ratio_current =
+            FLAGS_strict_seq_write ? 1.0 : upsert_ratio;
         const uint64_t mb_per_sec =
-            (static_cast<uint64_t>(kvs_per_sec * upsert_ratio) *
+            (static_cast<uint64_t>(kvs_per_sec * upsert_ratio_current) *
              FLAGS_kv_size) >>
             20;
         LatencyMetrics metrics = CalculateLatencyMetrics(latencies_total);
@@ -371,14 +380,17 @@ public:
         eloqstore::TableIdent tbl_id(table, id % FLAGS_partitions);
         request_.SetPagination(page_size, 0);
         EncodeKey(begin_key_, 0);
-        std::string_view key(begin_key_, sizeof(uint64_t));
-        request_.SetArgs(std::move(tbl_id), key, {});
+        EncodeKey(end_key_, 0);
+        // SetArgs 在发送前按 scan_bytes 动态设置
+        // request_.SetArgs(std::move(tbl_id), std::string_view(begin_key_, sizeof(uint64_t)), {});
+        request_.SetTableId(std::move(tbl_id));
     };
     static const size_t page_size = 256;
     const size_t id_;
     uint64_t start_ts_{0};
     uint64_t latency_{0};
     char begin_key_[sizeof(uint64_t)];
+    char end_key_[sizeof(uint64_t)];
     eloqstore::ScanRequest request_;
     size_t kvs_cnt_{0};
 };
@@ -406,7 +418,31 @@ void ScanLoop(eloqstore::EloqStore *store, uint32_t thd_id)
 
     auto send_req = [&store, callback](Scanner *scanner)
     {
-        EncodeKey(scanner->begin_key_, rand_gen() % FLAGS_max_key);
+        const uint64_t val_size = FLAGS_kv_size - sizeof(uint64_t);
+        if (FLAGS_scan_bytes == 0)
+        {
+            // 兼容旧逻辑：随机起点，扫到末尾（end 为空）
+            uint64_t start = rand_gen() % FLAGS_max_key;
+            EncodeKey(scanner->begin_key_, start);
+            scanner->request_.SetArgs(scanner->request_.TableId(),
+                                      std::string_view(scanner->begin_key_, sizeof(uint64_t)),
+                                      std::string_view{} /* end empty scans to tail */);
+        }
+        else
+        {
+            // 计算覆盖的 KV 个数，至少为 1
+            uint64_t scan_kvs = std::max<uint64_t>(1, FLAGS_scan_bytes / val_size);
+            // 确保 end 不超过 max_key
+            uint64_t max_start = (FLAGS_max_key > scan_kvs) ? (FLAGS_max_key - scan_kvs) : 0;
+            uint64_t start = (max_start > 0) ? (rand_gen() % max_start) : 0;
+            uint64_t end = start + scan_kvs;
+            EncodeKey(scanner->begin_key_, start);
+            EncodeKey(scanner->end_key_, end);
+            scanner->request_.SetArgs(scanner->request_.TableId(),
+                                      std::string_view(scanner->begin_key_, sizeof(uint64_t)),
+                                      std::string_view(scanner->end_key_, sizeof(uint64_t)));
+        }
+
         scanner->start_ts_ = utils::UnixTs<microseconds>();
         store->ExecAsyn(&scanner->request_, uint64_t(scanner), callback);
     };
