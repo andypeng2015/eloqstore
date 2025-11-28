@@ -367,6 +367,13 @@ KvError DeleteUnreferencedCloudFiles(
     CloudStoreMgr *cloud_mgr)
 {
     std::vector<std::string> files_to_delete;
+    std::string filename_list;
+    size_t length = data_files.size();
+    for (const std::string &filename : data_files)
+    {
+        length += filename.length();
+    }
+    filename_list.reserve(length);
 
     for (const std::string &file_name : data_files)
     {
@@ -387,6 +394,8 @@ KvError DeleteUnreferencedCloudFiles(
         {
             std::string remote_path = tbl_id.ToString() + "/" + file_name;
             files_to_delete.push_back(remote_path);
+            filename_list += file_name;
+            filename_list += " ";
         }
         else
         {
@@ -409,6 +418,7 @@ KvError DeleteUnreferencedCloudFiles(
     if (files_to_delete.size() == data_files.size())
     {
         ObjectStore::DeleteTask delete_task(tbl_id.ToString(), true);
+        LOG(INFO) << "Purge entire directory: " << tbl_id.ToString();
         delete_task.SetKvTask(current_task);
         http_mgr->SubmitRequest(&delete_task);
         current_task->WaitIo();
@@ -422,6 +432,7 @@ KvError DeleteUnreferencedCloudFiles(
 
         return KvError::NoError;
     }
+    LOG(INFO) << "Delete files: " << filename_list;
 
     std::vector<ObjectStore::DeleteTask> delete_tasks;
     delete_tasks.reserve(files_to_delete.size());

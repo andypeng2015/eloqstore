@@ -2337,6 +2337,19 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
     {
         return KvError::NoError;
     }
+    std::string filename_list;
+    size_t length = filenames.size();
+    for (std::string &filename : filenames)
+    {
+        length += filename.length();
+    }
+    filename_list.reserve(length);
+    for (std::string &filename : filenames)
+    {
+        filename_list += filename;
+        filename_list += " ";
+    }
+    LOG(INFO) << "Uploading files: " << filename_list;
 
     KvTask *current_task = ThdTask();
 
