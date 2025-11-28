@@ -1971,9 +1971,9 @@ bool CloudStoreMgr::IsIdle()
 void CloudStoreMgr::Stop()
 {
     file_cleaner_.Shutdown();
-    for (auto &task_ptr : prewarmers_)
+    for (auto &prewarmer : prewarmers_)
     {
-        task_ptr->Shutdown();
+        prewarmer->Shutdown();
     }
 }
 
@@ -2002,9 +2002,9 @@ void CloudStoreMgr::RunPrewarm()
     {
         return;
     }
-    for (auto &task_ptr : prewarmers_)
+    for (auto &prewarmer : prewarmers_)
     {
-        task_ptr->Resume();
+        prewarmer->Resume();
     }
 }
 
@@ -2039,9 +2039,9 @@ void CloudStoreMgr::ResetPrewarmFiles(std::vector<PrewarmFile> files)
     prewarm_files_ = std::move(files);
     prewarm_next_index_ = 0;
     bool stop = prewarm_files_.empty();
-    for (auto &task_ptr : prewarmers_)
+    for (auto &prewarmer : prewarmers_)
     {
-        task_ptr->stop_.store(stop, std::memory_order_release);
+        prewarmer->stop_.store(stop, std::memory_order_release);
     }
 }
 
@@ -2053,9 +2053,9 @@ void CloudStoreMgr::ClearPrewarmFiles()
 
 void CloudStoreMgr::StopAllPrewarmTasks()
 {
-    for (auto &task_ptr : prewarmers_)
+    for (auto &prewarmer : prewarmers_)
     {
-        task_ptr->stop_.store(true, std::memory_order_release);
+        prewarmer->stop_.store(true, std::memory_order_release);
     }
 }
 
