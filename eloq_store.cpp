@@ -31,7 +31,7 @@
 namespace eloqstore
 {
 
-bool EloqStore::ValidateOptions(const KvOptions &opts)
+bool EloqStore::ValidateOptions(KvOptions &opts)
 {
     if ((opts.data_page_size & (page_align - 1)) != 0)
     {
@@ -69,31 +69,50 @@ bool EloqStore::ValidateOptions(const KvOptions &opts)
     {
         if (opts.local_space_limit == 0)
         {
-            LOG(ERROR)
-                << "Must set local_space_limit when cloud store is enabled ";
-            return false;
+            opts.local_space_limit = size_t(1) * TB;
+            LOG(WARNING) << "local_space_limit is not set in cloud mode, "
+                         << "resetting to default " << opts.local_space_limit;
         }
         if (!opts.data_append_mode)
         {
-            LOG(ERROR) << "append write mode should be enabled when cloud "
-                          "storage is enabled";
+            LOG(WARNING) << "append write mode should be enabled when cloud "
+                            "storage is enabled, enabling append mode";
+            opts.data_append_mode = true;
+        }
+
+        const uint64_t data_file_pages = 1ULL << opts.pages_per_file_shift;
+        const uint64_t data_file_bytes =
+            static_cast<uint64_t>(opts.data_page_size) * data_file_pages;
+        if (data_file_bytes == 0)
+        {
+            LOG(ERROR) << "Invalid data file size in cloud mode";
             return false;
         }
-        if (static_cast<uint64_t>(opts.fd_limit) *
-                static_cast<uint64_t>(opts.data_page_size) *
-                (1ULL << opts.pages_per_file_shift) >
-            opts.local_space_limit)
+
+        uint64_t max_fd_limit = opts.local_space_limit / data_file_bytes;
+        if (max_fd_limit == 0)
         {
-            LOG(ERROR) << "fd_limit * data_page_size * (1 << "
-                          "pages_per_file_shift) should be smaller than "
-                       << "local_space_limit";
-            return false;
+            opts.local_space_limit = data_file_bytes;
+            max_fd_limit = 1;
+            LOG(WARNING) << "local_space_limit is too small to hold one data "
+                         << "file, bumping to " << opts.local_space_limit;
+        }
+
+        if (opts.fd_limit > max_fd_limit)
+        {
+            LOG(WARNING) << "fd_limit * data_page_size * (1 << "
+                            "pages_per_file_shift) exceeds local_space_limit, "
+                         << "clamping fd_limit from " << opts.fd_limit << " to "
+                         << max_fd_limit;
+            opts.fd_limit = static_cast<uint32_t>(max_fd_limit);
         }
     }
     else if (opts.prewarm_cloud_cache)
     {
-        LOG(ERROR) << "prewarm_cloud_cache requires cloud_store_path to be set";
-        return false;
+        LOG(WARNING)
+            << "prewarm_cloud_cache requires cloud_store_path to be set, "
+               "disabling prewarm";
+        opts.prewarm_cloud_cache = false;
     }
 
     if (opts.data_append_mode)
@@ -117,7 +136,7 @@ bool EloqStore::ValidateOptions(const KvOptions &opts)
 
 EloqStore::EloqStore(const KvOptions &opts) : options_(opts), stopped_(true)
 {
-    if (!ValidateOptions(opts))
+    if (!ValidateOptions(options_))
     {
         LOG(FATAL) << "Invalid KvOptions configuration";
     }

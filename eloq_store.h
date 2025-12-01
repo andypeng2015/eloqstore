@@ -345,9 +345,11 @@ public:
     /**
      * @brief Validate KvOptions configuration.
      * @param opts The options to validate
+     * This routine may adjust some cloud-mode options to safe defaults instead
+     * of failing validation.
      * @return true if options are valid, false otherwise
      */
-    static bool ValidateOptions(const KvOptions &opts);
+    static bool ValidateOptions(KvOptions &opts);
 
     template <typename F>
     bool ExecAsyn(KvRequest *req, uint64_t data, F callback)
@@ -366,7 +368,7 @@ private:
                                    std::vector<TableIdent> &partitions) const;
     KvError InitStoreSpace();
 
-    const KvOptions options_;
+    KvOptions options_;
     std::vector<int> root_fds_;
     std::vector<std::unique_ptr<Shard>> shards_;
     std::atomic<bool> stopped_{true};

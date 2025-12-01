@@ -51,41 +51,51 @@ TEST_CASE("EloqStore ValidateOptions validates all parameters", "[eloq_store]")
     // Test data_page_size that is not page-aligned
     options.data_page_size = 4097;  // not page-aligned
     REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == false);
-    options.data_page_size = 4096;  // restore valid value
+    options = CreateValidOptions(test_dir);  // restore valid value
 
     // Test coroutine_stack_size that is not page-aligned
     options.coroutine_stack_size = 8193;  // not page-aligned
     REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == false);
-    options.coroutine_stack_size = 8192;  // restore valid value
+    options = CreateValidOptions(test_dir);  // restore valid value
 
     // Test invalid overflow_pointers
     options.overflow_pointers = 0;
     REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == false);
-    options.overflow_pointers = 4;  // restore valid value
+    options = CreateValidOptions(test_dir);  // restore valid value
 
     // Test invalid max_write_batch_pages
     options.max_write_batch_pages = 0;
     REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == false);
-    options.max_write_batch_pages = 16;  // restore valid value
+    options = CreateValidOptions(test_dir);  // restore valid value
 
-    // Test cloud storage configuration - local space limit
-    options.local_space_limit =
-        0;  // must set local space limit in cloud storage mode
+    // Cloud storage configuration: auto fix local space limit and append mode
     options.cloud_store_path = "test";
-    REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == false);
-    options.local_space_limit = 1024 * 1024 * 1024;
-    options.cloud_store_path = "";
-
+    options.local_space_limit = 0;
+    options.data_append_mode = false;
     REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == true);
+    REQUIRE(options.local_space_limit == size_t(1) * eloqstore::TB);
+    REQUIRE(options.data_append_mode == true);
 
+    // fd_limit is clamped when exceeding local space budget in cloud mode
+    options = CreateValidOptions(test_dir);
     options.local_space_limit = 10ULL * 1024 * 1024 * 1024;
     options.fd_limit = 1000000;
     options.pages_per_file_shift = 12;
     options.data_page_size = 4096;
     options.data_append_mode = true;
     options.cloud_store_path = "test";
+    REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == true);
+    const uint64_t per_file =
+        static_cast<uint64_t>(options.data_page_size) *
+        (1ULL << options.pages_per_file_shift);
+    REQUIRE(options.fd_limit ==
+            static_cast<uint32_t>(options.local_space_limit / per_file));
 
-    REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == false);
+    // prewarm without cloud path is disabled automatically
+    options = CreateValidOptions(test_dir);
+    options.prewarm_cloud_cache = true;
+    REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == true);
+    REQUIRE(options.prewarm_cloud_cache == false);
 
     CleanupTestDir(test_dir);
 }
