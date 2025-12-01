@@ -85,9 +85,8 @@ TEST_CASE("EloqStore ValidateOptions validates all parameters", "[eloq_store]")
     options.data_append_mode = true;
     options.cloud_store_path = "test";
     REQUIRE(eloqstore::EloqStore::ValidateOptions(options) == true);
-    const uint64_t per_file =
-        static_cast<uint64_t>(options.data_page_size) *
-        (1ULL << options.pages_per_file_shift);
+    const uint64_t per_file = static_cast<uint64_t>(options.data_page_size) *
+                              (1ULL << options.pages_per_file_shift);
     REQUIRE(options.fd_limit ==
             static_cast<uint32_t>(options.local_space_limit / per_file));
 
