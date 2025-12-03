@@ -53,7 +53,7 @@ class EloqStore;
 class AsyncIoManager
 {
 public:
-    explicit AsyncIoManager(const KvOptions *opts) : options_(opts) {};
+    explicit AsyncIoManager(const KvOptions *opts) : options_(opts){};
     virtual ~AsyncIoManager() = default;
     static std::unique_ptr<AsyncIoManager> Instance(const EloqStore *store,
                                                     uint32_t fd_limit);
@@ -157,8 +157,8 @@ public:
 
     KvError ReadArchiveFile(const std::string &file_path, std::string &content);
     KvError DeleteFiles(const std::vector<std::string> &file_paths);
-    KvError CloseFiles(const TableIdent &tbl_id,
-                       const std::span<FileId> file_ids);
+    virtual KvError CloseFiles(const TableIdent &tbl_id,
+                               const std::span<FileId> file_ids);
 
     void CleanManifest(const TableIdent &tbl_id) override;
 
@@ -226,7 +226,7 @@ protected:
 
     struct BaseReq
     {
-        explicit BaseReq(KvTask *task = nullptr) : task_(task) {};
+        explicit BaseReq(KvTask *task = nullptr) : task_(task){};
         KvTask *task_;
         int res_{0};
         uint32_t flags_{0};
@@ -310,12 +310,11 @@ protected:
     virtual KvError SyncFile(LruFD::Ref fd);
     virtual KvError SyncFiles(const TableIdent &tbl_id,
                               std::span<LruFD::Ref> fds);
-    KvError CloseFiles(std::span<LruFD::Ref> fds);
+    virtual KvError CloseFiles(std::span<LruFD::Ref> fds);
     virtual KvError CloseFile(LruFD::Ref fd_ref);
     std::pair<bool, bool> HasOtherFile(
         const TableIdent &tbl_id,
         std::vector<std::string> *file_names = nullptr) const;
-    void ClosePartitionFiles(const TableIdent &tbl_id);
 
     static FdIdx GetRootFD(const TableIdent &tbl_id);
     /**
@@ -435,8 +434,6 @@ private:
     KvError DownloadFile(const TableIdent &tbl_id, FileId file_id);
     KvError UploadFiles(const TableIdent &tbl_id,
                         std::vector<std::string> filenames);
-    void RemoveCachedFileEntry(const TableIdent &tbl_id,
-                               const std::string &filename);
 
     bool DequeClosedFile(const FileKey &key);
     void EnqueClosedFile(FileKey key);
@@ -488,7 +485,7 @@ private:
     class FileCleaner : public KvTask
     {
     public:
-        explicit FileCleaner(CloudStoreMgr *io_mgr) : io_mgr_(io_mgr) {};
+        explicit FileCleaner(CloudStoreMgr *io_mgr) : io_mgr_(io_mgr){};
         TaskType Type() const override;
         void Run();
         void Shutdown();
@@ -553,7 +550,7 @@ public:
     class Manifest : public ManifestFile
     {
     public:
-        explicit Manifest(std::string_view content) : content_(content) {};
+        explicit Manifest(std::string_view content) : content_(content){};
         KvError Read(char *dst, size_t n) override;
         void Skip(size_t n);
 

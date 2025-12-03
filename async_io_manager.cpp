@@ -234,7 +234,7 @@ KvError IouringMgr::ReadPages(const TableIdent &tbl_id,
             : BaseReq(task),
               fd_ref_(std::move(fd)),
               offset_(offset),
-              page_(true){};
+              page_(true) {};
 
         LruFD::Ref fd_ref_;
         uint32_t offset_;
@@ -534,24 +534,12 @@ KvError IouringMgr::CloseFiles(const TableIdent &tbl_id,
 void IouringMgr::CleanManifest(const TableIdent &tbl_id)
 {
     auto [has_data_files, has_archive_files] = HasOtherFile(tbl_id);
-    if (has_archive_files)
+    if (has_archive_files || has_data_files)
     {
         DLOG(INFO) << "Skip cleaning manifest for " << tbl_id
-                   << " because archive files are present";
+                   << " because archive/data files are present";
         return;
     }
-
-    CHECK(!has_data_files) << "Table " << tbl_id
-                           << " still has data files without archives";
-
-    ClosePartitionFiles(tbl_id);
-
-    if (auto it = tables_.find(tbl_id);
-        it != tables_.end() && it->second.fds_.empty())
-    {
-        tables_.erase(it);
-    }
-
     KvError dir_err = KvError::NoError;
     {
         auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
@@ -738,7 +726,7 @@ std::pair<IouringMgr::LruFD::Ref, KvError> IouringMgr::OpenOrCreateFD(
         fd = OpenFile(tbl_id, file_id, direct);
         if (fd == -ENOENT && create)
         {
-            // This must be data file because manifest should always be
+            // This must be data  file because manifest should always be
             // created by call WriteSnapshot.
             assert(file_id <= LruFD::kMaxDataFile);
             auto [dfd_ref, err] = OpenOrCreateFD(tbl_id, LruFD::kDirectory);
@@ -1014,7 +1002,7 @@ KvError IouringMgr::SyncFiles(const TableIdent &tbl_id,
     struct FsyncReq : BaseReq
     {
         FsyncReq(KvTask *task, LruFD::Ref fd)
-            : BaseReq(task), fd_ref_(std::move(fd)){};
+            : BaseReq(task), fd_ref_(std::move(fd)) {};
         LruFD::Ref fd_ref_;
     };
 
@@ -1060,7 +1048,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
     struct CloseReq : BaseReq
     {
         CloseReq(KvTask *task, LruFD::Ref fd)
-            : BaseReq(task), fd_ref_(std::move(fd)) {};
+            : BaseReq(task), fd_ref_(std::move(fd)){};
         LruFD::Ref fd_ref_;
         int fd_{LruFD::FdEmpty};
     };
@@ -1135,7 +1123,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
     struct UnregisterReq : BaseReq
     {
         UnregisterReq(KvTask *task, PendingClose *pending)
-            : BaseReq(task), pending_(pending) {};
+            : BaseReq(task), pending_(pending){};
         PendingClose *pending_;
         int placeholder_{-1};
     };
@@ -1317,44 +1305,6 @@ KvError IouringMgr::CloseFile(LruFD::Ref fd_ref)
     lru_fd->fd_ = LruFD::FdEmpty;
     lru_fd->mu_.Unlock();
     return KvError::NoError;
-}
-
-void IouringMgr::ClosePartitionFiles(const TableIdent &tbl_id)
-{
-    auto tbl_it = tables_.find(tbl_id);
-    if (tbl_it == tables_.end())
-    {
-        return;
-    }
-
-    std::vector<FileId> file_ids;
-    file_ids.reserve(tbl_it->second.fds_.size());
-    for (const auto &[file_id, _] : tbl_it->second.fds_)
-    {
-        file_ids.emplace_back(file_id);
-    }
-
-    for (FileId file_id : file_ids)
-    {
-        auto current_tbl_it = tables_.find(tbl_id);
-        if (current_tbl_it == tables_.end())
-        {
-            break;
-        }
-        auto fd_it = current_tbl_it->second.fds_.find(file_id);
-        if (fd_it == current_tbl_it->second.fds_.end())
-        {
-            continue;
-        }
-
-        LruFD::Ref fd_ref(&fd_it->second, this);
-        KvError err = CloseFile(std::move(fd_ref));
-        if (err != KvError::NoError)
-        {
-            LOG(WARNING) << "Failed to close file " << file_id << " for table "
-                         << tbl_id << ": " << ErrorString(err);
-        }
-    }
 }
 
 bool IouringMgr::EvictFD()
@@ -2261,88 +2211,6 @@ KvError CloudStoreMgr::CreateArchive(const TableIdent &tbl_id,
     return err;
 }
 
-void CloudStoreMgr::CleanManifest(const TableIdent &tbl_id)
-{
-    std::vector<std::string> files_to_remove;
-    auto [has_data_files, has_archive_files] =
-        HasOtherFile(tbl_id, &files_to_remove);
-    if (has_archive_files)
-    {
-        DLOG(INFO) << "Skip cleaning manifest for " << tbl_id
-                   << " because archive files are present";
-        return;
-    }
-
-    fs::path dir_path = tbl_id.StorePath(options_->store_path);
-    const fs::path manifest_path = dir_path / FileNameManifest;
-    const bool manifest_existed = fs::exists(manifest_path);
-    files_to_remove.emplace_back(FileNameManifest);
-
-    ClosePartitionFiles(tbl_id);
-
-    if (auto it = tables_.find(tbl_id);
-        it != tables_.end() && it->second.fds_.empty())
-    {
-        tables_.erase(it);
-    }
-
-    bool manifest_deleted = false;
-
-    if (!files_to_remove.empty())
-    {
-        std::vector<std::string> absolute_paths;
-        absolute_paths.reserve(files_to_remove.size());
-        for (const std::string &name : files_to_remove)
-        {
-            absolute_paths.emplace_back((dir_path / name).string());
-            if (name != FileNameManifest)
-            {
-                RemoveCachedFileEntry(tbl_id, name);
-                size_t file_size = EstimateFileSize(name);
-                used_local_space_ =
-                    file_size > used_local_space_ ? 0 : used_local_space_ - file_size;
-            }
-            else
-            {
-                RemoveCachedFileEntry(tbl_id, name);
-            }
-        }
-        KvError del_err = DeleteFiles(absolute_paths);
-        if (del_err != KvError::NoError)
-        {
-            LOG(WARNING) << "Failed to delete cached files for table "
-                         << tbl_id << ": " << ErrorString(del_err);
-        }
-        manifest_deleted = manifest_existed && !fs::exists(manifest_path);
-    }
-
-    FdIdx root_fd = GetRootFD(tbl_id);
-    std::string dir_name = tbl_id.ToString();
-    int dir_res = UnlinkAt(root_fd, dir_name.c_str(), true);
-    if (dir_res < 0)
-    {
-        if (dir_res == -ENOENT)
-        {
-            DLOG(INFO) << "Directory " << dir_name
-                       << " already removed while cleaning manifest";
-        }
-        else if (dir_res == -ENOTEMPTY)
-        {
-            DLOG(INFO) << "Directory " << dir_name
-                       << " is not empty, skip removing";
-        }
-        else
-        {
-            LOG(WARNING) << "Failed to delete directory " << dir_name << " : "
-                         << strerror(-dir_res);
-        }
-    }
-    else
-    {
-        DLOG(INFO) << "Successfully deleted directory " << dir_name;
-    }
-}
-
 int CloudStoreMgr::CreateFile(LruFD::Ref dir_fd, FileId file_id)
 {
     size_t size = options_->DataFileSize();
@@ -2480,6 +2348,7 @@ KvError CloudStoreMgr::SyncFiles(const TableIdent &tbl_id,
     return UploadFiles(tbl_id, std::move(filenames));
 }
 
+
 KvError CloudStoreMgr::CloseFile(LruFD::Ref fd)
 {
     KvError err = IouringMgr::CloseFile(fd);
@@ -2493,26 +2362,6 @@ KvError CloudStoreMgr::CloseFile(LruFD::Ref fd)
     return KvError::NoError;
 }
 
-void CloudStoreMgr::RemoveCachedFileEntry(const TableIdent &tbl_id,
-                                          const std::string &filename)
-{
-    FileKey key;
-    key.tbl_id_ = tbl_id;
-    key.filename_ = filename;
-    auto it = closed_files_.find(key);
-    if (it == closed_files_.end())
-    {
-        return;
-    }
-    CachedFile *file = &it->second;
-    if (!file->evicting_)
-    {
-        file->evicting_ = true;
-    }
-    file->Deque();
-    file->waiting_.Wake();
-    closed_files_.erase(it);
-}
 
 std::string CloudStoreMgr::ToFilename(FileId file_id)
 {

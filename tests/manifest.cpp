@@ -323,111 +323,100 @@ TEST_CASE("enhanced rollback with mix operations", "[archive]")
     tester.Validate();
 }
 
-void RunManifestEvictionTest(const eloqstore::KvOptions &opts,
-                             std::string_view mode,
-                             bool has_archive)
-{
-    INFO("manifest-eviction mode=" << mode << " has_archive=" << has_archive);
-
-    eloqstore::KvOptions case_opts = opts;
-    case_opts.index_buffer_pool_size = 15 * 4 * KB;
-    case_opts.file_amplify_factor = 2;
-    case_opts.data_append_mode = true;
-    if (case_opts.store_path.empty())
-    {
-        case_opts.store_path = {test_path};
-    }
-
-    eloqstore::EloqStore *store = InitStore(case_opts);
-    std::string table_prefix = "manifest-evict-";
-    table_prefix.append(has_archive ? "archive-" : "plain-");
-    table_prefix.append(mode);
-
-    eloqstore::TableIdent partition_a{table_prefix, 1};
-    eloqstore::TableIdent partition_b{table_prefix, 2};
-
-    MapVerifier verifier_a(partition_a, store, false);
-    MapVerifier verifier_b(partition_b, store, false);
-
-    const std::string base_path = case_opts.store_path.empty()
-                                      ? std::string(test_path)
-                                      : case_opts.store_path[0];
-    const fs::path partition_a_path =
-        fs::path(base_path) / partition_a.ToString();
-    const fs::path manifest_path = partition_a_path / "manifest";
-
-    verifier_a.Upsert(0, 100);
-    verifier_a.Validate();
-    REQUIRE(fs::exists(manifest_path));
-
-    fs::path archive_path;
-    if (has_archive)
-    {
-        archive_path = partition_a_path / ArchiveName(123456789);
-        fs::copy_file(
-            manifest_path, archive_path, fs::copy_options::overwrite_existing);
-        REQUIRE(fs::exists(archive_path));
-    }
-
-    verifier_a.Truncate(0, true);
-    verifier_a.Validate();
-    REQUIRE(fs::exists(manifest_path));
-
-    bool manifest_deleted = false;
-    const int max_iterations = 100;
-
-    for (int iteration = 0; iteration < max_iterations; iteration++)
-    {
-        int start_key = iteration * 50;
-        int end_key = start_key + 50;
-        verifier_b.Upsert(start_key, end_key);
-        verifier_b.Validate();
-
-        if (!fs::exists(manifest_path))
-        {
-            manifest_deleted = true;
-            break;
-        }
-    }
-
-    if (has_archive)
-    {
-        REQUIRE_FALSE(manifest_deleted);
-        REQUIRE(fs::exists(manifest_path));
-        REQUIRE(fs::exists(partition_a_path));
-        if (!archive_path.empty())
-        {
-            REQUIRE(fs::exists(archive_path));
-            fs::remove(archive_path);
-        }
-    }
-    else
-    {
-        REQUIRE(manifest_deleted);
-        REQUIRE_FALSE(fs::exists(manifest_path));
-        REQUIRE_FALSE(fs::exists(partition_a_path));
-    }
-
-    verifier_b.Validate();
-    verifier_a.Upsert(0, 100);
-    verifier_a.Validate();
-}
-
 TEST_CASE("manifest deletion on rootmeta eviction", "[manifest][eviction]")
 {
-    auto run_case = [](const eloqstore::KvOptions &opts, std::string_view mode)
-    { RunManifestEvictionTest(opts, mode, false); };
+    auto RunManifestEvictionTest = [&](const eloqstore::KvOptions &opts,
+                                       std::string_view mode,
+                                       bool has_archive)
+    {
+        INFO("manifest-eviction mode=" << mode
+                                       << " has_archive=" << has_archive);
 
-    run_case(default_opts, "local");
-    run_case(cloud_options, "cloud");
-}
+        eloqstore::KvOptions case_opts = opts;
+        case_opts.index_buffer_pool_size = 15 * 4 * KB;
+        case_opts.file_amplify_factor = 2;
+        case_opts.data_append_mode = true;
+        if (case_opts.store_path.empty())
+        {
+            case_opts.store_path = {test_path};
+        }
 
-TEST_CASE("manifest deletion skipped when archives exist",
-          "[manifest][eviction]")
-{
-    auto run_case = [](const eloqstore::KvOptions &opts, std::string_view mode)
-    { RunManifestEvictionTest(opts, mode, true); };
+        eloqstore::EloqStore *store = InitStore(case_opts);
+        std::string table_prefix = "manifest-evict-";
+        table_prefix.append(has_archive ? "archive-" : "plain-");
+        table_prefix.append(mode);
 
-    run_case(default_opts, "local");
-    run_case(cloud_options, "cloud");
+        eloqstore::TableIdent partition_a{table_prefix, 1};
+        eloqstore::TableIdent partition_b{table_prefix, 2};
+
+        MapVerifier verifier_a(partition_a, store, false);
+        MapVerifier verifier_b(partition_b, store, false);
+
+        const std::string base_path = case_opts.store_path.empty()
+                                          ? std::string(test_path)
+                                          : case_opts.store_path[0];
+        const fs::path partition_a_path =
+            fs::path(base_path) / partition_a.ToString();
+        const fs::path manifest_path = partition_a_path / "manifest";
+
+        verifier_a.Upsert(0, 100);
+        verifier_a.Validate();
+        REQUIRE(fs::exists(manifest_path));
+
+        fs::path archive_path;
+        if (has_archive)
+        {
+            archive_path = partition_a_path / ArchiveName(123456789);
+            fs::copy_file(manifest_path,
+                          archive_path,
+                          fs::copy_options::overwrite_existing);
+            REQUIRE(fs::exists(archive_path));
+        }
+
+        verifier_a.Truncate(0, true);
+        verifier_a.Validate();
+        REQUIRE(fs::exists(manifest_path));
+
+        bool manifest_deleted = false;
+        const int max_iterations = 100;
+
+        for (int iteration = 0; iteration < max_iterations; iteration++)
+        {
+            int start_key = iteration * 50;
+            int end_key = start_key + 50;
+            verifier_b.Upsert(start_key, end_key);
+            verifier_b.Validate();
+
+            if (!fs::exists(manifest_path))
+            {
+                manifest_deleted = true;
+                break;
+            }
+        }
+
+        if (has_archive)
+        {
+            REQUIRE_FALSE(manifest_deleted);
+            REQUIRE(fs::exists(manifest_path));
+            REQUIRE(fs::exists(partition_a_path));
+            if (!archive_path.empty())
+            {
+                REQUIRE(fs::exists(archive_path));
+                fs::remove(archive_path);
+            }
+        }
+        else
+        {
+            REQUIRE(manifest_deleted);
+            REQUIRE_FALSE(fs::exists(manifest_path));
+            REQUIRE_FALSE(fs::exists(partition_a_path));
+        }
+
+        verifier_b.Validate();
+        verifier_a.Upsert(0, 100);
+        verifier_a.Validate();
+    };
+
+    RunManifestEvictionTest(default_opts, "local", false);
+    RunManifestEvictionTest(default_opts, "local", true);
 }
