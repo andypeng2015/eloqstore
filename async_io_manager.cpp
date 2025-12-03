@@ -726,7 +726,7 @@ std::pair<IouringMgr::LruFD::Ref, KvError> IouringMgr::OpenOrCreateFD(
         fd = OpenFile(tbl_id, file_id, direct);
         if (fd == -ENOENT && create)
         {
-            // This must be data  file because manifest should always be
+            // This must be data file because manifest should always be
             // created by call WriteSnapshot.
             assert(file_id <= LruFD::kMaxDataFile);
             auto [dfd_ref, err] = OpenOrCreateFD(tbl_id, LruFD::kDirectory);
@@ -1048,7 +1048,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
     struct CloseReq : BaseReq
     {
         CloseReq(KvTask *task, LruFD::Ref fd)
-            : BaseReq(task), fd_ref_(std::move(fd)){};
+            : BaseReq(task), fd_ref_(std::move(fd)) {};
         LruFD::Ref fd_ref_;
         int fd_{LruFD::FdEmpty};
     };
@@ -1123,7 +1123,7 @@ KvError IouringMgr::CloseFiles(std::span<LruFD::Ref> fds)
     struct UnregisterReq : BaseReq
     {
         UnregisterReq(KvTask *task, PendingClose *pending)
-            : BaseReq(task), pending_(pending){};
+            : BaseReq(task), pending_(pending) {};
         PendingClose *pending_;
         int placeholder_{-1};
     };
@@ -2348,7 +2348,6 @@ KvError CloudStoreMgr::SyncFiles(const TableIdent &tbl_id,
     return UploadFiles(tbl_id, std::move(filenames));
 }
 
-
 KvError CloudStoreMgr::CloseFile(LruFD::Ref fd)
 {
     KvError err = IouringMgr::CloseFile(fd);
@@ -2361,7 +2360,6 @@ KvError CloudStoreMgr::CloseFile(LruFD::Ref fd)
     }
     return KvError::NoError;
 }
-
 
 std::string CloudStoreMgr::ToFilename(FileId file_id)
 {
