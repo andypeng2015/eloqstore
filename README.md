@@ -55,14 +55,14 @@ ctest --test-dir build/tests/
 
 3. **Download EloqStore:**
    ```bash
-   cd store_handler/eloq_data_store_service
+   cd data_substrate/store_handler/eloq_data_store_service
    git clone git@github.com:eloqdata/eloqstore.git
    ```
 
 ### 🏗️ Build EloqKV using EloqStore as the DataStore
 
 ```bash
-cd ../../
+cd ../../../
 
 mkdir build
 cd build
