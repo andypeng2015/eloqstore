@@ -157,7 +157,7 @@ public:
 
     KvError ReadArchiveFile(const std::string &file_path, std::string &content);
     KvError DeleteFiles(const std::vector<std::string> &file_paths);
-    virtual KvError CloseFiles(const TableIdent &tbl_id,
+    KvError CloseFiles(const TableIdent &tbl_id,
                                const std::span<FileId> file_ids);
 
     void CleanManifest(const TableIdent &tbl_id) override;
@@ -310,7 +310,7 @@ protected:
     virtual KvError SyncFile(LruFD::Ref fd);
     virtual KvError SyncFiles(const TableIdent &tbl_id,
                               std::span<LruFD::Ref> fds);
-    virtual KvError CloseFiles(std::span<LruFD::Ref> fds);
+    KvError CloseFiles(std::span<LruFD::Ref> fds);
     virtual KvError CloseFile(LruFD::Ref fd_ref);
     std::pair<bool, bool> HasOtherFile(
         const TableIdent &tbl_id,
