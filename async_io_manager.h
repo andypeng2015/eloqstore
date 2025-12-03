@@ -312,9 +312,7 @@ protected:
                               std::span<LruFD::Ref> fds);
     KvError CloseFiles(std::span<LruFD::Ref> fds);
     virtual KvError CloseFile(LruFD::Ref fd_ref);
-    std::pair<bool, bool> HasOtherFile(
-        const TableIdent &tbl_id,
-        std::vector<std::string> *file_names = nullptr) const;
+    bool HasOtherFile(const TableIdent &tbl_id) const;
 
     static FdIdx GetRootFD(const TableIdent &tbl_id);
     /**

@@ -533,13 +533,13 @@ KvError IouringMgr::CloseFiles(const TableIdent &tbl_id,
 
 void IouringMgr::CleanManifest(const TableIdent &tbl_id)
 {
-    auto [has_data_files, has_archive_files] = HasOtherFile(tbl_id);
-    if (has_archive_files || has_data_files)
+    if (HasOtherFile(tbl_id))
     {
         DLOG(INFO) << "Skip cleaning manifest for " << tbl_id
-                   << " because archive/data files are present";
+                   << " because other files are present";
         return;
     }
+
     KvError dir_err = KvError::NoError;
     {
         auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
@@ -1348,17 +1348,13 @@ void IouringMgr::FreeRegisterIndex(uint32_t idx)
     free_reg_slots_.push_back(idx);
 }
 
-std::pair<bool, bool> IouringMgr::HasOtherFile(
-    const TableIdent &tbl_id, std::vector<std::string> *file_names) const
+bool IouringMgr::HasOtherFile(const TableIdent &tbl_id) const
 {
-    bool has_data = false;
-    bool has_archive = false;
-
     fs::path dir_path = tbl_id.StorePath(options_->store_path);
     std::error_code ec;
     if (!fs::exists(dir_path, ec) || !fs::is_directory(dir_path, ec))
     {
-        return {false, false};
+        return false;
     }
 
     fs::directory_iterator it(dir_path, ec);
@@ -1366,7 +1362,7 @@ std::pair<bool, bool> IouringMgr::HasOtherFile(
     {
         LOG(WARNING) << "Failed to iterate partition directory " << dir_path
                      << " for table " << tbl_id << ": " << ec.message();
-        return {false, false};
+        return false;
     }
 
     for (; it != fs::directory_iterator(); ++it)
@@ -1378,33 +1374,12 @@ std::pair<bool, bool> IouringMgr::HasOtherFile(
         }
         if (name == FileNameManifest)
         {
-            if (file_names != nullptr)
-            {
-                file_names->emplace_back(name);
-            }
             continue;
         }
-        auto [prefix, suffix] = ParseFileName(name);
-        if (prefix == FileNameData)
-        {
-            has_data = true;
-        }
-        else if (prefix == FileNameManifest && !suffix.empty())
-        {
-            has_archive = true;
-        }
-        else
-        {
-            continue;
-        }
-
-        if (file_names != nullptr)
-        {
-            file_names->emplace_back(name);
-        }
+        return true;
     }
 
-    return {has_data, has_archive};
+    return false;
 }
 
 int IouringMgr::RegisterFile(int fd)
