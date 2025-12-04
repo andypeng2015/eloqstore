@@ -1591,19 +1591,34 @@ KvError BatchWriteTask::Truncate(std::string_view trunc_pos)
 
     if (trunc_pos.empty())
     {
+        // Full partition truncation: recycle all mapped pages without
+        // traversing the tree.
         do_update_ttl_ = false;
-        err = DeleteTree(cow_meta_.root_id_, false);
-        CHECK_KV_ERR(err);
-        cow_meta_.root_id_ = MaxPageId;
-        if (cow_meta_.ttl_root_id_ != MaxPageId)
+        ttl_batch_.clear();
+
+        MappingSnapshot *mapping = cow_meta_.mapper_->GetMapping();
+        auto &mapping_tbl = mapping->mapping_tbl_;
+        for (PageId page_id = 0; page_id < mapping_tbl.size(); ++page_id)
         {
-            err = DeleteTree(cow_meta_.ttl_root_id_, false);
-            CHECK_KV_ERR(err);
-            cow_meta_.ttl_root_id_ = MaxPageId;
+            uint64_t val = mapping_tbl[page_id];
+            auto val_type = MappingSnapshot::GetValType(val);
+            if (val_type == MappingSnapshot::ValType::Invalid ||
+                val_type == MappingSnapshot::ValType::PageId)
+            {
+                continue;
+            }
+
+            FreePage(page_id);
         }
+
+        cow_meta_.root_id_ = MaxPageId;
+        cow_meta_.ttl_root_id_ = MaxPageId;
+        cow_meta_.next_expire_ts_ = 0;
+        wal_builder_.Reset();
         return UpdateMeta();
     }
 
+    // Partial truncation
     do_update_ttl_ = true;
     auto [new_root, error] = TruncateIndexPage(cow_meta_.root_id_, trunc_pos);
     CHECK_KV_ERR(error);
