@@ -533,60 +533,69 @@ KvError IouringMgr::CloseFiles(const TableIdent &tbl_id,
 
 void IouringMgr::CleanManifest(const TableIdent &tbl_id)
 {
+    if (HasOtherFile(tbl_id))
     {
-        // Close manifest file if it's open
-        LruFD::Ref manifest_fd = GetOpenedFD(tbl_id, LruFD::kManifest);
-        if (manifest_fd.Get() != nullptr)
-        {
-            KvError err = CloseFile(std::move(manifest_fd));
-            if (err != KvError::NoError)
-            {
-                LOG(WARNING) << "Failed to close manifest file for table";
-            }
-        }
+        DLOG(INFO) << "Skip cleaning manifest for " << tbl_id
+                   << " because other files are present";
+        return;
+    }
 
-        // Get directory fd and delete manifest file
+    KvError dir_err = KvError::NoError;
+    {
         auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
-        if (err == KvError::NoError)
+        dir_err = err;
+        if (dir_err == KvError::NoError)
         {
-            int res = UnlinkAt(dir_fd.FdPair(), "manifest", false);
+            int res = UnlinkAt(dir_fd.FdPair(), FileNameManifest, false);
             if (res < 0 && res != -ENOENT)
             {
                 LOG(ERROR) << "Failed to delete manifest file for table "
                            << tbl_id << ": " << strerror(-res);
             }
-            else
+            else if (res == 0)
             {
                 DLOG(INFO) << "Successfully deleted manifest file for table "
                            << tbl_id;
             }
-        }
-        else
-        {
-            LOG(ERROR) << "Failed to open directory for table " << tbl_id
-                       << " during cleanup";
+
+            KvError close_dir_err = CloseFile(std::move(dir_fd));
+            if (close_dir_err != KvError::NoError)
+            {
+                LOG(WARNING) << "Failed to close directory handle for table "
+                             << tbl_id << ": " << ErrorString(close_dir_err);
+            }
         }
     }
-    // Get directory fd and delete manifest file
-    auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
-    if (err == KvError::NoError)
+    if (dir_err != KvError::NoError && dir_err != KvError::NotFound)
     {
-        int res = UnlinkAt(dir_fd.FdPair(), "manifest", false);
-        if (res < 0 && res != -ENOENT)
+        LOG(ERROR) << "Failed to open directory for table " << tbl_id
+                   << " during cleanup: " << ErrorString(dir_err);
+    }
+
+    FdIdx root_fd = GetRootFD(tbl_id);
+    std::string dir_name = tbl_id.ToString();
+    int dir_res = UnlinkAt(root_fd, dir_name.c_str(), true);
+    if (dir_res < 0)
+    {
+        if (dir_res == -ENOENT)
         {
-            LOG(ERROR) << "Failed to delete manifest file for table " << tbl_id
-                       << ": " << strerror(-res);
+            DLOG(INFO) << "Directory " << dir_name
+                       << " already removed while cleaning manifest";
+        }
+        else if (dir_res == -ENOTEMPTY)
+        {
+            DLOG(INFO) << "Directory " << dir_name
+                       << " is not empty, skip removing";
         }
         else
         {
-            DLOG(INFO) << "Successfully deleted manifest file for table "
-                       << tbl_id;
+            LOG(WARNING) << "Failed to delete directory " << dir_name << " : "
+                         << strerror(-dir_res);
         }
     }
     else
     {
-        LOG(ERROR) << "Failed to open directory for table " << tbl_id
-                   << " during cleanup";
+        DLOG(INFO) << "Successfully deleted directory " << dir_name;
     }
 }
 
@@ -1337,6 +1346,40 @@ uint32_t IouringMgr::AllocRegisterIndex()
 void IouringMgr::FreeRegisterIndex(uint32_t idx)
 {
     free_reg_slots_.push_back(idx);
+}
+
+bool IouringMgr::HasOtherFile(const TableIdent &tbl_id) const
+{
+    fs::path dir_path = tbl_id.StorePath(options_->store_path);
+    std::error_code ec;
+    if (!fs::exists(dir_path, ec) || !fs::is_directory(dir_path, ec))
+    {
+        return false;
+    }
+
+    fs::directory_iterator it(dir_path, ec);
+    if (ec)
+    {
+        LOG(WARNING) << "Failed to iterate partition directory " << dir_path
+                     << " for table " << tbl_id << ": " << ec.message();
+        return false;
+    }
+
+    for (; it != fs::directory_iterator(); ++it)
+    {
+        const std::string name = it->path().filename().string();
+        if (boost::algorithm::ends_with(name, TmpSuffix))
+        {
+            continue;
+        }
+        if (name == FileNameManifest)
+        {
+            continue;
+        }
+        return true;
+    }
+
+    return false;
 }
 
 int IouringMgr::RegisterFile(int fd)
@@ -2117,6 +2160,10 @@ KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
     IouringMgr::Close(res);
     EnqueClosedFile(std::move(fkey));
     return KvError::NoError;
+}
+
+void CloudStoreMgr::CleanManifest(const TableIdent &tbl_id)
+{
 }
 
 KvError CloudStoreMgr::CreateArchive(const TableIdent &tbl_id,

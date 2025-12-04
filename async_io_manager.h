@@ -312,6 +312,7 @@ protected:
                               std::span<LruFD::Ref> fds);
     KvError CloseFiles(std::span<LruFD::Ref> fds);
     virtual KvError CloseFile(LruFD::Ref fd_ref);
+    bool HasOtherFile(const TableIdent &tbl_id) const;
 
     static FdIdx GetRootFD(const TableIdent &tbl_id);
     /**
@@ -390,6 +391,7 @@ public:
     KvError CreateArchive(const TableIdent &tbl_id,
                           std::string_view snapshot,
                           uint64_t ts) override;
+    void CleanManifest(const TableIdent &tbl_id) override;
 
     ObjectStore &GetObjectStore()
     {
