@@ -21,7 +21,7 @@ TEST_CASE("simple delete", "[delete]")
 
 TEST_CASE("delete from an empty table", "[delete]")
 {
-    eloqstore::EloqStore *store = InitStore(append_opts);
+    eloqstore::EloqStore *store = InitStore(default_opts);
     MapVerifier verify(test_tbl_id, store);
     verify.Delete(150, 200);
     verify.Delete(0, 100);

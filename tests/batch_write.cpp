@@ -37,7 +37,7 @@ TEST_CASE("mixed batch write with read", "[batch_write]")
 
 TEST_CASE("truncate from the first key", "[batch_write]")
 {
-    eloqstore::EloqStore *store = InitStore(append_opts);
+    eloqstore::EloqStore *store = InitStore(default_opts);
     MapVerifier verify(test_tbl_id, store, false);
     verify.SetValueSize(200);
     eloqstore::TableIdent tbl_id("t1", 1);
@@ -64,7 +64,7 @@ TEST_CASE("truncate from the first key", "[batch_write]")
 
 TEST_CASE("truncate twice overflow values", "[batch_write]")
 {
-    eloqstore::EloqStore *store = InitStore(append_opts);
+    eloqstore::EloqStore *store = InitStore(default_opts);
     MapVerifier verify(test_tbl_id, store, false);
     eloqstore::TableIdent tbl_id("t1", 1);
     std::string s(5000, 'x');
@@ -138,7 +138,7 @@ TEST_CASE("batch write task pool cleaned after abort", "[batch_write]")
         }
     } guard;
 
-    eloqstore::KvOptions opts = append_opts;
+    eloqstore::KvOptions opts = default_opts;
     opts.num_threads = 1;  // route all partitions to the same shard
     opts.index_buffer_pool_size =
         opts.data_page_size;  // only one index page buffer
