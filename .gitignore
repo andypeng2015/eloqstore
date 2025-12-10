@@ -37,6 +37,7 @@
 Release
 build
 build_coverage
+build-fuzz
 install
 .cache
 .vscode

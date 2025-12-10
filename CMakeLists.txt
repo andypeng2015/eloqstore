@@ -139,3 +139,8 @@ option(WITH_BENCHMARK "build with benchmark tool" ON)
 if (WITH_BENCHMARK)
     add_subdirectory(benchmark)
 endif ()
+
+option(WITH_FUZZ "build with AFL fuzz harness" OFF)
+if (WITH_FUZZ)
+    add_subdirectory(fuzz)
+endif ()
