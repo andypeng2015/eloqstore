@@ -1,5 +1,6 @@
 #include "mem_index_page.h"
 
+#include <glog/logging.h>
 #include <sys/types.h>
 
 #include <cstddef>
@@ -127,6 +128,7 @@ IndexPageIter::IndexPageIter(const MemIndexPage *index_page,
       page_(index_page == nullptr ? std::string_view{}
                                   : std::string_view{index_page->PagePtr(),
                                                      opts->data_page_size}),
+      owner_(index_page),
       restart_num_(index_page == nullptr ? 0 : index_page->RestartNum()),
       restart_offset_(index_page == nullptr
                           ? 0
@@ -134,16 +136,36 @@ IndexPageIter::IndexPageIter(const MemIndexPage *index_page,
                                 (1 + restart_num_) * sizeof(uint16_t)),
       curr_offset_(MemIndexPage::leftmost_ptr_offset)
 {
+    if (index_page != nullptr)
+    {
+        uint16_t content_len = index_page->ContentLength();
+        size_t tail_bytes = (1 + restart_num_) * sizeof(uint16_t);
+        if (content_len > opts->data_page_size || tail_bytes > content_len)
+        {
+            LOG(ERROR) << "IndexPageIter invalid header page_id="
+                       << index_page->GetPageId()
+                       << " content_len=" << content_len
+                       << " restart_num=" << restart_num_
+                       << " page_size=" << opts->data_page_size;
+        }
+    }
 }
 
 IndexPageIter::IndexPageIter(std::string_view page_view, const KvOptions *opts)
     : comparator_(opts->comparator_),
       page_(page_view),
+      owner_(nullptr),
       restart_num_(DecodeFixed16(page_view.data() + page_view.size() -
                                  sizeof(uint16_t))),
       restart_offset_(page_view.size() - (1 + restart_num_) * sizeof(uint16_t)),
       curr_offset_(MemIndexPage::leftmost_ptr_offset)
 {
+    size_t tail_bytes = (1 + restart_num_) * sizeof(uint16_t);
+    if (tail_bytes > page_view.size())
+    {
+        LOG(ERROR) << "IndexPageIter invalid header from view content_len="
+                   << page_view.size() << " restart_num=" << restart_num_;
+    }
     assert(DecodeFixed16(page_view.data() + MemIndexPage::page_size_offset) ==
            page_view.size());
 }
@@ -155,6 +177,7 @@ bool IndexPageIter::ParseNextKey()
 
     if (pt >= limit)
     {
+        LOG(ERROR) << "ParseNextKey failed";
         Invalidate();
         return false;
     }
@@ -171,10 +194,12 @@ bool IndexPageIter::ParseNextKey()
 
     bool is_restart_pointer = curr_offset_ == RestartOffset(curr_restart_idx_);
     uint32_t shared = 0, non_shared = 0;
+    const char *entry_ptr = pt;
     pt = DecodeEntry(pt, limit, &shared, &non_shared);
 
     if (pt == nullptr || key_.size() < shared)
     {
+        LogDecodeFailure("ParseNextKey", entry_ptr, limit);
         Invalidate();
         return false;
     }
@@ -189,6 +214,7 @@ bool IndexPageIter::ParseNextKey()
         uint32_t ptr_val;
         if ((pt = GetVarint32Ptr(pt, limit, &ptr_val)) == nullptr)
         {
+            LOG(ERROR) << "GetVarint32Ptr failed";
             Invalidate();
             return false;
         }
@@ -213,6 +239,8 @@ void IndexPageIter::Invalidate()
     curr_offset_ = restart_offset_;
     curr_restart_idx_ = restart_num_;
     key_.clear();
+    LOG(INFO) << "Invalidate curr_offset_: " << curr_offset_
+              << " curr_restart_idx_: " << curr_restart_idx_;
     page_id_ = MaxPageId;
 }
 
@@ -249,6 +277,21 @@ const char *IndexPageIter::DecodeEntry(const char *ptr,
     return ptr;
 }
 
+void IndexPageIter::LogDecodeFailure(const char *reason,
+                                     const char *ptr,
+                                     const char *limit) const
+{
+    intptr_t remaining = limit - ptr;
+    PageId owner_id = owner_ == nullptr ? MaxPageId : owner_->GetPageId();
+    LOG(ERROR) << "IndexPageIter decode failed reason=" << reason
+               << " owner_page_id=" << owner_id
+               << " curr_offset=" << curr_offset_
+               << " restart_idx=" << curr_restart_idx_
+               << " restart_num=" << restart_num_
+               << " restart_offset=" << restart_offset_
+               << " page_size=" << page_.size() << " remaining=" << remaining;
+}
+
 std::string IndexPageIter::PeekNextKey() const
 {
     const char *pt = page_.data() + curr_offset_;
@@ -260,10 +303,12 @@ std::string IndexPageIter::PeekNextKey() const
     }
 
     uint32_t shared = 0, non_shared = 0;
+    const char *entry_ptr = pt;
     pt = DecodeEntry(pt, limit, &shared, &non_shared);
 
     if (pt == nullptr || key_.size() < shared)
     {
+        LogDecodeFailure("PeekNextKey", entry_ptr, limit);
         return std::string();
     }
     else
@@ -310,13 +355,14 @@ void IndexPageIter::Seek(std::string_view search_key)
         size_t mid = right - step;
         uint16_t region_offset = RestartOffset(mid);
         uint32_t shared, non_shared;
-        const char *key_ptr = DecodeEntry(page_.data() + region_offset,
-                                          page_.data() + restart_offset_,
-                                          &shared,
-                                          &non_shared);
+        const char *entry_ptr = page_.data() + region_offset;
+        const char *key_ptr = DecodeEntry(
+            entry_ptr, page_.data() + restart_offset_, &shared, &non_shared);
 
         if (key_ptr == nullptr || shared != 0)
         {
+            LogDecodeFailure(
+                "SeekRestart", entry_ptr, page_.data() + restart_offset_);
             Invalidate();
             return;
         }
@@ -349,6 +395,7 @@ void IndexPageIter::Seek(std::string_view search_key)
         SeekToRestart(right);
         if (!ParseNextKey())
         {
+            LOG(ERROR) << "ParseNextKey failed";
             Invalidate();
             return;
         }
@@ -370,6 +417,7 @@ void IndexPageIter::Seek(std::string_view search_key)
         {
             if (!ParseNextKey())
             {
+                LOG(ERROR) << "ParseNextKey failed";
                 Invalidate();
                 return;
             }
@@ -397,6 +445,7 @@ void IndexPageIter::Seek(std::string_view search_key)
         // Positions to the prior index entry.
         curr_offset_ = prev_offset;
         key_ = prev_key;
+        LOG(INFO) << "Seek key_: " << key_ << " page_id_: " << page_id_;
         page_id_ = prev_page_id;
     }
 }
@@ -405,6 +454,8 @@ void IndexPageIter::Reset()
 {
     curr_offset_ = MemIndexPage::leftmost_ptr_offset;
     curr_restart_idx_ = 0;
+    LOG(INFO) << "Reset curr_offset_: " << curr_offset_
+              << " curr_restart_idx_: " << curr_restart_idx_;
     key_.clear();
     page_id_ = MaxPageId;
 }

@@ -17,6 +17,7 @@ KvError ReadTask::Read(const TableIdent &tbl_id,
                        uint64_t &timestamp,
                        uint64_t &expire_ts)
 {
+    LOG(INFO) << "Read tbl_id: " << tbl_id << " search_key: " << search_key;
     auto [meta, err] = shard->IndexManager()->FindRoot(tbl_id);
     CHECK_KV_ERR(err);
     if (meta->root_id_ == MaxPageId)
@@ -26,6 +27,8 @@ KvError ReadTask::Read(const TableIdent &tbl_id,
     auto mapping = meta->mapper_->GetMappingSnapshot();
 
     PageId page_id;
+    LOG(INFO) << "SeekIndex root_id: " << meta->root_id_
+              << " search_key: " << search_key;
     err = shard->IndexManager()->SeekIndex(
         mapping.get(), meta->root_id_, search_key, page_id);
     CHECK_KV_ERR(err);

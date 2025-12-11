@@ -249,8 +249,11 @@ std::pair<MemIndexPage *, KvError> IndexPageManager::FindPage(
 {
     while (true)
     {
+        LOG(INFO) << "FindPage page_id: " << page_id;
         // First checks swizzling pointers.
         MemIndexPage *idx_page = mapping->GetSwizzlingPointer(page_id);
+        LOG(INFO) << "GetSwizzlingPointer page_id: " << page_id
+                  << " idx_page: " << idx_page;
         if (idx_page == nullptr)
         {
             // This is the first request to load the page.
@@ -277,6 +280,8 @@ std::pair<MemIndexPage *, KvError> IndexPageManager::FindPage(
             }
             FinishIo(mapping, new_page);
             new_page->waiting_.WakeAll();
+            LOG(INFO) << "FindPage page_id: " << page_id
+                      << " idx_page: " << new_page;
             return {new_page, KvError::NoError};
         }
         if (idx_page->IsDetached())
@@ -287,6 +292,9 @@ std::pair<MemIndexPage *, KvError> IndexPageManager::FindPage(
         else
         {
             EnqueueIndexPage(idx_page);
+            LOG(INFO) << "FindPage page_id: " << page_id
+                      << " idx_page: " << idx_page
+                      << " page_id_: " << idx_page->page_id_;
             return {idx_page, KvError::NoError};
         }
     }
@@ -508,18 +516,23 @@ KvError IndexPageManager::SeekIndex(MappingSnapshot *mapping,
                                     std::string_view key,
                                     PageId &result)
 {
+    LOG(INFO) << "SeekIndex page_id: " << page_id << " key: " << key;
     auto [node, err] = FindPage(mapping, page_id);
     CHECK_KV_ERR(err);
     IndexPageIter idx_it{node, Options()};
+    LOG(INFO) << "node id: " << node->page_id_;
     idx_it.Seek(key);
     PageId child_id = idx_it.GetPageId();
+    LOG(INFO) << "GetPageId: " << child_id;
     if (node->IsPointingToLeaf())
     {
+        LOG(INFO) << "result: " << child_id;
         result = child_id;
         return KvError::NoError;
     }
     else
     {
+        LOG(INFO) << "SeekIndex child_id: " << child_id;
         return SeekIndex(mapping, child_id, key, result);
     }
 }

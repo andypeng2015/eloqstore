@@ -31,7 +31,7 @@ public:
     static uint16_t const leftmost_ptr_offset =
         page_size_offset + sizeof(uint16_t);
 
-    explicit MemIndexPage(bool alloc = true) : page_(alloc) {};
+    explicit MemIndexPage(bool alloc = true) : page_(alloc){};
     uint16_t ContentLength() const;
     uint16_t RestartNum() const;
 
@@ -170,10 +170,16 @@ public:
         curr_restart_idx_ = restart_idx;
         curr_offset_ = RestartOffset(restart_idx);
         key_.clear();
+        LOG(INFO) << "SeekToRestart restart_idx: " << restart_idx
+                  << " curr_offset_: " << curr_offset_;
         page_id_ = MaxPageId;
     }
 
 private:
+    void LogDecodeFailure(const char *reason,
+                          const char *ptr,
+                          const char *limit) const;
+
     uint16_t RestartOffset(uint16_t restart_idx) const
     {
         assert(restart_idx < restart_num_);
@@ -192,11 +198,13 @@ private:
     const Comparator *const comparator_;
     std::string_view const page_;
 
+    const MemIndexPage *const owner_;
+
 public:
-    uint16_t const restart_num_;
+    const uint16_t restart_num_;
 
 private:
-    uint16_t const restart_offset_;
+    const uint16_t restart_offset_;
 
     uint16_t curr_offset_{MemIndexPage::leftmost_ptr_offset};
     uint16_t curr_restart_idx_{0};
