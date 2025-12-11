@@ -241,18 +241,20 @@ KvError IouringMgr::ReadPages(const TableIdent &tbl_id,
               offset_(offset),
               page_(true) {};
 
-        LruFD::Ref fd_ref_;
-        uint32_t offset_;
-        Page page_{false};
         bool done_{false};
+        uint32_t offset_;
+        LruFD::Ref fd_ref_;
+        Page page_{false};
     };
 
-    // ReadReq is a temporary object, so we allocate it on stack.
-    std::array<ReadReq, max_read_pages_batch> reqs_buf;
-    std::span<ReadReq> reqs(reqs_buf.data(), page_ids.size());
+    // ReadReq uses ~50 bytes each, putting max_read_pages_batch on the
+    // coroutine stack easily overflows the 32KB stacks we run with.  Keep the
+    // temporary buffer on the heap to avoid stack overflows under ASan.
+    std::vector<ReadReq> reqs;
+    reqs.reserve(page_ids.size());
 
     // Prepare requests.
-    for (uint8_t i = 0; FilePageId fp_id : page_ids)
+    for (FilePageId fp_id : page_ids)
     {
         auto [file_id, offset] = ConvFilePageId(fp_id);
         auto [fd_ref, err] = OpenFD(tbl_id, file_id);
@@ -260,8 +262,7 @@ KvError IouringMgr::ReadPages(const TableIdent &tbl_id,
         {
             return err;
         }
-        reqs[i] = ReadReq(ThdTask(), std::move(fd_ref), offset);
-        i++;
+        reqs.emplace_back(ThdTask(), std::move(fd_ref), offset);
     }
 
     auto send_req = [this](ReadReq *req)
