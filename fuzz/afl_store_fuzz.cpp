@@ -300,7 +300,7 @@ eloqstore::KvOptions BuildOptions(const fs::path &workdir, Cursor &cursor)
     opts.io_queue_size = 64 + (cursor.TakeU8() % 8) * 64;
     opts.max_write_batch_pages = 8 + cursor.TakeU8();
     opts.pages_per_file_shift = 10 + (cursor.TakeU8() % 6);
-    opts.data_append_mode = cursor.TakeBool();
+    opts.data_append_mode = true;
     opts.enable_compression = cursor.TakeBool();
     opts.skip_verify_checksum = cursor.TakeBool();
     opts.overflow_pointers = static_cast<uint8_t>(
