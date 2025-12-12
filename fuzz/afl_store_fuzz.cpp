@@ -326,7 +326,7 @@ void RunOneInput(const uint8_t *data, size_t len)
     fs::create_directories(workdir, ec);
 
     eloqstore::KvOptions opts = BuildOptions(workdir, cursor);
-
+    // fs::remove_all(workdir, ec);
     if (!eloqstore::EloqStore::ValidateOptions(opts))
     {
         fs::remove_all(workdir, ec);

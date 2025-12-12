@@ -177,7 +177,8 @@ bool IndexPageIter::ParseNextKey()
 
     if (pt >= limit)
     {
-        LOG(ERROR) << "ParseNextKey failed";
+        LOG(ERROR) << "ParseNextKey failed" << " curr_offset_: " << curr_offset_
+                   << " restart_offset_: " << restart_offset_;
         Invalidate();
         return false;
     }
