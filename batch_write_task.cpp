@@ -1451,21 +1451,24 @@ std::pair<MemIndexPage *, KvError> BatchWriteTask::TruncateIndexPage(
     auto truncate_sub_node = [&](std::string_view sub_node_key,
                                  PageId sub_node_id) -> KvError
     {
-        // truncate sub-node
-        std::pair<bool, KvError> ret;
         if (is_leaf_idx)
         {
-            ret = TruncateDataPage(sub_node_id, trunc_pos);
+            auto [is_partial, err] = TruncateDataPage(sub_node_id, trunc_pos);
+            CHECK_KV_ERR(err);
+            if (is_partial)
+            {
+                builder.Add(sub_node_key, sub_node_id, is_leaf_idx);
+            }
         }
         else
         {
-            ret = TruncateIndexPage(sub_node_id, trunc_pos);
-        }
-        CHECK_KV_ERR(ret.second);
-        if (ret.first)
-        {
             // This sub-node is partially truncated
-            builder.Add(sub_node_key, sub_node_id, is_leaf_idx);
+            auto [child_page, err] = TruncateIndexPage(sub_node_id, trunc_pos);
+            CHECK_KV_ERR(err);
+            if (child_page != nullptr)
+            {
+                builder.Add(sub_node_key, child_page->GetPageId(), is_leaf_idx);
+            }
         }
         return KvError::NoError;
     };
