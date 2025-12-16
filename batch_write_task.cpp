@@ -271,6 +271,7 @@ KvError BatchWriteTask::Apply()
     cow_meta_.compression_->SampleAndBuildDictionaryIfNeeded(data_batch_);
     CHECK_KV_ERR(err);
     err = ApplyBatch(cow_meta_.root_id_, true);
+    need_record = false;
     CHECK_KV_ERR(err);
     err = ApplyTTLBatch();
     CHECK_KV_ERR(err);

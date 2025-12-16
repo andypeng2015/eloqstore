@@ -254,7 +254,9 @@ KvError WriteTask::FlushManifest()
                                   mapping,
                                   max_fp_id,
                                   dict_bytes);
-        err = IoMgr()->SwitchManifest(tbl_ident_, snapshot);
+        {
+            err = IoMgr()->SwitchManifest(tbl_ident_, snapshot);
+        }
         CHECK_KV_ERR(err);
         cow_meta_.manifest_size_ = snapshot.size();
         cow_meta_.compression_->ClearDirty();

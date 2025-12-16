@@ -1,7 +1,9 @@
 #pragma once
 
+#ifdef ELOQ_MODULE_ENABLED
 #include <butil/time.h>
 #include <bvar/latency_recorder.h>
+#endif
 
 #include <string_view>
 

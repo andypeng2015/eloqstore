@@ -174,6 +174,7 @@ std::pair<RootMeta *, KvError> IndexPageManager::FindRoot(
     }
 }
 
+
 KvError IndexPageManager::MakeCowRoot(const TableIdent &tbl_ident,
                                       CowRootMeta &cow_meta)
 {

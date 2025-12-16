@@ -47,11 +47,6 @@ PageMapper::PageMapper(IndexPageManager *idx_mgr, const TableIdent *tbl_ident)
     file_page_allocator_ = FilePageAllocator::Instance(Options());
 }
 
-#ifdef ELOQ_MODULE_ENABLED
-bvar::LatencyRecorder cow_lr("debug_cow_lr", "ns");
-bvar::LatencyRecorder cow_lr2("debug_cow_lr2", "ns");
-#endif
-
 PageMapper::PageMapper(const PageMapper &rhs)
     : free_page_head_(rhs.free_page_head_),
       free_page_cnt_(rhs.free_page_cnt_),
