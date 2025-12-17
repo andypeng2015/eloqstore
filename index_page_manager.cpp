@@ -178,6 +178,7 @@ KvError IndexPageManager::MakeCowRoot(const TableIdent &tbl_ident,
     auto [meta, err] = FindRoot(tbl_ident);
     if (err == KvError::NoError)
     {
+        meta->Pin();  // Referenced by new MappingSnapshot.
         // Makes a copy of the mapper.
         auto new_mapper = std::make_unique<PageMapper>(*meta->mapper_);
         cow_meta.root_id_ = meta->root_id_;
@@ -214,6 +215,7 @@ KvError IndexPageManager::MakeCowRoot(const TableIdent &tbl_ident,
         cow_meta.compression_ =
             std::make_shared<compression::DictCompression>();
         meta = &tbl_it->second;
+        meta->Pin();
     }
     else
     {
@@ -221,7 +223,6 @@ KvError IndexPageManager::MakeCowRoot(const TableIdent &tbl_ident,
     }
     auto it = meta->mapping_snapshots_.insert(cow_meta.mapper_->GetMapping());
     CHECK(it.second);
-    meta->Pin();  // Referenced by new MappingSnapshot.
     return KvError::NoError;
 }
 
