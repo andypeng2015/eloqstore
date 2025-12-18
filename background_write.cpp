@@ -173,6 +173,7 @@ KvError BackgroundWrite::CompactDataFile()
                     moving_cached.Add(page, new_fp_id);
                     err = WritePage(page, new_fp_id);
                     CHECK_KV_ERR(err);
+                    YieldToNextRound();
                 }
                 else
                 {
@@ -201,6 +202,7 @@ KvError BackgroundWrite::CompactDataFile()
                 err = WritePage(std::move(move_batch_buf[i]), new_fp_id);
                 CHECK_KV_ERR(err);
                 i++;
+                YieldToNextRound();
             }
         }
         if (min_file_id != end_file_id)
