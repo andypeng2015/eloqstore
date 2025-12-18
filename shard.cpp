@@ -69,6 +69,7 @@ void Shard::WorkLoop()
     {
         while (true)
         {
+            ProcessCloudReadyTasks();
             io_mgr_->Submit();
             io_mgr_->PollComplete();
             bool busy = ExecuteReadyTasks();
@@ -265,8 +266,8 @@ void Shard::ProcessReq(KvRequest *req)
 
             list_task.SetKvTask(task);
             auto cloud_mgr = static_cast<CloudStoreMgr *>(shard->io_mgr_.get());
-            cloud_mgr->GetObjectStore().GetHttpManager()->SubmitRequest(
-                &list_task);
+            cloud_mgr->AcquireCloudSlot(task);
+            cloud_mgr->GetObjectStore().SubmitTask(&list_task, shard);
             current_task->WaitIo();
 
             if (list_task.error_ != KvError::NoError)
@@ -350,8 +351,32 @@ void Shard::ProcessReq(KvRequest *req)
     }
 }
 
+void Shard::ProcessCloudReadyTasks()
+{
+    KvTask *ready_tasks[128];
+    // Only handle at most 128 ready tasks per round to keep the loop
+    // responsive.
+    size_t nready = cloud_ready_tasks_.try_dequeue_bulk(ready_tasks,
+                                                        std::size(ready_tasks));
+
+    for (size_t i = 0; i < nready; ++i)
+    {
+        KvTask *ready_task = ready_tasks[i];
+        ready_task->FinishIo();
+        auto *cloud_mgr = dynamic_cast<CloudStoreMgr *>(io_mgr_.get());
+        DCHECK(cloud_mgr != nullptr);
+        cloud_mgr->ReleaseCloudSlot();
+    }
+}
+
+void Shard::EnqueueCloudReadyTask(KvTask *task)
+{
+    cloud_ready_tasks_.enqueue(task);
+}
+
 bool Shard::ExecuteReadyTasks()
 {
+    ProcessCloudReadyTasks();
     bool busy = ready_tasks_.Size() > 0;
     size_t task_num = ready_tasks_.Size();
     while (task_num-- > 0)
@@ -391,6 +416,7 @@ void Shard::OnTaskFinished(KvTask *task)
         {
             // No more write requests, remove the pending queue.
             pending_queues_.erase(it);
+            --on_fly_write_;
         }
         else
         {
@@ -406,16 +432,54 @@ void Shard::OnTaskFinished(KvTask *task)
 }
 
 #ifdef ELOQ_MODULE_ENABLED
+bvar::LatencyRecorder work_one_round_lr("debug_work_one_round", "us");
+struct WorkOneRoundTimer
+{
+    ~WorkOneRoundTimer()
+    {
+        int64_t gap = butil::cpuwide_time_us() - start_ts_;
+        if (gap > 1000)
+        {
+            work_one_round_lr << butil::cpuwide_time_us() - start_ts_;
+        }
+    }
+    int64_t start_ts_{butil::cpuwide_time_us()};
+};
+
 void Shard::WorkOneRound()
 {
+    WorkOneRoundTimer timer;
     if (__builtin_expect(!io_mgr_->BackgroundJobInited(), false))
     {
         io_mgr_->InitBackgroundJob();
+    }
+    while (true)
+    {
+        io_mgr_->Submit();
+        io_mgr_->PollComplete();
+        if (!ExecuteReadyTasks())
+        {
+            break;
+        }
     }
     KvRequest *reqs[128];
     size_t nreqs = requests_.try_dequeue_bulk(reqs, std::size(reqs));
     for (size_t i = 0; i < nreqs; i++)
     {
+        if (auto wreq = dynamic_cast<WriteRequest *>(reqs[i]); wreq != nullptr)
+        {
+            if (Options()->max_on_fly_write == 0 ||
+                on_fly_write_ < Options()->max_on_fly_write)
+            {
+                ++on_fly_write_;
+            }
+            else
+            {
+                requests_.enqueue(reqs[i]);
+                req_queue_size_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+        }
         OnReceivedReq(reqs[i]);
     }
 

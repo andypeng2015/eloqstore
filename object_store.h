@@ -32,17 +32,23 @@ class KvTask;
 class CloudStoreMgr;
 class AsyncHttpManager;
 class AsyncIoManager;
+class Shard;
+class CloudStorageService;
 
 class ObjectStore
 {
 public:
-    explicit ObjectStore(const KvOptions *options);
+    explicit ObjectStore(const KvOptions *options,
+                        CloudStorageService *service);
     ~ObjectStore();
 
-    AsyncHttpManager *GetHttpManager()
-    {
-        return async_http_mgr_.get();
-    }
+    class Task;
+
+    void SubmitTask(Task *task, Shard *owner_shard);
+
+    void StartHttpRequest(Task *task);
+    void RunHttpWork();
+    bool HttpWorkIdle() const;
 
     bool ParseListObjectsResponse(
         const std::string &payload,
@@ -68,7 +74,6 @@ public:
         std::string response_data_{};
         std::string json_data_{};
         curl_slist *headers_{nullptr};
-        bool cloud_slot_acquired_{false};
 
         uint8_t retry_count_ = 0;
         uint8_t max_retries_ = 5;
@@ -79,6 +84,12 @@ public:
         void SetKvTask(KvTask *task)
         {
             kv_task_ = task;
+        }
+
+        Shard *owner_shard_{nullptr};
+        void SetOwnerShard(Shard *shard)
+        {
+            owner_shard_ = shard;
         }
 
     protected:
@@ -152,6 +163,7 @@ public:
 
 private:
     std::unique_ptr<AsyncHttpManager> async_http_mgr_;
+    CloudStorageService *cloud_service_{nullptr};
 };
 
 struct CloudPathInfo
@@ -194,7 +206,7 @@ public:
 class AsyncHttpManager
 {
 public:
-    explicit AsyncHttpManager(const KvOptions *options);
+    AsyncHttpManager(const KvOptions *options, CloudStorageService *service);
     ~AsyncHttpManager();
 
     void SubmitRequest(ObjectStore::Task *task);
@@ -219,6 +231,7 @@ public:
 
 private:
     void CleanupTaskResources(ObjectStore::Task *task);
+    void OnTaskFinished(ObjectStore::Task *task);
     bool SetupUploadRequest(ObjectStore::UploadTask *task, CURL *easy);
     bool SetupDownloadRequest(ObjectStore::DownloadTask *task, CURL *easy);
     bool SetupDeleteRequest(ObjectStore::DeleteTask *task, CURL *easy);
@@ -239,7 +252,6 @@ private:
 
     static constexpr uint32_t kInitialRetryDelayMs = 10'000;
     static constexpr uint32_t kMaxRetryDelayMs = 40'000;
-    static constexpr uint32_t kCloudConcurrencyLimit = 20;
 
     CURLM *multi_handle_{nullptr};
     std::unordered_map<CURL *, ObjectStore::Task *> active_requests_;
@@ -250,15 +262,12 @@ private:
 
     CloudPathInfo cloud_path_;
     std::unique_ptr<CloudBackend> backend_;
-    uint32_t cloud_inflight_{0};
-    WaitingZone cloud_waiting_;
+    CloudStorageService *cloud_service_{nullptr};
 
     std::string ComposeKey(const TableIdent *tbl_id,
                            std::string_view filename) const;
     std::string ComposeKeyFromRemote(std::string_view remote_path,
                                      bool ensure_trailing_slash) const;
-    void AcquireCloudSlot(KvTask *task, ObjectStore::Task *store_task);
-    void ReleaseCloudSlot(ObjectStore::Task *store_task);
 };
 
 }  // namespace eloqstore

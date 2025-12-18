@@ -4,9 +4,16 @@
 #include "index_page_builder.h"
 #include "write_task.h"
 #include "write_tree_stack.h"
+#ifdef ELOQ_MODULE_ENABLED
+#include <bvar/latency_recorder.h>
+#endif
 
 namespace eloqstore
 {
+
+#ifdef ELOQ_MODULE_ENABLED
+inline bvar::LatencyRecorder batch_write_round("debug_1_write_round", "ns");
+#endif
 
 class BatchWriteTask : public WriteTask
 {
@@ -25,6 +32,20 @@ public:
     KvError Truncate(std::string_view trunc_pos);
 
     KvError CleanExpiredKeys();
+
+    void Record() override
+    {
+#ifdef ELOQ_MODULE_ENABLED
+        if (need_record)
+        {
+            int64_t gap = butil::cpuwide_time_ns() - last_yield_ts;
+            if (gap > 5000)
+            {
+                batch_write_round << gap;
+            }
+        }
+#endif
+    }
 
 private:
     KvError ApplyBatch(PageId &root_id, bool update_ttl, uint64_t now_ts = 0);

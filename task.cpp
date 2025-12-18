@@ -14,14 +14,22 @@ namespace eloqstore
 {
 void KvTask::Yield()
 {
+    Record();
     shard->main_ = shard->main_.resume();
+#ifdef ELOQ_MODULE_ENABLED
+    last_yield_ts = butil::cpuwide_time_ns();
+#endif
 }
 
 void KvTask::YieldToNextRound()
 {
     status_ = TaskStatus::RunNextRound;
     shard->ready_tasks_.Enqueue(this);
+    Record();
     shard->main_ = shard->main_.resume();
+#ifdef ELOQ_MODULE_ENABLED
+    last_yield_ts = butil::cpuwide_time_ns();
+#endif
 }
 
 void KvTask::Resume()

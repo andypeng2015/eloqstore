@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <glog/logging.h>
 
 #include "error.h"
 #include "kv_options.h"
@@ -81,6 +82,7 @@ public:
     void SetArgs(TableIdent tbl_id, std::string key);
     std::string_view Key() const;
 
+    int64_t start_ts_;
     // output
     std::string value_;
     uint64_t ts_;
@@ -344,6 +346,7 @@ class ArchiveCrond;
 class ObjectStore;
 class EloqStoreModule;
 class PrewarmService;
+class CloudStorageService;
 
 class EloqStore
 {
@@ -388,6 +391,7 @@ private:
     std::vector<std::unique_ptr<Shard>> shards_;
     std::atomic<bool> stopped_{true};
 
+    std::unique_ptr<CloudStorageService> cloud_service_;
     std::unique_ptr<ArchiveCrond> archive_crond_{nullptr};
     std::unique_ptr<PrewarmService> prewarm_service_{nullptr};
 #ifdef ELOQ_MODULE_ENABLED
@@ -399,5 +403,29 @@ private:
     friend class IouringMgr;
     friend class WriteTask;
     friend class PrewarmService;
+};
+struct Timer
+{
+    Timer(std::string_view name) : name_(name)
+    {
+    }
+    void Finish()
+    {
+        valid_ = false;
+        LOG(INFO) << name_ << ":"
+                  << utils::UnixTs<chrono::nanoseconds>() - start_ << "\n";
+    }
+    ~Timer()
+    {
+        if (!valid_)
+        {
+            return;
+        }
+        LOG(INFO) << name_ << ":"
+                  << utils::UnixTs<chrono::nanoseconds>() - start_ << "\n";
+    }
+    bool valid_{true};
+    std::string_view name_;
+    uint64_t start_{utils::UnixTs<chrono::nanoseconds>()};
 };
 }  // namespace eloqstore

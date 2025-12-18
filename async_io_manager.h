@@ -28,6 +28,7 @@ namespace eloqstore
 class WriteReq;
 class WriteTask;
 class MemIndexPage;
+class CloudStorageService;
 
 class ManifestFile
 {
@@ -395,7 +396,9 @@ public:
 class CloudStoreMgr : public IouringMgr
 {
 public:
-    CloudStoreMgr(const KvOptions *opts, uint32_t fd_limit);
+    CloudStoreMgr(const KvOptions *opts,
+                  uint32_t fd_limit,
+                  CloudStorageService *service);
     static constexpr FileId ManifestFileId()
     {
         return LruFD::kManifest;
@@ -440,6 +443,12 @@ public:
     void ResetPrewarmFiles(std::vector<PrewarmFile> files);
     void ClearPrewarmFiles();
     void StopAllPrewarmTasks();
+    void AcquireCloudSlot(KvTask *task);
+    void ReleaseCloudSlot(size_t count = 1);
+    size_t MaxCloudSlots() const
+    {
+        return max_cloud_slots_;
+    }
 
 private:
     int CreateFile(LruFD::Ref dir_fd, FileId file_id) override;
@@ -503,6 +512,9 @@ private:
     CachedFile lru_file_tail_;
     size_t used_local_space_{0};
     size_t shard_local_space_limit_{0};
+    size_t max_cloud_slots_{20};
+    size_t inflight_cloud_slots_{0};
+    WaitingZone cloud_slot_waiting_;
 
     /**
      * @brief A background task to evict cached files when local space is full.

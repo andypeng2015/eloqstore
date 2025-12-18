@@ -12,6 +12,7 @@
 #include "error.h"
 #include "index_page_manager.h"
 #include "kv_options.h"
+#include "index_page_manager.h"
 #include "root_meta.h"
 
 namespace eloqstore

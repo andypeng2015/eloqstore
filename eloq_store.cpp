@@ -18,6 +18,7 @@
 
 #include "archive_crond.h"
 #include "async_io_manager.h"
+#include "cloud_storage_service.h"
 #include "common.h"
 #include "file_gc.h"
 #include "prewarm_task.h"
@@ -142,6 +143,7 @@ EloqStore::EloqStore(const KvOptions &opts) : options_(opts), stopped_(true)
     {
         LOG(FATAL) << "Invalid KvOptions configuration";
     }
+    cloud_service_ = std::make_unique<CloudStorageService>(this);
 }
 
 EloqStore::~EloqStore()
@@ -165,6 +167,11 @@ KvError EloqStore::Start()
     {
         KvError err = InitStoreSpace();
         CHECK_KV_ERR(err);
+    }
+
+    if (!options_.cloud_store_path.empty())
+    {
+        cloud_service_->Start();
     }
 
     // There are files opened at very early stage like stdin/stdout/stderr, glog
@@ -473,6 +480,8 @@ void EloqStore::Stop()
     {
         shard->Stop();
     }
+
+    cloud_service_->Stop();
 
     // Start clear resources after all threads stopped.
 

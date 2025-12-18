@@ -102,6 +102,7 @@ public:
     virtual void Abort() {};
     void Yield();
     void YieldToNextRound();
+    virtual void Record() {}
     /**
      * @brief Re-schedules the task to run. Note: the resumed task does not run
      * in place.
@@ -113,6 +114,8 @@ public:
     void WaitIo();
     void FinishIo();
 
+    bool need_record{false};
+    int64_t last_yield_ts;
     uint32_t inflight_io_{0};
     int io_res_{0};
     uint32_t io_flags_{0};

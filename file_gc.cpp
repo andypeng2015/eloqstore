@@ -2,6 +2,7 @@
 
 #include <jsoncpp/json/json.h>
 
+#include <algorithm>
 #include <boost/algorithm/string/predicate.hpp>
 #include <filesystem>
 #include <unordered_set>
@@ -128,7 +129,8 @@ KvError ListCloudFiles(const TableIdent &tbl_id,
     // Set KvTask pointer and initialize inflight_io_
     list_task.SetKvTask(current_task);
 
-    cloud_mgr->GetObjectStore().GetHttpManager()->SubmitRequest(&list_task);
+    cloud_mgr->AcquireCloudSlot(current_task);
+    cloud_mgr->GetObjectStore().SubmitTask(&list_task, shard);
     current_task->WaitIo();
 
     if (list_task.error_ != KvError::NoError)
@@ -208,7 +210,8 @@ KvError DownloadArchiveFile(const TableIdent &tbl_id,
     // Set KvTask pointer and initialize inflight_io_
     download_task.SetKvTask(current_task);
 
-    cloud_mgr->GetObjectStore().GetHttpManager()->SubmitRequest(&download_task);
+    cloud_mgr->AcquireCloudSlot(current_task);
+    cloud_mgr->GetObjectStore().SubmitTask(&download_task, shard);
     current_task->WaitIo();
 
     if (download_task.error_ != KvError::NoError)
@@ -402,7 +405,6 @@ KvError DeleteUnreferencedCloudFiles(
     }
 
     KvTask *current_task = ThdTask();
-    AsyncHttpManager *http_mgr = cloud_mgr->GetObjectStore().GetHttpManager();
     if (files_to_delete.size() == data_files.size())
     {
         files_to_delete.emplace_back(tbl_id.ToString() + "/" +
@@ -419,10 +421,27 @@ KvError DeleteUnreferencedCloudFiles(
         delete_tasks.emplace_back(remote_path);
         ObjectStore::DeleteTask &task = delete_tasks.back();
         task.SetKvTask(current_task);
-        http_mgr->SubmitRequest(&task);
     }
 
-    current_task->WaitIo();
+    ObjectStore &object_store = cloud_mgr->GetObjectStore();
+    const size_t max_slots = cloud_mgr->MaxCloudSlots();
+    size_t submitted = 0;
+    while (submitted < delete_tasks.size())
+    {
+        size_t batch =
+            std::min(max_slots, delete_tasks.size() - submitted);
+        for (size_t i = 0; i < batch; ++i)
+        {
+            cloud_mgr->AcquireCloudSlot(current_task);
+            object_store.SubmitTask(&delete_tasks[submitted + i], shard);
+        }
+        if (batch == 0)
+        {
+            break;
+        }
+        current_task->WaitIo();
+        submitted += batch;
+    }
 
     for (const auto &task : delete_tasks)
     {

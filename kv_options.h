@@ -65,6 +65,10 @@ struct KvOptions
      */
     uint32_t max_write_batch_pages = 256;
     /**
+     * @brief The maximum number of running write tasks for each shard.
+     */
+    size_t max_on_fly_write = 1;
+    /**
      * @brief Size of io-uring selected buffer ring.
      * It must be a power-of 2, and can be up to 32768.
      */

@@ -1,5 +1,8 @@
 #include "async_io_manager.h"
 
+#ifdef ELOQ_MODULE_ENABLED
+#include <bvar/latency_recorder.h>
+#endif
 #include <dirent.h>
 #include <fcntl.h>
 #include <gflags/gflags_declare.h>
@@ -81,7 +84,8 @@ std::unique_ptr<AsyncIoManager> AsyncIoManager::Instance(const EloqStore *store,
     }
     else
     {
-        return std::make_unique<CloudStoreMgr>(opts, fd_limit);
+        CloudStorageService *service = store->cloud_service_.get();
+        return std::make_unique<CloudStoreMgr>(opts, fd_limit, service);
     }
 }
 
@@ -785,13 +789,28 @@ std::pair<FileId, uint32_t> IouringMgr::ConvFilePageId(
     return {file_id, offset};
 }
 
+#ifdef ELOQ_MODULE_ENABLED
+bvar::LatencyRecorder IoUringSubmitLr("debug_iouring_submit", "us");
+#endif
+
+
 void IouringMgr::Submit()
 {
     if (prepared_sqe_ == 0)
     {
         return;
     }
+#ifdef ELOQ_MODULE_ENABLED
+    int64_t start = butil::cpuwide_time_us();
+#endif
     int ret = io_uring_submit(&ring_);
+#ifdef ELOQ_MODULE_ENABLED
+    int64_t gap = butil::cpuwide_time_us() - start;
+    if (gap > 10)
+    {
+        IoUringSubmitLr << butil::cpuwide_time_us() - start;
+    }
+#endif
     if (ret < 0)
     {
         LOG(ERROR) << "iouring submit failed " << ret;
@@ -1922,8 +1941,12 @@ KvError IouringMgr::DeleteFiles(const std::vector<std::string> &file_paths)
     return first_error;
 }
 
-CloudStoreMgr::CloudStoreMgr(const KvOptions *opts, uint32_t fd_limit)
-    : IouringMgr(opts, fd_limit), file_cleaner_(this), obj_store_(opts)
+CloudStoreMgr::CloudStoreMgr(const KvOptions *opts,
+                             uint32_t fd_limit,
+                             CloudStorageService *service)
+    : IouringMgr(opts, fd_limit),
+      file_cleaner_(this),
+      obj_store_(opts, service)
 {
     lru_file_head_.next_ = &lru_file_tail_;
     lru_file_tail_.prev_ = &lru_file_head_;
@@ -1951,15 +1974,11 @@ void CloudStoreMgr::Stop()
 
 void CloudStoreMgr::Submit()
 {
-    obj_store_.GetHttpManager()->PerformRequests();
-
     IouringMgr::Submit();
 }
 
 void CloudStoreMgr::PollComplete()
 {
-    obj_store_.GetHttpManager()->ProcessCompletedRequests();
-
     IouringMgr::PollComplete();
 }
 
@@ -2029,6 +2048,30 @@ void CloudStoreMgr::StopAllPrewarmTasks()
     {
         prewarmer->stop_.store(true, std::memory_order_release);
     }
+}
+
+void CloudStoreMgr::AcquireCloudSlot(KvTask *task)
+{
+    if (task == nullptr)
+    {
+        return;
+    }
+    while (inflight_cloud_slots_ >= max_cloud_slots_)
+    {
+        cloud_slot_waiting_.Wait(task);
+    }
+    ++inflight_cloud_slots_;
+}
+
+void CloudStoreMgr::ReleaseCloudSlot(size_t count)
+{
+    if (count == 0)
+    {
+        return;
+    }
+    assert(inflight_cloud_slots_ >= count);
+    inflight_cloud_slots_ -= count;
+    cloud_slot_waiting_.WakeN(count);
 }
 
 KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
@@ -2398,7 +2441,8 @@ KvError CloudStoreMgr::DownloadFile(const TableIdent &tbl_id, FileId file_id)
     // Set KvTask pointer and initialize inflight_io_
     download_task.SetKvTask(current_task);
 
-    obj_store_.GetHttpManager()->SubmitRequest(&download_task);
+    AcquireCloudSlot(current_task);
+    obj_store_.SubmitTask(&download_task, shard);
     current_task->WaitIo();
 
     CHECK_KV_ERR(download_task.error_);
@@ -2839,7 +2883,8 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
             task->data_buffer_ = std::move(batch_contents[i]);
             task->file_size_ = task->data_buffer_.size();
             task->buffer_offset_ = 0;
-            obj_store_.GetHttpManager()->SubmitRequest(task);
+            AcquireCloudSlot(current_task);
+            obj_store_.SubmitTask(task, shard);
         }
 
         if (!span.empty())

@@ -1,5 +1,8 @@
 #include "index_page_manager.h"
 
+#ifdef ELOQ_MODULE_ENABLED
+#include <bvar/latency_recorder.h>
+#endif
 #include <glog/logging.h>
 
 #include <cassert>

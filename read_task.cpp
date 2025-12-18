@@ -1,5 +1,9 @@
 #include "read_task.h"
 
+#ifdef ELOQ_MODULE_ENABLED
+#include <bvar/latency_recorder.h>
+#endif
+
 #include <string>
 #include <utility>
 
@@ -11,12 +15,29 @@
 namespace eloqstore
 {
 
+#ifdef ELOQ_MODULE_ENABLED
+bvar::LatencyRecorder ReadRecorder("debug_read_recorder", "us");
+struct ReadTimer
+{
+    ~ReadTimer()
+    {
+        ReadRecorder << butil::cpuwide_time_us() - start;
+    }
+    int64_t start{butil::cpuwide_time_us()};
+};
+#endif
+
 KvError ReadTask::Read(const TableIdent &tbl_id,
                        std::string_view search_key,
                        std::string &value,
                        uint64_t &timestamp,
                        uint64_t &expire_ts)
 {
+#ifdef ELOQ_MODULE_ENABLED
+    ReadTimer timer;
+    last_yield_ts = butil::cpuwide_time_ns();
+    need_record = true;
+#endif
     auto [meta, err] = shard->IndexManager()->FindRoot(tbl_id);
     CHECK_KV_ERR(err);
     if (meta->root_id_ == MaxPageId)

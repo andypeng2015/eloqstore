@@ -12,6 +12,7 @@
 // https://github.com/cameron314/concurrentqueue/issues/280
 #undef BLOCK_SIZE
 #include "concurrentqueue/blockingconcurrentqueue.h"
+#include "concurrentqueue/concurrentqueue.h"
 
 namespace eloqstore
 {
@@ -46,6 +47,7 @@ public:
     boost::context::continuation main_;
     KvTask *running_;
     CircularQueue<KvTask *> ready_tasks_;
+    size_t on_fly_write_{0};
 
 private:
     void WorkLoop();
@@ -53,6 +55,8 @@ private:
     void OnTaskFinished(KvTask *task);
     void OnReceivedReq(KvRequest *req);
     void ProcessReq(KvRequest *req);
+    void ProcessCloudReadyTasks();
+    void EnqueueCloudReadyTask(KvTask *task);
 
 #ifdef ELOQ_MODULE_ENABLED
     void WorkOneRound();
@@ -102,6 +106,7 @@ private:
     }
 
     moodycamel::BlockingConcurrentQueue<KvRequest *> requests_;
+    moodycamel::ConcurrentQueue<KvTask *> cloud_ready_tasks_;
     std::thread thd_;
     PagesPool page_pool_;
     std::unique_ptr<AsyncIoManager> io_mgr_;
@@ -136,5 +141,6 @@ private:
 #endif
 
     friend class EloqStoreModule;
+    friend class CloudStorageService;
 };
 }  // namespace eloqstore

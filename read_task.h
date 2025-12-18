@@ -1,5 +1,8 @@
 #pragma once
 
+#include <butil/time.h>
+#include <bvar/latency_recorder.h>
+
 #include <string_view>
 
 #include "error.h"
@@ -11,6 +14,10 @@ namespace eloqstore
 class IndexPageManager;
 class MemIndexPage;
 class MappingSnapshot;
+
+#ifdef ELOQ_MODULE_ENABLED
+inline bvar::LatencyRecorder read_round("debug_1_read_round", "ns");
+#endif
 
 class ReadTask : public KvTask
 {
@@ -34,6 +41,20 @@ public:
     TaskType Type() const override
     {
         return TaskType::Read;
+    }
+
+    void Record() override
+    {
+#ifdef ELOQ_MODULE_ENABLED
+        if (need_record)
+        {
+            int64_t gap = butil::cpuwide_time_ns() - last_yield_ts;
+            if (gap > 5000)
+            {
+                read_round << gap;
+            }
+        }
+#endif
     }
 };
 }  // namespace eloqstore

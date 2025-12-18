@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iostream>
 #include <limits>
 #include <memory>
 
@@ -254,6 +255,10 @@ void BatchWriteTask::Abort()
 
 KvError BatchWriteTask::Apply()
 {
+#ifdef ELOQ_MODULE_ENABLED
+    need_record = true;
+    last_yield_ts = butil::cpuwide_time_ns();
+#endif
     KvError err = shard->IndexManager()->MakeCowRoot(tbl_ident_, cow_meta_);
     cow_meta_.compression_->SampleAndBuildDictionaryIfNeeded(data_batch_);
     CHECK_KV_ERR(err);
@@ -264,6 +269,7 @@ KvError BatchWriteTask::Apply()
     err = UpdateMeta();
     CHECK_KV_ERR(err);
     TriggerTTL();
+    need_record = false;
     return KvError::NoError;
 }
 

@@ -109,6 +109,7 @@ set(ELOQ_STORE_SOURCES
         kill_point.cpp
         file_gc.cpp
         archive_crond.cpp
+        cloud_storage_service.cpp
         object_store.cpp
         types.cpp
         kv_options.cpp

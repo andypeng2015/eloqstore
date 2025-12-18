@@ -101,7 +101,7 @@ KvError WriteTask::WritePage(VarPage page, FilePageId file_page_id)
         }
         else
         {
-            YieldToNextRound();
+            // YieldToNextRound();
         }
     }
     else
@@ -116,7 +116,7 @@ KvError WriteTask::WritePage(VarPage page, FilePageId file_page_id)
         }
         else
         {
-            YieldToNextRound();
+            // YieldToNextRound();
         }
     }
     return KvError::NoError;

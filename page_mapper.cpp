@@ -1,5 +1,8 @@
 #include "page_mapper.h"
 
+#ifdef ELOQ_MODULE_ENABLED
+#include <bvar/latency_recorder.h>
+#endif
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -43,6 +46,11 @@ PageMapper::PageMapper(IndexPageManager *idx_mgr, const TableIdent *tbl_ident)
     mapping_->mapping_tbl_.reserve(Options()->init_page_count);
     file_page_allocator_ = FilePageAllocator::Instance(Options());
 }
+
+#ifdef ELOQ_MODULE_ENABLED
+bvar::LatencyRecorder cow_lr("debug_cow_lr", "ns");
+bvar::LatencyRecorder cow_lr2("debug_cow_lr2", "ns");
+#endif
 
 PageMapper::PageMapper(const PageMapper &rhs)
     : free_page_head_(rhs.free_page_head_),
