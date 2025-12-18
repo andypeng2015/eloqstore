@@ -17,6 +17,7 @@ namespace eloqstore
 {
 class KvTask;
 class PageMapper;
+class MappingArena;
 
 class MappingArena;
 
@@ -66,12 +67,6 @@ public:
                       PageId page_id,
                       std::string_view key,
                       PageId &result);
-
-    KvError SeekIndex(MappingSnapshot *mapping,
-                      PageId page_id,
-                      std::string_view key,
-                      std::span<PageId> results,
-                      size_t &result_size);
 
     const KvOptions *Options() const;
     AsyncIoManager *IoMgr() const;

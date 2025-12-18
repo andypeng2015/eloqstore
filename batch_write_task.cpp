@@ -332,7 +332,7 @@ KvError BatchWriteTask::ApplyBatch(PageId &root_id,
         err = ApplyOnePage(cidx, now_ms);
         CHECK_KV_ERR(err);
     }
-    // Flush all dirty leaf data pages in leaf_triple_ .
+    // Flush all dirty leaf data pages in leaf_triple_.
     assert(TripleElement(2) == nullptr);
     err = ShiftLeafLink();
     CHECK_KV_ERR(err);
@@ -494,6 +494,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
                 // Finishes the current page.
                 KvError err = FinishDataPage(std::move(curr_page_key), page_id);
                 CHECK_KV_ERR(err);
+                YieldToNextRound();
                 // Starts a new page.
                 curr_page_key = cmp->FindShortestSeparator(
                     {prev_key.data(), prev_key.size()}, key);
@@ -508,7 +509,6 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
             prev_key = key;
             return KvError::NoError;
         });
-
     while (is_base_iter_valid && change_it != change_end_it)
     {
         std::string_view base_key = base_page_iter.Key();
@@ -722,6 +722,7 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
     else
     {
         err = FinishDataPage(std::move(curr_page_key), page_id);
+        YieldToNextRound();
         CHECK_KV_ERR(err);
     }
     assert(!TripleElement(1));
@@ -791,6 +792,7 @@ std::pair<MemIndexPage *, KvError> BatchWriteTask::Pop()
         {
             err = FinishIndexPage(prev_page, std::move(curr_page_key));
             CHECK_KV_ERR(err);
+            YieldToNextRound();
             curr_page_key = new_key;
             idx_page_builder_.Reset();
             // The first index entry is the leftmost pointer w/o the key.
@@ -1371,6 +1373,7 @@ KvError BatchWriteTask::WriteOverflowValue(std::string_view value)
             err =
                 WritePage(OverflowPage(end_page_id, opts, page_val, pointers));
             CHECK_KV_ERR(err);
+            YieldToNextRound();
         }
 
         // Write the next overflow pages group.
@@ -1395,6 +1398,7 @@ KvError BatchWriteTask::WriteOverflowValue(std::string_view value)
             value = value.substr(page_val_size);
             err = WritePage(OverflowPage(pg_id, opts, page_val));
             CHECK_KV_ERR(err);
+            YieldToNextRound();
         }
         assert(i == pointers.size());
     }
