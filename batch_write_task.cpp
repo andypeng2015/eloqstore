@@ -494,7 +494,6 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
                 // Finishes the current page.
                 KvError err = FinishDataPage(std::move(curr_page_key), page_id);
                 CHECK_KV_ERR(err);
-                YieldToNextRound();
                 // Starts a new page.
                 curr_page_key = cmp->FindShortestSeparator(
                     {prev_key.data(), prev_key.size()}, key);
@@ -722,7 +721,6 @@ KvError BatchWriteTask::ApplyOnePage(size_t &cidx, uint64_t now_ms)
     else
     {
         err = FinishDataPage(std::move(curr_page_key), page_id);
-        YieldToNextRound();
         CHECK_KV_ERR(err);
     }
     assert(!TripleElement(1));
@@ -792,7 +790,6 @@ std::pair<MemIndexPage *, KvError> BatchWriteTask::Pop()
         {
             err = FinishIndexPage(prev_page, std::move(curr_page_key));
             CHECK_KV_ERR(err);
-            YieldToNextRound();
             curr_page_key = new_key;
             idx_page_builder_.Reset();
             // The first index entry is the leftmost pointer w/o the key.
@@ -1373,7 +1370,6 @@ KvError BatchWriteTask::WriteOverflowValue(std::string_view value)
             err =
                 WritePage(OverflowPage(end_page_id, opts, page_val, pointers));
             CHECK_KV_ERR(err);
-            YieldToNextRound();
         }
 
         // Write the next overflow pages group.
@@ -1398,7 +1394,6 @@ KvError BatchWriteTask::WriteOverflowValue(std::string_view value)
             value = value.substr(page_val_size);
             err = WritePage(OverflowPage(pg_id, opts, page_val));
             CHECK_KV_ERR(err);
-            YieldToNextRound();
         }
         assert(i == pointers.size());
     }

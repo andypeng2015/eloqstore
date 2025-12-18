@@ -491,7 +491,6 @@ KvError IndexPageManager::SeekIndex(MappingSnapshot *mapping,
         }
 
         node->Unpin();
-        ThdTask()->YieldToNextRound();
         current_id = child_id;
     }
 }
