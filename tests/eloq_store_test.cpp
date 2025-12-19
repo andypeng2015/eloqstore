@@ -8,6 +8,7 @@
 #include <memory>
 #include <thread>
 
+#include "circular_queue.h"
 #include "common.h"
 #include "test_utils.h"
 
@@ -231,4 +232,35 @@ TEST_CASE("EloqStore handles requests when stopped", "[eloq_store]")
     REQUIRE(request.Error() == eloqstore::KvError::NotRunning);
 
     CleanupTestDir(test_dir);
+}
+
+TEST_CASE("CircularQueue reset from zero capacity", "[cqueue]")
+{
+    eloqstore::CircularQueue<int> q(0);
+    REQUIRE(q.Capacity() == 0);
+
+    q.Reset(0);
+    REQUIRE(q.Capacity() == 0);
+
+    q.Enqueue(42);  // triggers internal Reset(8)
+    REQUIRE(q.Size() == 1);
+    REQUIRE(q.Capacity() >= 8);
+    REQUIRE(q.Peek() == 42);
+}
+
+TEST_CASE("CircularQueue reset assigns new capacity", "[cqueue]")
+{
+    eloqstore::CircularQueue<int> q;
+    q.Enqueue(1);
+    q.Enqueue(2);
+
+    q.Reset(4);
+    REQUIRE(q.Size() == 0);
+    REQUIRE(q.Capacity() == 4);
+
+    q.Enqueue(3);
+    q.Enqueue(4);
+    REQUIRE(q.Size() == 2);
+    REQUIRE(q.Get(0) == 3);
+    REQUIRE(q.Get(1) == 4);
 }
