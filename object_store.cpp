@@ -281,7 +281,8 @@ void AppendParsedEntry(const std::string &decoded_key,
 bool ParseS3XmlListResponse(const std::string &payload,
                             const std::string &strip_prefix,
                             std::vector<std::string> *objects,
-                            std::vector<utils::CloudObjectInfo> *infos)
+                            std::vector<utils::CloudObjectInfo> *infos,
+                            std::string *next_continuation_token)
 {
     if (objects)
     {
@@ -378,6 +379,21 @@ bool ParseS3XmlListResponse(const std::string &payload,
                           std::string{},
                           objects,
                           infos);
+    }
+
+    // Extract pagination info
+    if (next_continuation_token)
+    {
+        std::string is_truncated = ExtractTagValue(payload, "IsTruncated");
+        if (is_truncated == "true")
+        {
+            *next_continuation_token =
+                ExtractTagValue(payload, "NextContinuationToken");
+        }
+        else
+        {
+            next_continuation_token->clear();
+        }
     }
 
     return true;
@@ -495,13 +511,19 @@ public:
         const std::string &payload,
         const std::string &strip_prefix,
         std::vector<std::string> *objects,
-        std::vector<utils::CloudObjectInfo> *infos) const override
+        std::vector<utils::CloudObjectInfo> *infos,
+        std::string *next_continuation_token) const override
     {
         if (ParseJsonListResponse(payload, objects, infos))
         {
+            if (next_continuation_token)
+            {
+                next_continuation_token->clear();  // JSON format not paginated
+            }
             return true;
         }
-        return ParseS3XmlListResponse(payload, strip_prefix, objects, infos);
+        return ParseS3XmlListResponse(
+            payload, strip_prefix, objects, infos, next_continuation_token);
     }
 
 protected:
@@ -696,13 +718,19 @@ public:
         const std::string &payload,
         const std::string &strip_prefix,
         std::vector<std::string> *objects,
-        std::vector<utils::CloudObjectInfo> *infos) const override
+        std::vector<utils::CloudObjectInfo> *infos,
+        std::string *next_continuation_token) const override
     {
         if (ParseJsonListResponse(payload, objects, infos))
         {
+            if (next_continuation_token)
+            {
+                next_continuation_token->clear();
+            }
             return true;
         }
-        return ParseS3XmlListResponse(payload, strip_prefix, objects, infos);
+        return ParseS3XmlListResponse(
+            payload, strip_prefix, objects, infos, next_continuation_token);
     }
 
 protected:
@@ -774,10 +802,11 @@ bool ObjectStore::ParseListObjectsResponse(
     const std::string &payload,
     const std::string &strip_prefix,
     std::vector<std::string> *objects,
-    std::vector<utils::CloudObjectInfo> *infos) const
+    std::vector<utils::CloudObjectInfo> *infos,
+    std::string *next_continuation_token) const
 {
     return async_http_mgr_->ParseListObjectsResponse(
-        payload, strip_prefix, objects, infos);
+        payload, strip_prefix, objects, infos, next_continuation_token);
 }
 
 AsyncHttpManager::AsyncHttpManager(const KvOptions *options) : options_(options)
@@ -812,14 +841,15 @@ bool AsyncHttpManager::ParseListObjectsResponse(
     const std::string &payload,
     const std::string &strip_prefix,
     std::vector<std::string> *objects,
-    std::vector<utils::CloudObjectInfo> *infos) const
+    std::vector<utils::CloudObjectInfo> *infos,
+    std::string *next_continuation_token) const
 {
     if (!backend_)
     {
         return false;
     }
     return backend_->ParseListObjectsResponse(
-        payload, strip_prefix, objects, infos);
+        payload, strip_prefix, objects, infos, next_continuation_token);
 }
 
 void AsyncHttpManager::PerformRequests()
@@ -1060,8 +1090,10 @@ bool AsyncHttpManager::SetupListRequest(ObjectStore::ListTask *task, CURL *easy)
     task->json_data_ = prefix;
 
     SignedRequestInfo request_info;
-    if (!backend_->BuildListRequest(
-            prefix, task->Recursive(), std::string{}, &request_info))
+    if (!backend_->BuildListRequest(prefix,
+                                    task->Recursive(),
+                                    task->continuation_token_,
+                                    &request_info))
     {
         task->error_ = KvError::CloudErr;
         return false;
