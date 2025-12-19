@@ -253,6 +253,10 @@ void BatchWriteTask::Abort()
     ttl_batch_.clear();
 }
 
+#ifdef ELOQ_MODULE_ENABLED
+bvar::LatencyRecorder make_cow_lr("debug_make_cow", "ns");
+#endif
+
 KvError BatchWriteTask::Apply()
 {
 #ifdef ELOQ_MODULE_ENABLED
@@ -260,6 +264,10 @@ KvError BatchWriteTask::Apply()
     last_yield_ts = butil::cpuwide_time_ns();
 #endif
     KvError err = shard->IndexManager()->MakeCowRoot(tbl_ident_, cow_meta_);
+#ifdef ELOQ_MODULE_ENABLED
+    auto cow = butil::cpuwide_time_ns();
+    make_cow_lr << (cow - last_yield_ts);
+#endif
     cow_meta_.compression_->SampleAndBuildDictionaryIfNeeded(data_batch_);
     CHECK_KV_ERR(err);
     err = ApplyBatch(cow_meta_.root_id_, true);
