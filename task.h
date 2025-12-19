@@ -117,6 +117,11 @@ public:
 
     TaskStatus status_{TaskStatus::Idle};
     KvRequest *req_{nullptr};
+    // The scheduler/main continuation for *this task*.
+    // Each Boost.Context continuation is symmetric; the task must keep its own
+    // "sink" so it can yield back to the scheduler safely even when multiple
+    // tasks are interleaved on a shard.
+    continuation sink_;
     continuation coro_;
     KvTask *next_{nullptr};
 };

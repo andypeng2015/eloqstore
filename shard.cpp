@@ -370,7 +370,7 @@ bool Shard::ExecuteReadyTasks()
         ready_tasks_.Dequeue();
         assert(task->status_ == TaskStatus::Ongoing);
         running_ = task;
-        task->coro_ = task->coro_.resume();
+        task->coro_ = std::move(task->coro_).resume();
         if (task->status_ == TaskStatus::Finished)
         {
             OnTaskFinished(task);

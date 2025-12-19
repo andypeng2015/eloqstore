@@ -2424,9 +2424,10 @@ void CloudStoreMgr::InitBackgroundJob()
     file_cleaner_.coro_ = boost::context::callcc(
         [this](continuation &&sink)
         {
-            shard->main_ = std::move(sink);
+            KvTask *task = ThdTask();
+            task->sink_ = std::move(sink);
             file_cleaner_.Run();
-            return std::move(shard->main_);
+            return std::move(task->sink_);
         });
     if (options_->prewarm_cloud_cache)
     {
@@ -2436,9 +2437,10 @@ void CloudStoreMgr::InitBackgroundJob()
             prewarmer->coro_ = boost::context::callcc(
                 [this, prewarmer_ptr = prewarmer.get()](continuation &&sink)
                 {
-                    shard->main_ = std::move(sink);
+                    KvTask *task = ThdTask();
+                    task->sink_ = std::move(sink);
                     prewarmer_ptr->Run();
-                    return std::move(shard->main_);
+                    return std::move(task->sink_);
                 });
         }
     }

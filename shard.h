@@ -44,7 +44,6 @@ public:
 
     const EloqStore *store_;
     const size_t shard_id_{0};
-    boost::context::continuation main_;
     KvTask *running_;
     CircularQueue<KvTask *> ready_tasks_;
 
@@ -81,9 +80,9 @@ private:
                                              stack_allocator_,
                                              [lbd](continuation &&sink)
                                              {
-                                                 shard->main_ = std::move(sink);
-                                                 KvError err = lbd();
                                                  KvTask *task = ThdTask();
+                                                 task->sink_ = std::move(sink);
+                                                 KvError err = lbd();
                                                  if (err != KvError::NoError)
                                                  {
                                                      task->Abort();
@@ -93,7 +92,7 @@ private:
                                                  task->req_ = nullptr;
                                                  task->status_ =
                                                      TaskStatus::Finished;
-                                                 return std::move(shard->main_);
+                                                 return std::move(task->sink_);
                                              });
         running_ = nullptr;
         if (task->status_ == TaskStatus::Finished)

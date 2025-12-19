@@ -14,7 +14,8 @@ namespace eloqstore
 {
 void KvTask::Yield()
 {
-    shard->main_ = shard->main_.resume();
+    // Yield back to the scheduler for this task.
+    sink_ = std::move(sink_).resume();
 }
 
 void KvTask::Resume()
