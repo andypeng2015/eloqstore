@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <filesystem>
@@ -102,6 +103,55 @@ TEST_CASE("cloud prewarm downloads while shards idle", "[cloud][prewarm]")
 
     writer.Validate();
     store->Stop();
+}
+
+TEST_CASE("cloud reopen waits on evicting cached file", "[cloud][gc]")
+{
+    using namespace std::chrono_literals;
+
+    eloqstore::KvOptions options = cloud_options;
+    // Force frequent eviction: allow only ~3 data files worth of cache.
+    options.local_space_limit = options.DataFileSize() * 10;
+    eloqstore::TableIdent tbl_id{"cloud-wait", 0};
+    eloqstore::EloqStore *store = InitStore(options);
+
+    MapVerifier writer(tbl_id, store);
+    writer.SetValueSize(32 * 1024);  // Large values to quickly fill files.
+    writer.SetAutoClean(false);
+    writer.Upsert(0, 200);
+    writer.Validate();
+
+    std::atomic<bool> stop_reader{false};
+    std::atomic<bool> reader_failed{false};
+    std::thread reader(
+        [&]()
+        {
+            while (!stop_reader.load(std::memory_order_relaxed))
+            {
+                eloqstore::ReadRequest req;
+                req.SetArgs(tbl_id, Key(0));
+                store->ExecSync(&req);
+                if (req.Error() != eloqstore::KvError::NoError)
+                {
+                    reader_failed.store(true, std::memory_order_relaxed);
+                    break;
+                }
+                std::this_thread::sleep_for(2ms);
+            }
+        });
+
+    // Produce more files to trigger cache eviction while reads keep reopening
+    // the oldest file (where key 0 lives).
+    for (int i = 0; i < 4; ++i)
+    {
+        writer.Upsert(10000 + i * 500, 10000 + (i + 1) * 500);
+        std::this_thread::sleep_for(50ms);
+    }
+
+    stop_reader.store(true, std::memory_order_relaxed);
+    reader.join();
+
+    writer.Validate();
 }
 
 TEST_CASE("cloud prewarm respects cache budget", "[cloud][prewarm]")
