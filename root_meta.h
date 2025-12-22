@@ -6,6 +6,7 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "common.h"
 #include "compression.h"
 #include "mem_index_page.h"
 #include "page_mapper.h"
@@ -23,7 +24,8 @@ public:
                               PageId ttl_root,
                               const MappingSnapshot *mapping,
                               FilePageId max_fp_id,
-                              std::string_view dict_bytes);
+                              std::string_view dict_bytes,
+                              const FileIdTermMapping &file_id_mapping);
 
     std::string_view Finalize(PageId new_root, PageId ttl_root);
     void Reset();

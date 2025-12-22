@@ -2,10 +2,11 @@
 
 #include <cstdint>
 
-#define CHECK_KV_ERR(err)          \
-    if ((err) != KvError::NoError) \
-    {                              \
-        return err;                \
+#define CHECK_KV_ERR(err)                                    \
+    if ((err) != KvError::NoError)                           \
+    {                                                        \
+        DLOG(ERROR) << "CHECK_KV_ERR: " << ErrorString(err); \
+        return err;                                          \
     }
 
 namespace eloqstore
@@ -27,6 +28,7 @@ enum struct KvError : uint8_t
     NoPermission,
     CloudErr,
     IoFail,
+    ExpiredTerm,
 
 };
 
@@ -64,6 +66,8 @@ constexpr const char *ErrorString(KvError err)
         return "Operation timeout";
     case KvError::NoPermission:
         return "Operation not permitted";
+    case KvError::ExpiredTerm:
+        return "Expired term";
     }
     return "Unknown error";
 }
