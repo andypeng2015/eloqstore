@@ -78,7 +78,7 @@ protected:
      */
     FilePageId batch_fp_id_{MaxFilePageId};
 
-    // Phase 9: track whether FileIdTermMapping changed in this write task.
+    // Track whether FileIdTermMapping changed in this write task.
     // If it changed, we must force a full snapshot (WAL append doesn't include
     // FileIdTermMapping).
     bool file_id_term_mapping_dirty_{false};

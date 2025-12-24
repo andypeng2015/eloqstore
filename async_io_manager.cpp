@@ -419,7 +419,7 @@ KvError IouringMgr::WritePages(const TableIdent &tbl_id,
                                FilePageId first_fp_id)
 {
     auto [file_id, offset] = ConvFilePageId(first_fp_id);
-    uint64_t term = GetFileIdTerm(tbl_id, file_id).value_or(0);
+    uint64_t term = GetFileIdTerm(tbl_id, file_id).value_or(ProcessTerm());
     auto [fd_ref, err] = OpenOrCreateFD(tbl_id, file_id, false, true, term);
     CHECK_KV_ERR(err);
     fd_ref.Get()->dirty_ = true;
@@ -1682,7 +1682,6 @@ KvError IouringMgr::CreateArchive(const TableIdent &tbl_id,
 {
     auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory, false, 0);
     CHECK_KV_ERR(err);
-    // Phase 8: Use term-aware archive names for local mode.
     uint64_t term = ProcessTerm();
     const std::string name = ArchiveName(term, ts);
     int res = WriteSnapshot(std::move(dir_fd), name, snapshot);
@@ -2677,7 +2676,6 @@ KvError CloudStoreMgr::CreateArchive(const TableIdent &tbl_id,
     {
         return ToKvError(res);
     }
-    // Phase 8: Use term-aware archive names for cloud mode.
     uint64_t term = ProcessTerm();
     const std::string name = ArchiveName(term, ts);
     res = WriteSnapshot(std::move(dir_fd), name, snapshot);

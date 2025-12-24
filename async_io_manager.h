@@ -169,7 +169,7 @@ public:
         (void) term;
     }
 
-    virtual uint64_t ProcessTerm() const
+    virtual uint64_t ProcessTerm() const override
     {
         return 0;
     }
@@ -235,9 +235,9 @@ public:
                        FileId file_id,
                        uint64_t term) override;
 
-    // Phase 8: Process term management for term-aware archive naming.
-    // Local mode always returns 0 (no term support).
-    virtual uint64_t ProcessTerm() const
+    // Process term management for term-aware file naming.
+    // Local mode always returns 0.
+    uint64_t ProcessTerm() const override
     {
         return 0;
     }

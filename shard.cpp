@@ -31,7 +31,7 @@ Shard::Shard(const EloqStore *store, size_t shard_id, uint32_t fd_limit)
 
 KvError Shard::Init()
 {
-    // Phase 10: inject process term into IO manager before any file operations.
+    // Inject process term into IO manager before any file operations.
     // Only CloudStoreMgr needs term support; IouringMgr always uses term=0.
     if (io_mgr_ != nullptr)
     {
