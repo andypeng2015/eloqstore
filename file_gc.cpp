@@ -59,7 +59,15 @@ KvError ExecuteLocalGC(const TableIdent &tbl_id,
     std::vector<std::string> archive_files;
     std::vector<uint64_t> archive_timestamps;
     std::vector<std::string> data_files;
-    ClassifyFiles(local_files, archive_files, archive_timestamps, data_files);
+    std::vector<uint64_t> manifest_terms;
+    ClassifyFiles(local_files,
+                  archive_files,
+                  archive_timestamps,
+                  data_files,
+                  manifest_terms);
+
+    // No need to check term expired for local mode.
+    (void) manifest_terms;
 
     // 3. get archived max file id.
     FileId least_not_archived_file_id = 0;
@@ -154,11 +162,13 @@ KvError ListCloudFiles(const TableIdent &tbl_id,
 void ClassifyFiles(const std::vector<std::string> &files,
                    std::vector<std::string> &archive_files,
                    std::vector<uint64_t> &archive_timestamps,
-                   std::vector<std::string> &data_files)
+                   std::vector<std::string> &data_files,
+                   std::vector<uint64_t> &manifest_terms)
 {
     archive_files.clear();
     archive_timestamps.clear();
     data_files.clear();
+    manifest_terms.clear();
 
     for (const std::string &file_name : files)
     {
@@ -190,7 +200,10 @@ void ClassifyFiles(const std::vector<std::string> &files,
                 archive_files.push_back(file_name);
                 archive_timestamps.push_back(timestamp.value());
             }
-            // Manifest files without timestamp are current manifest, ignore.
+            else
+            {
+                manifest_terms.push_back(term);
+            }
         }
         else if (ret.first == FileNameData)
         {
@@ -384,6 +397,7 @@ KvError GetOrUpdateArchivedMaxFileId(
 KvError DeleteUnreferencedCloudFiles(
     const TableIdent &tbl_id,
     const std::vector<std::string> &data_files,
+    const std::vector<uint64_t> &manifest_terms,
     const std::unordered_set<FileId> &retained_files,
     FileId least_not_archived_file_id,
     CloudStoreMgr *cloud_mgr)
@@ -423,6 +437,17 @@ KvError DeleteUnreferencedCloudFiles(
         }
     }
 
+    // delete expired manifest files.
+    auto process_term = cloud_mgr->ProcessTerm();
+    for (const uint64_t term : manifest_terms)
+    {
+        if (term < process_term)
+        {
+            files_to_delete.emplace_back(tbl_id.ToString() + "/" +
+                                         ManifestFileName(term));
+        }
+    }
+
     if (files_to_delete.empty())
     {
         return KvError::NoError;
@@ -432,13 +457,8 @@ KvError DeleteUnreferencedCloudFiles(
     auto *http_mgr = cloud_mgr->GetObjectStore().GetHttpManager();
     if (files_to_delete.size() == data_files.size())
     {
-        // If we're deleting all data files, also delete current manifest file.
-        uint64_t manifest_term =
-            cloud_mgr->GetFileIdTerm(tbl_id, IouringMgr::LruFD::kManifest)
-                .value_or(cloud_mgr->ProcessTerm());
-        // TODO(lzx): need delete all manifest files and archive files?
         files_to_delete.emplace_back(tbl_id.ToString() + "/" +
-                                     ManifestFileName(manifest_term));
+                                     ManifestFileName(process_term));
     }
 
     // If we're deleting every file in the directory, issue a single purge
@@ -571,9 +591,24 @@ KvError ExecuteCloudGC(const TableIdent &tbl_id,
     std::vector<std::string> archive_files;
     std::vector<uint64_t> archive_timestamps;
     std::vector<std::string> data_files;
-    ClassifyFiles(cloud_files, archive_files, archive_timestamps, data_files);
+    std::vector<uint64_t> manifest_terms;
+    ClassifyFiles(cloud_files,
+                  archive_files,
+                  archive_timestamps,
+                  data_files,
+                  manifest_terms);
 
-    // 3. get or update archived max file id.
+    // 3. check if term expired to avoid deleting invisible files.
+    auto process_term = cloud_mgr->ProcessTerm();
+    for (auto term : manifest_terms)
+    {
+        if (term > process_term)
+        {
+            return KvError::ExpiredTerm;
+        }
+    }
+
+    // 4. get or update archived max file id.
     FileId least_not_archived_file_id = 0;
     err = GetOrUpdateArchivedMaxFileId(tbl_id,
                                        archive_files,
@@ -585,9 +620,10 @@ KvError ExecuteCloudGC(const TableIdent &tbl_id,
         return err;
     }
 
-    // 4. delete unreferenced data files.
+    // 5. delete unreferenced data files.
     err = DeleteUnreferencedCloudFiles(tbl_id,
                                        data_files,
+                                       manifest_terms,
                                        retained_files,
                                        least_not_archived_file_id,
                                        cloud_mgr);
