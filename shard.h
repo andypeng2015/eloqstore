@@ -1,13 +1,13 @@
 #pragma once
 
-#include <boost/context/pooled_fixedsize_stack.hpp>
-#include <boost/context/protected_fixedsize_stack.hpp>
+#include <boost/context/continuation.hpp>
 #include <cstdio>
 #include <ctime>
 #include <utility>  // NOLINT(build/include_order)
 
 #include "circular_queue.h"
 #include "eloq_store.h"
+#include "guarded_stack_allocator.h"
 #include "task_manager.h"
 
 // https://github.com/cameron314/concurrentqueue/issues/280
@@ -107,12 +107,7 @@ private:
     std::unique_ptr<AsyncIoManager> io_mgr_;
     IndexPageManager index_mgr_;
     TaskManager task_mgr_;
-#ifndef NDEBUG
-    boost::context::protected_fixedsize_stack stack_allocator_;
-#else
-    boost::context::pooled_fixedsize_stack stack_allocator_;
-#endif
-
+    GuardedMmapStackAllocator stack_allocator_;
     class PendingWriteQueue
     {
     public:
