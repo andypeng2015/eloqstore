@@ -1,11 +1,11 @@
 #pragma once
 
-#include <boost/context/stack_context.hpp>
-
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <boost/context/stack_context.hpp>
 #include <cstddef>
+#include <glog/logging.h>
 #include <new>
 #include <stdexcept>
 #include <vector>
@@ -82,6 +82,7 @@ private:
         void *stack_base = static_cast<char *>(block.base) + page;
         sctx.size = block.stack_size;
         sctx.sp = static_cast<char *>(stack_base) + block.stack_size;
+        LOG(INFO) << "sp:" << sctx.sp << ", top:" << sctx.sp - sctx.size << "\n";
         return sctx;
     }
 

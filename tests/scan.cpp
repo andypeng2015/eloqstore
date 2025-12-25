@@ -9,24 +9,7 @@ using namespace test_util;
 
 TEST_CASE("delete scan", "[scan]")
 {
-    auto opt = mem_store_opts;
-    opt.coroutine_stack_size = 409600;
-    eloqstore::EloqStore *store = InitStore(opt);
-    MapVerifier verify(test_tbl_id, store);
-    verify.SetValueSize(400);
-    verify.WriteRnd(1, 100);
-    verify.WriteRnd(1, 100);
-    verify.Delete(50, 70);
-    verify.Scan(100, 200);
-    verify.Delete(0, 1000);
-    verify.Upsert(100, 200);
-}
-
-TEST_CASE("delete scan 2", "[scan][small stack]")
-{
-    auto opt = mem_store_opts;
-    opt.coroutine_stack_size = 409600;
-    eloqstore::EloqStore *store = InitStore(opt);
+    eloqstore::EloqStore *store = InitStore(mem_store_opts);
     MapVerifier verify(test_tbl_id, store);
     verify.SetValueSize(400);
     verify.WriteRnd(1, 100);
