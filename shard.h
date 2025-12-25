@@ -80,7 +80,6 @@ private:
                                              stack_allocator_,
                                              [lbd](continuation &&sink)
                                              {
-                                                 size_t guard_touch[3500] = {};
                                                  shard->main_ = std::move(sink);
                                                  KvError err = lbd();
                                                  KvTask *task = ThdTask();

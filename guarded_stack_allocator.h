@@ -13,7 +13,7 @@
 namespace eloqstore
 {
 
-// Allocates fixed-size stacks backed by mmap with a guard page at the base.
+// Allocates fixed-size stacks backed by mmap with guard pages at both ends.
 class GuardedMmapStackAllocator
 {
     struct StackBlock
@@ -29,7 +29,7 @@ class GuardedMmapStackAllocator
             const std::size_t page = PageSize();
             for (auto &block : blocks)
             {
-                munmap(block.base, block.stack_size + page);
+                munmap(block.base, block.stack_size + 2 * page);
             }
         }
 
@@ -101,7 +101,7 @@ private:
     StackBlock Create()
     {
         const std::size_t page = PageSize();
-        const std::size_t total_size = stack_size_ + page;
+        const std::size_t total_size = stack_size_ + 2 * page;
         void *base = mmap(nullptr,
                           total_size,
                           PROT_READ | PROT_WRITE,
@@ -113,7 +113,9 @@ private:
             throw std::bad_alloc();
         }
 
-        if (mprotect(base, page, PROT_NONE) != 0)
+        void *underflow_guard = static_cast<char *>(base) + page + stack_size_;
+        if (mprotect(base, page, PROT_NONE) != 0 ||
+            mprotect(underflow_guard, page, PROT_NONE) != 0)
         {
             munmap(base, total_size);
             throw std::runtime_error("mprotect(PROT_NONE) failed");
@@ -141,4 +143,3 @@ private:
 };
 
 }  // namespace eloqstore
-
