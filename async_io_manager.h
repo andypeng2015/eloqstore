@@ -550,6 +550,27 @@ public:
     std::pair<ManifestFilePtr, KvError> GetManifest(
         const TableIdent &tbl_id) override;
 
+    // Read term file from cloud, returns {term_value, etag, error}
+    // If file doesn't exist (404), returns {0, "", NotFound}
+    std::tuple<uint64_t, std::string, KvError> ReadTermFile(
+        const TableIdent &tbl_id);
+
+private:
+    // Upsert term file with limited retry logic
+    // Returns NoError on success, ExpiredTerm if condition invalid, other
+    // errors on failure
+    KvError UpsertTermFile(const TableIdent &tbl_id, uint64_t process_term);
+    // CAS create term file (only if doesn't exist)
+    // Returns {error, response_code}
+    std::pair<KvError, int64_t> CasCreateTermFile(const TableIdent &tbl_id,
+                                                  uint64_t process_term);
+    // CAS update term file with specific ETag
+    // Returns {error, response_code}
+    std::pair<KvError, int64_t> CasUpdateTermFileWithEtag(
+        const TableIdent &tbl_id,
+        uint64_t process_term,
+        const std::string &etag);
+
 private:
     int CreateFile(LruFD::Ref dir_fd,
                    FileId file_id,
@@ -578,9 +599,7 @@ private:
     void EnqueClosedFile(FileKey key);
     bool HasEvictableFile() const;
     int ReserveCacheSpace(size_t size);
-    static std::string ToFilename(const TableIdent &tbl_id,
-                                  FileId file_id,
-                                  uint64_t term = 0);
+    static std::string ToFilename(FileId file_id, uint64_t term = 0);
     size_t EstimateFileSize(FileId file_id) const;
     size_t EstimateFileSize(std::string_view filename) const;
     bool BackgroundJobInited() override;

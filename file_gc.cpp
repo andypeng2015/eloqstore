@@ -16,7 +16,6 @@
 #include "object_store.h"
 #include "replayer.h"
 #include "task.h"
-#include "utils.h"
 
 namespace eloqstore
 {
@@ -585,9 +584,39 @@ KvError ExecuteCloudGC(const TableIdent &tbl_id,
                        const std::unordered_set<FileId> &retained_files,
                        CloudStoreMgr *cloud_mgr)
 {
+    // Check term file before proceeding
+    uint64_t process_term = cloud_mgr->ProcessTerm();
+    auto [term_file_term, etag, err] = cloud_mgr->ReadTermFile(tbl_id);
+
+    if (err == KvError::NotFound)
+    {
+        // Legacy table - proceed with existing manifest term validation
+        // (backward compatible behavior)
+        LOG(INFO) << "ExecuteCloudGC: term file not found for table " << tbl_id;
+        return KvError::NoError;
+    }
+    else if (err != KvError::NoError)
+    {
+        LOG(ERROR) << "ExecuteCloudGC: failed to read term file for table "
+                   << tbl_id << " : " << ErrorString(err);
+        return err;
+    }
+    else
+    {
+        // Term file exists - validate
+        if (term_file_term != process_term)
+        {
+            LOG(WARNING) << "ExecuteCloudGC: term file term " << term_file_term
+                         << " != process_term " << process_term << " for table "
+                         << tbl_id << ", skipping GC";
+            return KvError::ExpiredTerm;
+        }
+        // term_file_term == process_term, proceed with GC
+    }
+
     // 1. list all files in cloud.
     std::vector<std::string> cloud_files;
-    KvError err = ListCloudFiles(tbl_id, cloud_files, cloud_mgr);
+    err = ListCloudFiles(tbl_id, cloud_files, cloud_mgr);
     DLOG(INFO) << "ListCloudFiles got " << cloud_files.size() << " files";
     if (err != KvError::NoError)
     {
@@ -606,7 +635,6 @@ KvError ExecuteCloudGC(const TableIdent &tbl_id,
                   manifest_terms);
 
     // 3. check if term expired to avoid deleting invisible files.
-    auto process_term = cloud_mgr->ProcessTerm();
     for (auto term : manifest_terms)
     {
         if (term > process_term)

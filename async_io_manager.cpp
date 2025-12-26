@@ -14,6 +14,7 @@
 #include <cassert>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -24,9 +25,12 @@
 #include <span>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "error.h"
 
 #ifdef ELOQ_MODULE_ENABLED
 #include <bthread/eloq_module.h>
@@ -2438,40 +2442,87 @@ std::pair<ManifestFilePtr, KvError> CloudStoreMgr::GetManifest(
     const TableIdent &tbl_id)
 {
     KvTask *current_task = ThdTask();
+    uint64_t process_term = ProcessTerm();
+
+    // Check and update term file
+    KvError term_err = UpsertTermFile(tbl_id, process_term);
+    if (term_err != KvError::NoError)
+    {
+        return {nullptr, term_err};
+    }
+
+    KvError dl_err = DownloadFile(tbl_id, LruFD::kManifest, process_term);
+    if (dl_err == KvError::NoError)
+    {
+        return IouringMgr::GetManifest(tbl_id);
+    }
+    else if (dl_err != KvError::NotFound)
+    {
+        // Hard error when trying to fetch expected term.
+        LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to download "
+                   << "manifest for term " << process_term << " : "
+                   << ErrorString(dl_err);
+        return {nullptr, dl_err};
+    }
+    // NotFound: fall through to list & pick latest manifest.
 
     // List manifests in cloud and pick the term (ignoring archive files).
     // If there is manifest term bigger than process_term, return error.
     // Else select the manifest that term equals or less than process_term.
     {
-        uint64_t process_term = ProcessTerm();
         uint64_t selected_term = 0;
 
         std::vector<std::string> cloud_files;
-        // List all files under this table prefix.
-        ObjectStore::ListTask list_task(tbl_id.ToString());
-        list_task.SetKvTask(current_task);
-        obj_store_.GetHttpManager()->SubmitRequest(&list_task);
-        current_task->WaitIo();
+        // List all manifest files under this table path.
+        // (Noice: file names in list response will not contain "manifest_"
+        // prefix.)
+        std::string remote_path =
+            tbl_id.ToString() + "/" + FileNameManifest + FileNameSeparator;
 
-        if (list_task.error_ != KvError::NoError)
+        // Loop to fetch all pages of results (S3 ListObjectsV2 returns max 1000
+        // per page)
+        std::string continuation_token;
+        do
         {
-            LOG(ERROR) << "CloudStoreMgr::GetManifest: list objects failed for "
-                       << tbl_id << " : " << ErrorString(list_task.error_);
-            return {nullptr, list_task.error_};
-        }
+            ObjectStore::ListTask list_task(remote_path, false);
+            list_task.SetContinuationToken(continuation_token);
+            list_task.SetKvTask(current_task);
+            obj_store_.GetHttpManager()->SubmitRequest(&list_task);
+            current_task->WaitIo();
 
-        if (!obj_store_.ParseListObjectsResponse(list_task.response_data_,
-                                                 list_task.json_data_,
-                                                 &cloud_files,
-                                                 nullptr))
-        {
-            LOG(ERROR) << "CloudStoreMgr::GetManifest: parse list response "
-                          "failed for table "
-                       << tbl_id;
-            return {nullptr, KvError::Corrupted};
-        }
+            if (list_task.error_ != KvError::NoError)
+            {
+                LOG(ERROR)
+                    << "CloudStoreMgr::GetManifest: list objects failed for "
+                    << tbl_id << " : " << ErrorString(list_task.error_);
+                return {nullptr, list_task.error_};
+            }
 
-        if (cloud_files.empty())
+            std::vector<std::string> batch_files;
+            std::string next_token;
+            if (!obj_store_.ParseListObjectsResponse(list_task.response_data_,
+                                                     list_task.json_data_,
+                                                     &batch_files,
+                                                     nullptr,
+                                                     &next_token))
+            {
+                LOG(ERROR) << "CloudStoreMgr::GetManifest: parse list response "
+                              "failed for table "
+                           << tbl_id;
+                return {nullptr, KvError::Corrupted};
+            }
+
+            // Append batch results to the main list
+            cloud_files.insert(cloud_files.end(),
+                               std::make_move_iterator(batch_files.begin()),
+                               std::make_move_iterator(batch_files.end()));
+
+            // Continue with next page if there is a continuation token
+            continuation_token = std::move(next_token);
+        } while (!continuation_token.empty());
+
+        if (cloud_files.empty() ||
+            cloud_files.size() == 1 && cloud_files[0] == CurrentTermFileName)
         {
             // No manifest at all in cloud.
             return {nullptr, KvError::NotFound};
@@ -2481,15 +2532,10 @@ std::pair<ManifestFilePtr, KvError> CloudStoreMgr::GetManifest(
         bool found = false;
         for (const std::string &name : cloud_files)
         {
-            auto [type, suffix] = ParseFileName(name);
-            if (type != FileNameManifest)
-            {
-                continue;
-            }
-
+            // "name" does not contain the prefix("manifest_").
             uint64_t term = 0;
             std::optional<uint64_t> ts;
-            if (!ParseManifestFileSuffix(suffix, term, ts))
+            if (!ParseManifestFileSuffix(name, term, ts))
             {
                 continue;
             }
@@ -2593,6 +2639,199 @@ std::pair<ManifestFilePtr, KvError> CloudStoreMgr::GetManifest(
     return IouringMgr::GetManifest(tbl_id);
 }
 
+std::tuple<uint64_t, std::string, KvError> CloudStoreMgr::ReadTermFile(
+    const TableIdent &tbl_id)
+{
+    KvTask *current_task = ThdTask();
+
+    // Download CURRENT_TERM file
+    ObjectStore::DownloadTask download_task(&tbl_id, CurrentTermFileName);
+    download_task.SetKvTask(current_task);
+    obj_store_.GetHttpManager()->SubmitRequest(&download_task);
+    current_task->WaitIo();
+
+    if (download_task.error_ == KvError::NotFound)
+    {
+        return {0, "", KvError::NotFound};  // Legacy table
+    }
+    if (download_task.error_ != KvError::NoError)
+    {
+        return {0, "", download_task.error_};
+    }
+
+    // Parse term value from response_data_ (trim whitespace first)
+    std::string_view term_str = download_task.response_data_;
+    // Trim leading/trailing whitespace
+    while (!term_str.empty() &&
+           (term_str.front() == ' ' || term_str.front() == '\t' ||
+            term_str.front() == '\r' || term_str.front() == '\n'))
+    {
+        term_str.remove_prefix(1);
+    }
+    while (!term_str.empty() &&
+           (term_str.back() == ' ' || term_str.back() == '\t' ||
+            term_str.back() == '\r' || term_str.back() == '\n'))
+    {
+        term_str.remove_suffix(1);
+    }
+    uint64_t term = 0;
+    try
+    {
+        term = std::stoull(std::string(term_str));
+    }
+    catch (const std::exception &)
+    {
+        return {0, "", KvError::Corrupted};
+    }
+
+    // Extract ETag from download_task.etag_
+    return {term, download_task.etag_, KvError::NoError};
+}
+
+KvError CloudStoreMgr::UpsertTermFile(const TableIdent &tbl_id,
+                                      uint64_t process_term)
+{
+    constexpr uint64_t kMaxAttempts = 10;
+    uint64_t attempt = 0;
+    while (attempt < kMaxAttempts)
+    {
+        // 1. Read term file (get current_term and ETag)
+        auto [current_term, etag, read_err] = ReadTermFile(tbl_id);
+
+        if (read_err == KvError::NotFound)
+        {
+            // Legacy table - create term file with current process_term
+            auto [create_err, response_code] =
+                CasCreateTermFile(tbl_id, process_term);
+            if (create_err == KvError::NoError)
+            {
+                // Successfully created, no update needed
+                return KvError::NoError;
+            }
+
+            // Check if CAS conflict (412 or 409) - file already exists
+            if (create_err == KvError::CloudErr &&
+                obj_store_.GetHttpManager()->IsCasRetryable(response_code))
+            {
+                // CAS conflict detected - file was created by another instance
+                // Retry by reading the file and continuing with update logic
+                ++attempt;
+                LOG(WARNING) << "CloudStoreMgr::UpsertTermFile: CAS conflict "
+                             << "(HTTP " << response_code << ") when creating "
+                             << "term file for table " << tbl_id << " (attempt "
+                             << attempt << "/" << kMaxAttempts
+                             << "), retrying with backoff";
+                continue;  // Retry by reading term file in next iteration
+            }
+
+            // Non-CAS error - try read again to see if file was created by
+            // another instance
+            std::tie(current_term, etag, read_err) = ReadTermFile(tbl_id);
+            if (read_err != KvError::NoError)
+            {
+                LOG(WARNING)
+                    << "CloudStoreMgr::UpsertTermFile: failed to create "
+                    << "term file for legacy table " << tbl_id
+                    << ", error: " << ErrorString(create_err);
+                return create_err;
+            }
+            // Successfully read after retry, continue with validation
+        }
+        if (read_err != KvError::NoError)
+        {
+            LOG(ERROR)
+                << "CloudStoreMgr::UpsertTermFile: failed to read term file "
+                << "for table " << tbl_id << " : " << ErrorString(read_err);
+            return read_err;
+        }
+
+        // 2. Validate update condition
+        if (current_term > process_term)
+        {
+            // Term file is ahead, instance is outdated
+            LOG(ERROR) << "CloudStoreMgr::UpsertTermFile: term file term "
+                       << current_term << " greater than process_term "
+                       << process_term << " for table " << tbl_id;
+            return KvError::ExpiredTerm;
+        }
+        if (current_term == process_term)
+        {
+            // Already up-to-date, no update needed
+            return KvError::NoError;
+        }
+
+        // 3. Attempt CAS update with If-Match: etag
+        auto [err, response_code] =
+            CasUpdateTermFileWithEtag(tbl_id, process_term, etag);
+
+        if (err == KvError::NoError)
+        {
+            return KvError::NoError;
+        }
+
+        // 4. Check if CAS conflict (412 or 409 or 404)
+        if (err == KvError::NotFound ||
+            (err == KvError::CloudErr &&
+             obj_store_.GetHttpManager()->IsCasRetryable(response_code)))
+        {
+            ++attempt;
+            // CAS conflict detected - retry with backoff
+            LOG(WARNING) << "CloudStoreMgr::UpsertTermFile: CAS conflict "
+                         << "(HTTP " << response_code << ") for table "
+                         << tbl_id << " (attempt " << attempt << "/"
+                         << kMaxAttempts << "), current_term=" << current_term
+                         << ", process_term=" << process_term
+                         << ", retrying with backoff";
+
+            continue;
+        }
+
+        // Non-CAS error - return immediately
+        LOG(ERROR) << "CloudStoreMgr::UpsertTermFile: non-retryable error "
+                   << ErrorString(err) << " for table " << tbl_id;
+        return err;
+    }
+
+    // Exceeded max attempts
+    LOG(ERROR) << "CloudStoreMgr::UpsertTermFile: exceeded max attempts ("
+               << kMaxAttempts << ") for table " << tbl_id;
+    return KvError::CloudErr;
+}
+
+std::pair<KvError, int64_t> CloudStoreMgr::CasCreateTermFile(
+    const TableIdent &tbl_id, uint64_t process_term)
+{
+    KvTask *current_task = ThdTask();
+    std::string term_str = std::to_string(process_term);
+
+    ObjectStore::UploadTask upload_task(&tbl_id, CurrentTermFileName);
+    upload_task.data_buffer_ = term_str;
+    upload_task.if_none_match_ = "*";  // Only create if doesn't exist
+    upload_task.SetKvTask(current_task);
+
+    obj_store_.GetHttpManager()->SubmitRequest(&upload_task);
+    current_task->WaitIo();
+
+    return {upload_task.error_, upload_task.response_code_};
+}
+
+std::pair<KvError, int64_t> CloudStoreMgr::CasUpdateTermFileWithEtag(
+    const TableIdent &tbl_id, uint64_t process_term, const std::string &etag)
+{
+    KvTask *current_task = ThdTask();
+    std::string term_str = std::to_string(process_term);
+
+    ObjectStore::UploadTask upload_task(&tbl_id, CurrentTermFileName);
+    upload_task.data_buffer_ = term_str;
+    upload_task.if_match_ = etag;  // Only update if ETag matches
+    upload_task.SetKvTask(current_task);
+
+    obj_store_.GetHttpManager()->SubmitRequest(&upload_task);
+    current_task->WaitIo();
+
+    return {upload_task.error_, upload_task.response_code_};
+}
+
 KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
                                       std::string_view snapshot)
 {
@@ -2614,8 +2853,7 @@ KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
         SetFileIdTerm(tbl_id, LruFD::kManifest, ProcessTerm());
         manifest_term = ProcessTerm();
     }
-    FileKey fkey(tbl_id,
-                 ToFilename(tbl_id, LruFD::kManifest, manifest_term.value()));
+    FileKey fkey(tbl_id, ToFilename(LruFD::kManifest, manifest_term.value()));
     bool dequed = DequeClosedFile(fkey);
     if (!dequed)
     {
@@ -2707,7 +2945,7 @@ int CloudStoreMgr::OpenFile(const TableIdent &tbl_id,
                             bool direct,
                             uint64_t term)
 {
-    FileKey key = FileKey(tbl_id, ToFilename(tbl_id, file_id, term));
+    FileKey key = FileKey(tbl_id, ToFilename(file_id, term));
     if (DequeClosedFile(key))
     {
         // Try to open the file cached locally.
@@ -2763,7 +3001,7 @@ KvError CloudStoreMgr::SyncFile(LruFD::Ref fd)
     {
         const TableIdent &tbl_id = *fd.Get()->tbl_->tbl_id_;
         uint64_t term = fd.Get()->term_;
-        KvError err = UploadFiles(tbl_id, {ToFilename(tbl_id, file_id, term)});
+        KvError err = UploadFiles(tbl_id, {ToFilename(file_id, term)});
         if (err != KvError::NoError)
         {
             if (file_id == LruFD::kManifest)
@@ -2790,7 +3028,7 @@ KvError CloudStoreMgr::SyncFiles(const TableIdent &tbl_id,
         if (file_id != LruFD::kDirectory)
         {
             uint64_t term = fd.Get()->term_;
-            filenames.emplace_back(ToFilename(tbl_id, file_id, term));
+            filenames.emplace_back(ToFilename(file_id, term));
         }
     }
     return UploadFiles(tbl_id, std::move(filenames));
@@ -2805,14 +3043,12 @@ KvError CloudStoreMgr::CloseFile(LruFD::Ref fd)
     {
         const TableIdent *tbl_id = fd.Get()->tbl_->tbl_id_;
         uint64_t term = fd.Get()->term_;
-        EnqueClosedFile(FileKey(*tbl_id, ToFilename(*tbl_id, file_id, term)));
+        EnqueClosedFile(FileKey(*tbl_id, ToFilename(file_id, term)));
     }
     return KvError::NoError;
 }
 
-std::string CloudStoreMgr::ToFilename(const TableIdent &tbl_id,
-                                      FileId file_id,
-                                      uint64_t term)
+std::string CloudStoreMgr::ToFilename(FileId file_id, uint64_t term)
 {
     if (file_id == LruFD::kManifest)
     {
@@ -2946,7 +3182,7 @@ KvError CloudStoreMgr::DownloadFile(const TableIdent &tbl_id,
                                     uint64_t term)
 {
     KvTask *current_task = ThdTask();
-    std::string filename = ToFilename(tbl_id, file_id, term);
+    std::string filename = ToFilename(file_id, term);
 
     ObjectStore::DownloadTask download_task(&tbl_id, filename);
 
