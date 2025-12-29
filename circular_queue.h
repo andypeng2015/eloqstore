@@ -5,20 +5,26 @@
 
 namespace eloqstore
 {
+
+static size_t round_down_pow2_min2(size_t x)
+{
+    if (x < 2)
+        return 2;
+    size_t p = 1;
+    while ((p << 1) <= x)
+        p <<= 1;
+    return p;
+}
+
 template <typename T>
 class CircularQueue
 {
 public:
-    CircularQueue(size_t capacity = 8) : head_(0), cnt_(0), capacity_(capacity)
+    CircularQueue(size_t capacity = 8) : head_(0), cnt_(0)
     {
-        if (capacity_ == 0)
-        {
-            vec_ = nullptr;
-        }
-        else
-        {
-            vec_ = std::make_unique<T[]>(capacity);
-        }
+        capacity_ = round_down_pow2_min2(capacity);
+        mask_ = capacity_ - 1;
+        vec_ = std::make_unique<T[]>(capacity_);
     }
 
     CircularQueue(CircularQueue &&rhs)
@@ -26,6 +32,7 @@ public:
         head_ = rhs.head_;
         cnt_ = rhs.cnt_;
         capacity_ = rhs.capacity_;
+        mask_ = rhs.mask_;
         vec_ = std::move(rhs.vec_);
     }
 
@@ -36,6 +43,7 @@ public:
             head_ = rhs.head_;
             cnt_ = rhs.cnt_;
             capacity_ = rhs.capacity_;
+            mask_ = rhs.mask_;
             vec_ = std::move(rhs.vec_);
         }
         return *this;
@@ -50,25 +58,15 @@ public:
     {
         head_ = 0;
         cnt_ = 0;
-        capacity_ = new_cap;
-        if (capacity_ == 0)
-        {
-            vec_ = nullptr;
-        }
-        else
-        {
-            vec_ = std::make_unique<T[]>(capacity_);
-        }
+        capacity_ = round_down_pow2_min2(new_cap);
+        mask_ = capacity_ - 1;
+        vec_ = std::make_unique<T[]>(capacity_);
     }
 
     void Enqueue(const T &item)
     {
         if (cnt_ == 0)
         {
-            if (capacity_ == 0)
-            {
-                Reset(8);
-            }
             vec_[0] = item;
             head_ = 0;
             cnt_ = 1;
@@ -91,12 +89,13 @@ public:
             new_vec[capacity_] = item;
             cnt_ = capacity_ + 1;
             capacity_ = new_capacity;
+            mask_ = capacity_ - 1;
             head_ = 0;
             vec_ = std::move(new_vec);
         }
         else
         {
-            size_t tail = (head_ + cnt_) % capacity_;
+            size_t tail = (head_ + cnt_) & mask_;
             vec_[tail] = item;
             ++cnt_;
         }
@@ -104,19 +103,9 @@ public:
 
     void Enqueue(T &&item)
     {
-        if (cnt_ == 0)
+        if (__builtin_expect(cnt_ == capacity_, 0))
         {
-            if (capacity_ == 0)
-            {
-                Reset(8);
-            }
-            vec_[0] = std::move(item);
-            head_ = 0;
-            cnt_ = 1;
-        }
-        else if (cnt_ == capacity_)
-        {
-            size_t new_capacity = static_cast<size_t>(capacity_ * 1.5);
+            size_t new_capacity = capacity_ << 1;
             std::unique_ptr<T[]> new_vec = std::make_unique<T[]>(new_capacity);
 
             // Before: 0-------Tail-Head---------N-1
@@ -134,35 +123,27 @@ public:
                 new_vec[end] = std::move(vec_[idx]);
             }
 
-            new_vec[capacity_] = std::move(item);
-            cnt_ = capacity_ + 1;
             capacity_ = new_capacity;
+            mask_ = capacity_ - 1;
             head_ = 0;
             vec_ = std::move(new_vec);
         }
-        else
-        {
-            size_t tail = (head_ + cnt_) % capacity_;
-            vec_[tail] = std::move(item);
-            ++cnt_;
-        }
+        size_t tail = (head_ + cnt_) & mask_;
+        vec_[tail] = std::move(item);
+        ++cnt_;
     }
 
     void EnqueueAsFirst(const T &item)
     {
         if (cnt_ == 0)
         {
-            if (capacity_ == 0)
-            {
-                Reset(8);
-            }
             vec_[0] = item;
             head_ = 0;
             cnt_ = 1;
         }
         else if (cnt_ == capacity_)
         {
-            size_t new_capacity = static_cast<size_t>(capacity_ * 1.5);
+            size_t new_capacity = capacity_ << 1;
             std::unique_ptr<T[]> new_vec = std::make_unique<T[]>(new_capacity);
 
             // Before: 0-------Tail-Head---------N-1
@@ -179,6 +160,7 @@ public:
             head_ = new_capacity - 1;
             cnt_ = capacity_ + 1;
             capacity_ = new_capacity;
+            mask_ = capacity_ - 1;
             vec_ = std::move(new_vec);
         }
         else
@@ -227,20 +209,19 @@ public:
 
     size_t MemUsage() const
     {
-        return (sizeof(CircularQueue) + capacity_ * sizeof(uint64_t));
+        return sizeof(CircularQueue) + capacity_ * sizeof(T);
     }
 
     T &Get(size_t index) const
     {
-        return vec_[(head_ + index) % capacity_];
+        return vec_[(head_ + index) & mask_];
     }
 
     void Erase(size_t index)
     {
         while (index < cnt_ - 1)
         {
-            vec_[(head_ + index) % capacity_] =
-                vec_[(head_ + index + 1) % capacity_];
+            vec_[(head_ + index) & mask_] = vec_[(head_ + index + 1) & mask_];
             index++;
         }
         cnt_--;
@@ -255,5 +236,6 @@ private:
     size_t head_;
     size_t cnt_;
     size_t capacity_;
+    size_t mask_;
 };
 }  // namespace eloqstore
