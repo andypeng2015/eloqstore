@@ -2440,6 +2440,13 @@ size_t CloudStoreMgr::GetPrewarmFilesPulled() const
 std::pair<ManifestFilePtr, KvError> CloudStoreMgr::GetManifest(
     const TableIdent &tbl_id)
 {
+    // If the manifest is already downloaded, return it.
+    auto [manifest, err] = IouringMgr::GetManifest(tbl_id);
+    if (err == KvError::NoError)
+    {
+        return {std::move(manifest), err};
+    }
+
     KvTask *current_task = ThdTask();
     uint64_t process_term = ProcessTerm();
 
