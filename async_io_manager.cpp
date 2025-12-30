@@ -2469,168 +2469,165 @@ std::pair<ManifestFilePtr, KvError> CloudStoreMgr::GetManifest(
     // List manifests in cloud and pick the term (ignoring archive files).
     // If there is manifest term bigger than process_term, return error.
     // Else select the manifest that term equals or less than process_term.
+
+    uint64_t selected_term = 0;
+    std::vector<std::string> cloud_files;
+    // List all manifest files under this table path.
+    // (Notice: file names in list response will not contain "manifest_"
+    // prefix.)
+    std::string remote_path =
+        tbl_id.ToString() + "/" + FileNameManifest + FileNameSeparator;
+
+    // Loop to fetch all pages of results (S3 ListObjectsV2 returns max 1000
+    // per page)
+    std::string continuation_token;
+    do
     {
-        uint64_t selected_term = 0;
+        ObjectStore::ListTask list_task(remote_path, false);
+        list_task.SetContinuationToken(continuation_token);
+        list_task.SetKvTask(current_task);
+        obj_store_.GetHttpManager()->SubmitRequest(&list_task);
+        current_task->WaitIo();
 
-        std::vector<std::string> cloud_files;
-        // List all manifest files under this table path.
-        // (Noice: file names in list response will not contain "manifest_"
-        // prefix.)
-        std::string remote_path =
-            tbl_id.ToString() + "/" + FileNameManifest + FileNameSeparator;
-
-        // Loop to fetch all pages of results (S3 ListObjectsV2 returns max 1000
-        // per page)
-        std::string continuation_token;
-        do
+        if (list_task.error_ != KvError::NoError)
         {
-            ObjectStore::ListTask list_task(remote_path, false);
-            list_task.SetContinuationToken(continuation_token);
-            list_task.SetKvTask(current_task);
-            obj_store_.GetHttpManager()->SubmitRequest(&list_task);
-            current_task->WaitIo();
-
-            if (list_task.error_ != KvError::NoError)
-            {
-                LOG(ERROR)
-                    << "CloudStoreMgr::GetManifest: list objects failed for "
-                    << tbl_id << " : " << ErrorString(list_task.error_);
-                return {nullptr, list_task.error_};
-            }
-
-            std::vector<std::string> batch_files;
-            std::string next_token;
-            if (!obj_store_.ParseListObjectsResponse(list_task.response_data_,
-                                                     list_task.json_data_,
-                                                     &batch_files,
-                                                     nullptr,
-                                                     &next_token))
-            {
-                LOG(ERROR) << "CloudStoreMgr::GetManifest: parse list response "
-                              "failed for table "
-                           << tbl_id;
-                return {nullptr, KvError::Corrupted};
-            }
-
-            // Append batch results to the main list
-            cloud_files.insert(cloud_files.end(),
-                               std::make_move_iterator(batch_files.begin()),
-                               std::make_move_iterator(batch_files.end()));
-
-            // Continue with next page if there is a continuation token
-            continuation_token = std::move(next_token);
-        } while (!continuation_token.empty());
-
-        if (cloud_files.empty() ||
-            cloud_files.size() == 1 && cloud_files[0] == CurrentTermFileName)
-        {
-            // No manifest at all in cloud.
-            return {nullptr, KvError::NotFound};
+            LOG(ERROR) << "CloudStoreMgr::GetManifest: list objects failed "
+                          "for "
+                       << tbl_id << " : " << ErrorString(list_task.error_);
+            return {nullptr, list_task.error_};
         }
 
-        uint64_t best_term = 0;
-        bool found = false;
-        for (const std::string &name : cloud_files)
+        std::vector<std::string> batch_files;
+        std::string next_token;
+        if (!obj_store_.ParseListObjectsResponse(list_task.response_data_,
+                                                 list_task.json_data_,
+                                                 &batch_files,
+                                                 nullptr,
+                                                 &next_token))
         {
-            // "name" does not contain the prefix("manifest_").
-            uint64_t term = 0;
-            std::optional<uint64_t> ts;
-            if (!ParseManifestFileSuffix(name, term, ts))
-            {
-                continue;
-            }
-
-            // Skip archive manifests (manifest_<term>_<ts>).
-            if (ts.has_value())
-            {
-                continue;
-            }
-
-            if (term >= best_term)
-            {
-                found = true;
-                best_term = term;
-            }
+            LOG(ERROR) << "CloudStoreMgr::GetManifest: parse list response "
+                          "failed for table "
+                       << tbl_id;
+            return {nullptr, KvError::Corrupted};
         }
 
-        if (!found)
+        // Append batch results to the main list
+        cloud_files.insert(cloud_files.end(),
+                           std::make_move_iterator(batch_files.begin()),
+                           std::make_move_iterator(batch_files.end()));
+
+        // Continue with next page if there is a continuation token
+        continuation_token = std::move(next_token);
+    } while (!continuation_token.empty());
+
+    if (cloud_files.empty() ||
+        cloud_files.size() == 1 && cloud_files[0] == CurrentTermFileName)
+    {
+        // No manifest at all in cloud.
+        return {nullptr, KvError::NotFound};
+    }
+
+    uint64_t best_term = 0;
+    bool found = false;
+    for (const std::string &name : cloud_files)
+    {
+        // "name" does not contain the prefix("manifest_").
+        uint64_t term = 0;
+        std::optional<uint64_t> ts;
+        if (!ParseManifestFileSuffix(name, term, ts))
         {
-            LOG(ERROR)
-                << "CloudStoreMgr::GetManifest: no manifest found for table "
-                << tbl_id;
-            return {nullptr, KvError::CloudNoManifest};
+            LOG(FATAL) << "CloudStoreMgr::GetManifest: failed to parse "
+                          "manifest file suffix: "
+                       << name;
+            continue;
         }
 
-        selected_term = best_term;
-        // selected_term < process_term: allowed; allocator bump will be
-        // handled by Replayer when it sees term mismatch.
-        if (selected_term > process_term)
+        // Skip archive manifests (manifest_<term>_<ts>).
+        if (ts.has_value())
         {
-            LOG(ERROR) << "CloudStoreMgr::GetManifest: found manifest term "
-                       << selected_term << " greater than process_term "
-                       << process_term << " for table " << tbl_id;
-            return {nullptr, KvError::ExpiredTerm};
+            continue;
         }
 
-        LOG(INFO) << "Selected manifest term: " << selected_term
-                  << " for table " << tbl_id;
-
-        // Ensure the selected manifest is downloaded locally.
-        KvError dl_err = DownloadFile(tbl_id, LruFD::kManifest, selected_term);
-        if (dl_err != KvError::NoError)
+        if (term >= best_term)
         {
-            LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to download "
-                       << "selected manifest term " << selected_term
+            found = true;
+            best_term = term;
+        }
+    }
+
+    if (!found)
+    {
+        LOG(ERROR) << "CloudStoreMgr::GetManifest: no manifest found "
+                      "for table "
+                   << tbl_id;
+        return {nullptr, KvError::CloudNoManifest};
+    }
+
+    selected_term = best_term;
+    // selected_term < process_term: allowed; allocator bump will be
+    // handled by Replayer when it sees term mismatch.
+    if (selected_term > process_term)
+    {
+        LOG(ERROR) << "CloudStoreMgr::GetManifest: found manifest term "
+                   << selected_term << " greater than process_term "
+                   << process_term << " for table " << tbl_id;
+        return {nullptr, KvError::ExpiredTerm};
+    }
+
+    // Ensure the selected manifest is downloaded locally.
+    dl_err = DownloadFile(tbl_id, LruFD::kManifest, selected_term);
+    if (dl_err != KvError::NoError)
+    {
+        LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to download "
+                   << "selected manifest term " << selected_term
+                   << " for table " << tbl_id << " : " << ErrorString(dl_err);
+        return {nullptr, dl_err};
+    }
+
+    // If ProcessTerm() is set and the selected term is older than
+    // process_term, "promote" the manifest: copy its content into a new
+    // manifest_<process_term> object (both locally and in cloud), so
+    // subsequent readers can consistently use manifest_<process_term>.
+    if (selected_term != process_term)
+    {
+        // 1) Rename the manifest file locally.
+        auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory, false, 0);
+        if (err != KvError::NoError)
+        {
+            LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to open "
+                       << "directory for table " << tbl_id << " : "
+                       << ErrorString(err);
+            return {nullptr, err};
+        }
+
+        std::string src_filename = ManifestFileName(selected_term);
+        std::string promoted_name = ManifestFileName(process_term);
+        int res = Rename(
+            dir_fd.FdPair(), src_filename.c_str(), promoted_name.c_str());
+        if (res < 0)
+        {
+            LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to rename "
+                       << "manifest file " << src_filename << " to "
+                       << promoted_name << " for table " << tbl_id << " : "
+                       << strerror(-res);
+            return {nullptr, ToKvError(res)};
+        }
+        res = Fdatasync(dir_fd.FdPair());
+        if (res < 0)
+        {
+            LOG(ERROR) << "fsync directory failed " << strerror(-res);
+            return {nullptr, ToKvError(res)};
+        }
+
+        // 2) Upload manifest_<process_term> to cloud.
+        KvError up_err = UploadFiles(tbl_id, {promoted_name});
+        if (up_err != KvError::NoError)
+        {
+            LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to upload "
+                       << "promoted manifest file " << promoted_name
                        << " for table " << tbl_id << " : "
-                       << ErrorString(dl_err);
-            return {nullptr, dl_err};
-        }
-
-        // If ProcessTerm() is set and the selected term is older than
-        // process_term, "promote" the manifest: copy its content into a new
-        // manifest_<process_term> object (both locally and in cloud), so
-        // subsequent readers can consistently use manifest_<process_term>.
-        if (selected_term != process_term)
-        {
-            // 1) Rename the manifest file locally.
-            auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory, false, 0);
-            if (err != KvError::NoError)
-            {
-                LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to open "
-                           << "directory for table " << tbl_id << " : "
-                           << ErrorString(err);
-                return {nullptr, err};
-            }
-
-            std::string src_filename = ManifestFileName(selected_term);
-            std::string promoted_name = ManifestFileName(process_term);
-            int res = Rename(
-                dir_fd.FdPair(), src_filename.c_str(), promoted_name.c_str());
-            if (res < 0)
-            {
-                LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to rename "
-                           << "manifest file " << src_filename << " to "
-                           << promoted_name << " for table " << tbl_id << " : "
-                           << strerror(-res);
-                return {nullptr, ToKvError(res)};
-            }
-            res = Fdatasync(dir_fd.FdPair());
-            if (res < 0)
-            {
-                LOG(ERROR) << "fsync directory failed " << strerror(-res);
-                return {nullptr, ToKvError(res)};
-            }
-
-            // 2) Upload manifest_<process_term> to cloud.
-            KvError up_err = UploadFiles(tbl_id, {promoted_name});
-            if (up_err != KvError::NoError)
-            {
-                LOG(ERROR) << "CloudStoreMgr::GetManifest: failed to upload "
-                           << "promoted manifest file " << promoted_name
-                           << " for table " << tbl_id << " : "
-                           << ErrorString(up_err);
-                return {nullptr, up_err};
-            }
+                       << ErrorString(up_err);
+            return {nullptr, up_err};
         }
     }
 
