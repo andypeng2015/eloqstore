@@ -4,6 +4,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <filesystem>
+#include <memory>
 #include <unordered_set>
 #include <vector>
 

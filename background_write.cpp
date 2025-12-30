@@ -1,6 +1,6 @@
 #include "background_write.h"
 
-#include <string>
+#include <memory>  // for std::shared_ptr
 
 #include "shard.h"
 #include "utils.h"

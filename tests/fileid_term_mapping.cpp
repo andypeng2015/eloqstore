@@ -3,21 +3,19 @@
 
 #include "../common.h"
 
-using namespace eloqstore;
-
 TEST_CASE("FileIdTermMapping serialize/deserialize roundtrip", "[fileid-term]")
 {
-    FileIdTermMapping mapping;
+    eloqstore::FileIdTermMapping mapping;
     mapping[1] = 10;
     mapping[2] = 20;
     mapping[123456789] = 987654321;
 
     std::string buf;
-    SerializeFileIdTermMapping(mapping, buf);
+    eloqstore::SerializeFileIdTermMapping(mapping, buf);
 
     std::string_view view(buf);
-    FileIdTermMapping parsed;
-    REQUIRE(DeserializeFileIdTermMapping(view, parsed));
+    eloqstore::FileIdTermMapping parsed;
+    REQUIRE(eloqstore::DeserializeFileIdTermMapping(view, parsed));
     REQUIRE(parsed.size() == mapping.size());
     for (const auto &[k, v] : mapping)
     {
@@ -27,13 +25,13 @@ TEST_CASE("FileIdTermMapping serialize/deserialize roundtrip", "[fileid-term]")
 
 TEST_CASE("FileIdTermMapping empty mapping", "[fileid-term]")
 {
-    FileIdTermMapping mapping;
+    eloqstore::FileIdTermMapping mapping;
     std::string buf;
-    SerializeFileIdTermMapping(mapping, buf);
+    eloqstore::SerializeFileIdTermMapping(mapping, buf);
 
     std::string_view view(buf);
-    FileIdTermMapping parsed;
-    REQUIRE(DeserializeFileIdTermMapping(view, parsed));
+    eloqstore::FileIdTermMapping parsed;
+    REQUIRE(eloqstore::DeserializeFileIdTermMapping(view, parsed));
     REQUIRE(parsed.empty());
 }
 
@@ -41,15 +39,15 @@ TEST_CASE("FileIdTermMapping malformed data", "[fileid-term]")
 {
     // Count=2 but only one pair provided -> should fail and clear mapping.
     std::string buf;
-    PutVarint64(&buf, 2);   // count
-    PutVarint64(&buf, 1);   // file_id
-    PutVarint64(&buf, 10);  // term
+    eloqstore::PutVarint64(&buf, 2);   // count
+    eloqstore::PutVarint64(&buf, 1);   // file_id
+    eloqstore::PutVarint64(&buf, 10);  // term
     // Missing second pair data
 
     std::string_view view(buf);
-    FileIdTermMapping parsed;
+    eloqstore::FileIdTermMapping parsed;
     parsed[99] = 99;  // pre-fill to ensure it gets cleared on failure
-    REQUIRE_FALSE(DeserializeFileIdTermMapping(view, parsed));
+    REQUIRE_FALSE(eloqstore::DeserializeFileIdTermMapping(view, parsed));
     REQUIRE(parsed.empty());
 }
 
@@ -60,7 +58,7 @@ TEST_CASE("FileIdTermMapping truncated count", "[fileid-term]")
     buf.push_back(static_cast<char>(0x80));  // incomplete varint
 
     std::string_view view(buf);
-    FileIdTermMapping parsed;
-    REQUIRE_FALSE(DeserializeFileIdTermMapping(view, parsed));
+    eloqstore::FileIdTermMapping parsed;
+    REQUIRE_FALSE(eloqstore::DeserializeFileIdTermMapping(view, parsed));
     REQUIRE(parsed.empty());
 }
