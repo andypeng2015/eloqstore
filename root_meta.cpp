@@ -58,6 +58,11 @@ uint32_t ManifestBuilder::CurrentSize() const
     return buff_.Size();
 }
 
+size_t ManifestBuilder::DirectIoSize() const
+{
+    return buff_.PaddedSize();
+}
+
 std::string_view ManifestBuilder::Finalize(PageId new_root, PageId ttl_root)
 {
     EncodeFixed32(buff_.Data() + offset_root, new_root);

@@ -111,10 +111,12 @@ public:
                                    std::string_view log,
                                    uint64_t manifest_size) = 0;
     virtual KvError SwitchManifest(const TableIdent &tbl_id,
-                                   std::string_view snapshot) = 0;
+                                   std::string_view snapshot,
+                                   size_t padded_size) = 0;
     virtual KvError CreateArchive(const TableIdent &tbl_id,
                                   std::string_view snapshot,
-                                  uint64_t ts) = 0;
+                                  uint64_t ts,
+                                  size_t padded_size) = 0;
     virtual std::pair<ManifestFilePtr, KvError> GetManifest(
         const TableIdent &tbl_id) = 0;
 
@@ -168,10 +170,12 @@ public:
                            std::string_view log,
                            uint64_t manifest_size) override;
     KvError SwitchManifest(const TableIdent &tbl_id,
-                           std::string_view snapshot) override;
+                           std::string_view snapshot,
+                           size_t padded_size) override;
     KvError CreateArchive(const TableIdent &tbl_id,
                           std::string_view snapshot,
-                          uint64_t ts) override;
+                          uint64_t ts,
+                          size_t padded_size) override;
     std::pair<ManifestFilePtr, KvError> GetManifest(
         const TableIdent &tbl_id) override;
 
@@ -327,7 +331,8 @@ public:
      */
     virtual int WriteSnapshot(LruFD::Ref dir_fd,
                               std::string_view name,
-                              std::string_view content);
+                              std::string_view content,
+                              size_t padded_size);
     virtual int CreateFile(LruFD::Ref dir_fd, FileId file_id);
     virtual int OpenFile(const TableIdent &tbl_id, FileId file_id, bool direct);
     virtual KvError SyncFile(LruFD::Ref fd);
@@ -411,10 +416,12 @@ public:
     void Submit() override;
     void PollComplete() override;
     KvError SwitchManifest(const TableIdent &tbl_id,
-                           std::string_view snapshot) override;
+                           std::string_view snapshot,
+                           size_t padded_size) override;
     KvError CreateArchive(const TableIdent &tbl_id,
                           std::string_view snapshot,
-                          uint64_t ts) override;
+                          uint64_t ts,
+                          size_t padded_size) override;
     void CleanManifest(const TableIdent &tbl_id) override;
 
     ObjectStore &GetObjectStore()
@@ -603,10 +610,12 @@ public:
                            std::string_view log,
                            uint64_t manifest_size) override;
     KvError SwitchManifest(const TableIdent &tbl_id,
-                           std::string_view snapshot) override;
+                           std::string_view snapshot,
+                           size_t padded_size) override;
     KvError CreateArchive(const TableIdent &tbl_id,
                           std::string_view snapshot,
-                          uint64_t ts) override;
+                          uint64_t ts,
+                          size_t padded_size) override;
     std::pair<ManifestFilePtr, KvError> GetManifest(
         const TableIdent &tbl_id) override;
 

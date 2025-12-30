@@ -730,10 +730,6 @@ std::pair<IouringMgr::LruFD::Ref, KvError> IouringMgr::OpenOrCreateFD(
     }
     else
     {
-        if (direct == false)
-        {
-            LOG(WARNING) << "Open " << file_id << " with false";
-        }
         fd = OpenFile(tbl_id, file_id, direct);
         if (fd == -ENOENT && create)
         {
@@ -1468,7 +1464,7 @@ KvError IouringMgr::AppendManifest(const TableIdent &tbl_id,
                                    uint64_t manifest_size)
 {
     assert(manifest_size > 0);
-    auto [fd_ref, err] = OpenFD(tbl_id, LruFD::kManifest, true);
+    auto [fd_ref, err] = OpenFD(tbl_id, LruFD::kManifest, false);
     CHECK_KV_ERR(err);
 
     TEST_KILL_POINT_WEIGHT("AppendManifest:Write", 10)
@@ -1485,7 +1481,8 @@ KvError IouringMgr::AppendManifest(const TableIdent &tbl_id,
 
 int IouringMgr::WriteSnapshot(LruFD::Ref dir_fd,
                               std::string_view name,
-                              std::string_view content)
+                              std::string_view content,
+                              size_t padded_size)
 {
     std::string tmpfile = std::string(name) + TmpSuffix;
     uint64_t tmp_oflags = O_CREAT | O_TRUNC | O_RDWR | O_DIRECT;
@@ -1497,26 +1494,23 @@ int IouringMgr::WriteSnapshot(LruFD::Ref dir_fd,
     }
 
     const char *write_ptr = content.data();
-    size_t io_size = content.size();
-    std::unique_ptr<char, decltype(&::free)> aligned_snapshot(nullptr, &::free);
+    size_t io_size = padded_size;
+    const size_t alignment = page_align;
     if (io_size > 0)
     {
-        size_t aligned_size = (io_size + page_align - 1) & ~(page_align - 1);
-        char *buf = static_cast<char *>(std::aligned_alloc(page_align, aligned_size));
-        if (buf == nullptr)
+        if ((io_size & (alignment - 1)) != 0 ||
+            (reinterpret_cast<uintptr_t>(write_ptr) & (alignment - 1)) != 0)
         {
             Close(tmp_fd);
-            LOG(ERROR) << "aligned_alloc failed, size " << aligned_size;
-            return -ENOMEM;
+            LOG(ERROR) << "snapshot buffer not aligned for direct IO";
+            return -EINVAL;
         }
-        std::memcpy(buf, content.data(), io_size);
-        if (aligned_size > io_size)
+        if (content.size() > io_size)
         {
-            std::memset(buf + io_size, 0, aligned_size - io_size);
+            Close(tmp_fd);
+            LOG(ERROR) << "snapshot logical size exceeds padded size";
+            return -EINVAL;
         }
-        aligned_snapshot.reset(buf);
-        write_ptr = aligned_snapshot.get();
-        io_size = aligned_size;
     }
 
     int res = 0;
@@ -1572,7 +1566,8 @@ int IouringMgr::WriteSnapshot(LruFD::Ref dir_fd,
 }
 
 KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
-                                   std::string_view snapshot)
+                                   std::string_view snapshot,
+                                   size_t padded_size)
 {
     LruFD::Ref fd_ref = GetOpenedFD(tbl_id, LruFD::kManifest);
     if (fd_ref != nullptr)
@@ -1584,7 +1579,8 @@ KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
 
     auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
     CHECK_KV_ERR(err);
-    int res = WriteSnapshot(std::move(dir_fd), FileNameManifest, snapshot);
+    int res = WriteSnapshot(
+        std::move(dir_fd), FileNameManifest, snapshot, padded_size);
     if (res < 0)
     {
         return ToKvError(res);
@@ -1595,12 +1591,13 @@ KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
 
 KvError IouringMgr::CreateArchive(const TableIdent &tbl_id,
                                   std::string_view snapshot,
-                                  uint64_t ts)
+                                  uint64_t ts,
+                                  size_t padded_size)
 {
     auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
     CHECK_KV_ERR(err);
     const std::string name = ArchiveName(ts);
-    int res = WriteSnapshot(std::move(dir_fd), name, snapshot);
+    int res = WriteSnapshot(std::move(dir_fd), name, snapshot, padded_size);
     if (res < 0)
     {
         return ToKvError(res);
@@ -2355,7 +2352,8 @@ size_t CloudStoreMgr::GetPrewarmFilesPulled() const
 }
 
 KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
-                                      std::string_view snapshot)
+                                      std::string_view snapshot,
+                                      size_t padded_size)
 {
     LruFD::Ref fd_ref = GetOpenedFD(tbl_id, LruFD::kManifest);
     if (fd_ref != nullptr)
@@ -2382,7 +2380,8 @@ KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
 
     auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
     CHECK_KV_ERR(err);
-    int res = WriteSnapshot(std::move(dir_fd), FileNameManifest, snapshot);
+    int res = WriteSnapshot(
+        std::move(dir_fd), FileNameManifest, snapshot, padded_size);
     if (res < 0)
     {
         if (dequed)
@@ -2414,7 +2413,8 @@ void CloudStoreMgr::CleanManifest(const TableIdent &tbl_id)
 
 KvError CloudStoreMgr::CreateArchive(const TableIdent &tbl_id,
                                      std::string_view snapshot,
-                                     uint64_t ts)
+                                     uint64_t ts,
+                                     size_t padded_size)
 {
     auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory);
     CHECK_KV_ERR(err);
@@ -2424,7 +2424,7 @@ KvError CloudStoreMgr::CreateArchive(const TableIdent &tbl_id,
         return ToKvError(res);
     }
     const std::string name = ArchiveName(ts);
-    res = WriteSnapshot(std::move(dir_fd), name, snapshot);
+    res = WriteSnapshot(std::move(dir_fd), name, snapshot, padded_size);
     if (res < 0)
     {
         return ToKvError(res);
@@ -3414,7 +3414,8 @@ KvError MemStoreMgr::AppendManifest(const TableIdent &tbl_id,
 }
 
 KvError MemStoreMgr::SwitchManifest(const TableIdent &tbl_id,
-                                    std::string_view snapshot)
+                                    std::string_view snapshot,
+                                    size_t /*padded_size*/)
 {
     auto it = store_.find(tbl_id);
     if (it == store_.end())
@@ -3429,7 +3430,8 @@ KvError MemStoreMgr::SwitchManifest(const TableIdent &tbl_id,
 
 KvError MemStoreMgr::CreateArchive(const TableIdent &tbl_id,
                                    std::string_view snapshot,
-                                   uint64_t ts)
+                                   uint64_t ts,
+                                   size_t /*padded_size*/)
 {
     LOG(FATAL) << "not implemented";
 }

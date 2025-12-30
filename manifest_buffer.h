@@ -5,10 +5,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <string_view>
 #include <new>
+#include <string_view>
 
 #include "coding.h"
+#include "page.h"
 
 namespace eloqstore
 {
@@ -55,11 +56,13 @@ public:
     {
         EnsureCapacity(new_size);
         size_ = new_size;
+        ZeroTail();
     }
 
     void Reset()
     {
         size_ = 0;
+        ZeroTail();
     }
 
     void Append(const char *src, size_t len)
@@ -71,6 +74,7 @@ public:
         EnsureCapacity(size_ + len);
         std::memcpy(data_ + size_, src, len);
         size_ += len;
+        ZeroTail();
     }
 
     void AppendVarint32(uint32_t value)
@@ -107,21 +111,29 @@ public:
         return {data_, size_};
     }
 
-private:
-    static constexpr size_t kAlignment = 4096;
+    size_t PaddedSize() const
+    {
+        if (data_ == nullptr || size_ == 0)
+        {
+            return 0;
+        }
+        return AlignSize(size_);
+    }
 
+private:
     static size_t AlignSize(size_t size)
     {
+        const size_t alignment = page_align;
         if (size == 0)
         {
-            return kAlignment;
+            return alignment;
         }
-        const size_t remainder = size % kAlignment;
+        const size_t remainder = size % alignment;
         if (remainder == 0)
         {
             return size;
         }
-        return size + (kAlignment - remainder);
+        return size + (alignment - remainder);
     }
 
     void EnsureCapacity(size_t min_capacity)
@@ -130,14 +142,17 @@ private:
         {
             return;
         }
-        size_t grow = capacity_ == 0 ? kAlignment : capacity_ * 2;
-        size_t new_capacity = std::max(AlignSize(min_capacity), AlignSize(grow));
-        char *new_data = static_cast<char *>(
-            std::aligned_alloc(kAlignment, new_capacity));
+        const size_t alignment = page_align;
+        size_t grow = capacity_ == 0 ? alignment : capacity_ * 2;
+        size_t new_capacity =
+            std::max(AlignSize(min_capacity), AlignSize(grow));
+        char *new_data =
+            static_cast<char *>(std::aligned_alloc(alignment, new_capacity));
         if (new_data == nullptr)
         {
             throw std::bad_alloc();
         }
+        std::memset(new_data, 0, new_capacity);
         if (data_ != nullptr)
         {
             std::memcpy(new_data, data_, size_);
@@ -145,6 +160,29 @@ private:
         }
         data_ = new_data;
         capacity_ = new_capacity;
+        ZeroTail();
+    }
+
+    void ZeroTail()
+    {
+        if (data_ == nullptr)
+        {
+            return;
+        }
+        if (data_ == nullptr)
+        {
+            return;
+        }
+        const size_t aligned = size_ == 0 ? 0 : AlignSize(size_);
+        if (aligned > capacity_)
+        {
+            return;
+        }
+        const size_t padding = aligned - size_;
+        if (padding > 0)
+        {
+            std::memset(data_ + size_, 0, padding);
+        }
     }
 
     char *data_{nullptr};
