@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "direct_io_buffer.h"
 #include "error.h"
 #include "kv_options.h"
 #include "task.h"
@@ -117,7 +118,7 @@ public:
         const TableIdent *tbl_id_;
         std::string filename_;
         size_t file_size_{0};
-        std::string data_buffer_;
+        DirectIoBuffer data_buffer_;
         size_t buffer_offset_{0};
     };
 

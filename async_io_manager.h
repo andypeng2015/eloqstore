@@ -23,6 +23,7 @@
 #undef BLOCK_SIZE
 
 #include "concurrentqueue/concurrentqueue.h"
+#include "direct_io_buffer.h"
 #include "error.h"
 #include "kv_options.h"
 #include "object_store.h"
@@ -123,12 +124,6 @@ public:
     virtual KvError ReadFile(const TableIdent &tbl_id,
                              std::string_view filename,
                              std::string &content)
-    {
-        __builtin_unreachable();
-    }
-    virtual KvError WriteFile(const TableIdent &tbl_id,
-                              std::string_view filename,
-                              std::string_view data)
     {
         __builtin_unreachable();
     }
@@ -437,7 +432,10 @@ public:
     void RunPrewarm() override;
     KvError WriteFile(const TableIdent &tbl_id,
                       std::string_view filename,
-                      std::string_view data) override;
+                      const DirectIoBuffer &buffer);
+    KvError WriteFile(const TableIdent &tbl_id,
+                      std::string_view filename,
+                      std::string_view data);
     size_t LocalCacheRemained() const
     {
         return shard_local_space_limit_ - used_local_space_;
@@ -483,7 +481,7 @@ private:
                         std::vector<std::string> filenames);
     KvError ReadFiles(const TableIdent &tbl_id,
                       std::span<const std::string> filenames,
-                      std::vector<std::string> &contents);
+                      std::vector<DirectIoBuffer> &buffers);
 
     bool DequeClosedFile(const FileKey &key);
     void EnqueClosedFile(FileKey key);

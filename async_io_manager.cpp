@@ -2707,7 +2707,7 @@ KvError CloudStoreMgr::DownloadFile(const TableIdent &tbl_id, FileId file_id)
 
 KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
                                  std::span<const std::string> filenames,
-                                 std::vector<std::string> &contents)
+                                 std::vector<DirectIoBuffer> &buffers)
 {
     if (filenames.empty())
     {
@@ -2726,7 +2726,7 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
         };
 
         std::string abs_path_;
-        std::string *content_slot_{nullptr};
+        DirectIoBuffer *buffer_slot_{nullptr};
         bool is_data_file_{false};
         bool need_stat_{false};
         bool buffer_ready_{false};
@@ -2775,8 +2775,8 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
         UploadFileCtx *ctx_;
     };
 
-    contents.clear();
-    contents.resize(filenames.size());
+    buffers.clear();
+    buffers.resize(filenames.size());
 
     std::vector<UploadFileCtx> ctxs;
     ctxs.reserve(filenames.size());
@@ -2785,7 +2785,7 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
     {
         UploadFileCtx &ctx = ctxs.emplace_back();
         ctx.is_data_file_ = is_data_file;
-        ctx.content_slot_ = &contents[idx];
+        ctx.buffer_slot_ = &buffers[idx];
         ctx.abs_path_ =
             (tbl_id.StorePath(options_->store_path) / filenames[idx]).string();
         if (ctx.is_data_file_)
@@ -2861,7 +2861,7 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
             io_uring_sqe *sqe =
                 GetSQE(UserDataType::BaseReq, &open_reqs.back());
             ctx.open_how_ = {};
-            ctx.open_how_.flags = O_RDONLY;
+            ctx.open_how_.flags = O_RDONLY | O_DIRECT;
             io_uring_prep_openat2(
                 sqe, AT_FDCWD, ctx.abs_path_.c_str(), &ctx.open_how_);
         }
@@ -2938,12 +2938,12 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
                 }
                 if (!ctx.buffer_ready_)
                 {
-                    ctx.content_slot_->resize(ctx.file_size_);
+                    ctx.buffer_slot_->resize(ctx.file_size_, false);
                     ctx.buffer_ready_ = true;
-                    ctx.remaining_ = ctx.file_size_;
+                    ctx.remaining_ = ctx.buffer_slot_->padded_size();
                     ctx.read_offset_ = 0;
                 }
-                if (ctx.remaining_ == 0)
+                if (ctx.remaining_ == 0 || ctx.read_offset_ >= ctx.file_size_)
                 {
                     ctx.stage_ = UploadFileCtx::Stage::NeedClose;
                     continue;
@@ -2953,7 +2953,7 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
                     GetSQE(UserDataType::BaseReq, &read_reqs.back());
                 io_uring_prep_read(sqe,
                                    ctx.fd_,
-                                   ctx.content_slot_->data() + ctx.read_offset_,
+                                   ctx.buffer_slot_->data() + ctx.read_offset_,
                                    ctx.remaining_,
                                    ctx.read_offset_);
             }
@@ -2971,14 +2971,32 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
                 }
                 else if (req.res_ == 0)
                 {
-                    register_error(*req.ctx_, KvError::EndOfFile, "read file");
+                    if (req.ctx_->read_offset_ >= req.ctx_->file_size_)
+                    {
+                        req.ctx_->remaining_ = 0;
+                        req.ctx_->stage_ = UploadFileCtx::Stage::NeedClose;
+                    }
+                    else
+                    {
+                        register_error(
+                            *req.ctx_, KvError::EndOfFile, "read file");
+                    }
                 }
                 else
                 {
                     req.ctx_->read_offset_ += static_cast<size_t>(req.res_);
-                    req.ctx_->remaining_ -= static_cast<size_t>(req.res_);
-                    if (req.ctx_->remaining_ == 0)
+                    if (req.ctx_->remaining_ >= static_cast<size_t>(req.res_))
                     {
+                        req.ctx_->remaining_ -= static_cast<size_t>(req.res_);
+                    }
+                    else
+                    {
+                        req.ctx_->remaining_ = 0;
+                    }
+                    if (req.ctx_->remaining_ == 0 ||
+                        req.ctx_->read_offset_ >= req.ctx_->file_size_)
+                    {
+                        req.ctx_->remaining_ = 0;
                         req.ctx_->stage_ = UploadFileCtx::Stage::NeedClose;
                     }
                 }
@@ -3098,7 +3116,7 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
 
     size_t processed = 0;
     std::vector<std::string> batch_filenames;
-    std::vector<std::string> batch_contents;
+    std::vector<DirectIoBuffer> batch_contents;
     while (processed < pending.size())
     {
         while (inflight_upload_files_ >= kMaxUploadBatch)
@@ -3520,7 +3538,7 @@ KvError IouringMgr::ReadFile(const TableIdent &tbl_id,
 
 KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
                                  std::string_view filename,
-                                 std::string_view data)
+                                 const DirectIoBuffer &buffer)
 {
     fs::path path = tbl_id.StorePath(options_->store_path);
     path /= filename;
@@ -3528,7 +3546,7 @@ KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
     fs::create_directories(path.parent_path(), ec);
 
     std::string path_str = path.string();
-    int flags = O_WRONLY | O_CREAT | O_TRUNC;
+    int flags = O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT;
     int fd = OpenAt({AT_FDCWD, false}, path_str.c_str(), flags, 0644);
     if (fd < 0)
     {
@@ -3538,22 +3556,59 @@ KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
     }
 
     KvError status = KvError::NoError;
-    size_t off = 0;
-    while (off < data.size())
+    const size_t padded_size = buffer.padded_size();
+    const size_t logical_size = buffer.size();
+    const size_t alignment = buffer.alignment();
+    const char *write_ptr = buffer.data();
+
+    if (padded_size > 0)
     {
-        size_t to_write = data.size() - off;
-        int wres = Write({fd, false}, data.data() + off, to_write, off);
-        if (wres < 0)
+        if (write_ptr == nullptr)
         {
-            status = ToKvError(wres);
-            break;
+            LOG(ERROR) << "direct IO buffer missing data for write: "
+                       << path_str;
+            status = KvError::InvalidArgs;
         }
-        if (wres == 0)
+        else if (alignment == 0 ||
+                 (reinterpret_cast<uintptr_t>(write_ptr) &
+                  (alignment - 1)) != 0)
         {
-            status = KvError::IoFail;
-            break;
+            LOG(ERROR) << "direct IO buffer not aligned for write: "
+                       << path_str;
+            status = KvError::InvalidArgs;
         }
-        off += static_cast<size_t>(wres);
+        else
+        {
+            size_t off = 0;
+            while (off < padded_size)
+            {
+                size_t to_write = padded_size - off;
+                int wres = Write({fd, false}, write_ptr + off, to_write, off);
+                if (wres < 0)
+                {
+                    status = ToKvError(wres);
+                    break;
+                }
+                if (wres == 0)
+                {
+                    status = KvError::IoFail;
+                    break;
+                }
+                off += static_cast<size_t>(wres);
+            }
+        }
+    }
+
+    if (status == KvError::NoError && logical_size != padded_size)
+    {
+        int res = ftruncate(fd, static_cast<off_t>(logical_size));
+        if (res < 0)
+        {
+            int err = errno;
+            LOG(ERROR) << "failed to truncate file: " << path_str
+                       << ", error=" << strerror(err);
+            status = ToKvError(-err);
+        }
     }
 
     int close_res = Close(fd);
@@ -3562,6 +3617,15 @@ KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
         status = ToKvError(close_res);
     }
     return status;
+}
+
+KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
+                                 std::string_view filename,
+                                 std::string_view data)
+{
+    DirectIoBuffer temp;
+    temp.assign(data);
+    return WriteFile(tbl_id, filename, temp);
 }
 
 }  // namespace eloqstore

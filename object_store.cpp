@@ -1237,7 +1237,7 @@ void AsyncHttpManager::ProcessCompletedRequests()
             if (task->TaskType() == ObjectStore::Task::Type::AsyncUpload)
             {
                 auto upload_task = static_cast<ObjectStore::UploadTask *>(task);
-                upload_task->data_buffer_.clear();
+                upload_task->data_buffer_.clear(false);
                 upload_task->buffer_offset_ = 0;
             }
 
