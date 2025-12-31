@@ -122,7 +122,7 @@ public:
 
     virtual KvError ReadFile(const TableIdent &tbl_id,
                              std::string_view filename,
-                             std::string &content)
+                             DirectIoBuffer &content)
     {
         __builtin_unreachable();
     }
@@ -175,7 +175,7 @@ public:
 
     KvError ReadFile(const TableIdent &tbl_id,
                      std::string_view filename,
-                     std::string &content) override;
+                     DirectIoBuffer &content) override;
     KvError DeleteFiles(const std::vector<std::string> &file_paths);
     KvError CloseFiles(const TableIdent &tbl_id,
                        const std::span<FileId> file_ids);
@@ -426,7 +426,7 @@ public:
 
     KvError ReadArchiveFileAndDelete(const TableIdent &tbl_id,
                                      const std::string &filename,
-                                     std::string &content);
+                                     DirectIoBuffer &content);
 
     bool NeedPrewarm() const override;
     void RunPrewarm() override;
@@ -477,9 +477,6 @@ private:
     KvError DownloadFile(const TableIdent &tbl_id, FileId file_id);
     KvError UploadFiles(const TableIdent &tbl_id,
                         std::vector<std::string> filenames);
-    KvError ReadFile(const TableIdent &tbl_id,
-                     const std::string &filename,
-                     DirectIoBuffer &buffer);
 
     bool DequeClosedFile(const FileKey &key);
     void EnqueClosedFile(FileKey key);

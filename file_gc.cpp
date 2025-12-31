@@ -199,7 +199,7 @@ void ClassifyFiles(const std::vector<std::string> &files,
 
 KvError DownloadArchiveFile(const TableIdent &tbl_id,
                             const std::string &archive_file,
-                            std::string &content,
+                            DirectIoBuffer &content,
                             CloudStoreMgr *cloud_mgr,
                             const KvOptions *options)
 {
@@ -247,7 +247,7 @@ KvError DownloadArchiveFile(const TableIdent &tbl_id,
     return KvError::NoError;
 }
 
-FileId ParseArchiveForMaxFileId(const std::string &archive_content)
+FileId ParseArchiveForMaxFileId(std::string_view archive_content)
 {
     MemStoreMgr::Manifest manifest(archive_content);
     Replayer replayer(Options());
@@ -324,7 +324,7 @@ KvError GetOrUpdateArchivedMaxFileId(
     }
 
     // 3. read archive file based on mode (cloud or local).
-    std::string archive_content;
+    DirectIoBuffer archive_content;
     KvError read_err = KvError::NoError;
 
     if (!io_mgr->options_->cloud_store_path.empty())
@@ -354,7 +354,7 @@ KvError GetOrUpdateArchivedMaxFileId(
     }
 
     // 4. parse the archive file to get the maximum file ID.
-    least_not_archived_file_id = ParseArchiveForMaxFileId(archive_content) + 1;
+    least_not_archived_file_id = ParseArchiveForMaxFileId(archive_content.view()) + 1;
 
     // 5. cache the result.
     cached_max_ids[tbl_id] = least_not_archived_file_id;

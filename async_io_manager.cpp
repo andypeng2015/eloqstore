@@ -2747,9 +2747,9 @@ void CloudStoreMgr::RecycleBuffer(DirectIoBuffer buffer)
     direct_io_buffer_pool_.Release(std::move(buffer));
 }
 
-KvError CloudStoreMgr::ReadFile(const TableIdent &tbl_id,
-                                const std::string &filename,
-                                DirectIoBuffer &buffer)
+KvError IouringMgr::ReadFile(const TableIdent &tbl_id,
+                             std::string_view filename,
+                             DirectIoBuffer &buffer)
 {
     auto [type, id_view] = ParseFileName(filename);
     bool is_data_file = type == FileNameData;
@@ -2773,7 +2773,6 @@ KvError CloudStoreMgr::ReadFile(const TableIdent &tbl_id,
         }
     }
 
-    DirectIoBuffer local_buffer = std::move(direct_io_buffer_pool_.Acquire());
     fs::path abs_path = tbl_id.StorePath(options_->store_path);
     abs_path /= filename;
 
@@ -2782,7 +2781,6 @@ KvError CloudStoreMgr::ReadFile(const TableIdent &tbl_id,
     {
         LOG(ERROR) << "Failed to open file for upload: " << abs_path
                    << ", error=" << strerror(-fd);
-        RecycleBuffer(std::move(local_buffer));
         return ToKvError(fd);
     }
 
@@ -2803,21 +2801,20 @@ KvError CloudStoreMgr::ReadFile(const TableIdent &tbl_id,
                 LOG(ERROR) << "Failed to close file after stat: " << abs_path
                            << ", error=" << strerror(-close_res);
             }
-            RecycleBuffer(std::move(local_buffer));
             return err;
         }
         file_size = static_cast<size_t>(stx.stx_size);
     }
 
-    local_buffer.resize(file_size);
-    size_t remaining = local_buffer.padded_size();
+    buffer.resize(file_size);
+    size_t remaining = buffer.padded_size();
     size_t read_offset = 0;
     FdIdx fd_idx{fd, false};
     KvError status = KvError::NoError;
     while (status == KvError::NoError && remaining > 0)
     {
-        int read_res = Read(
-            fd_idx, local_buffer.data() + read_offset, remaining, read_offset);
+        int read_res =
+            Read(fd_idx, buffer.data() + read_offset, remaining, read_offset);
         if (read_res < 0)
         {
             status = ToKvError(read_res);
@@ -2864,13 +2861,7 @@ KvError CloudStoreMgr::ReadFile(const TableIdent &tbl_id,
                    << ", error=" << strerror(-close_res);
     }
 
-    if (status != KvError::NoError)
-    {
-        RecycleBuffer(std::move(local_buffer));
-        return status;
-    }
-
-    buffer = std::move(local_buffer);
+    CHECK_KV_ERR(status);
     return KvError::NoError;
 }
 
@@ -2918,7 +2909,7 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
         KvError read_err = KvError::NoError;
         for (ObjectStore::UploadTask *task : span)
         {
-            DirectIoBuffer file_buffer;
+            DirectIoBuffer file_buffer = direct_io_buffer_pool_.Acquire();
             read_err = ReadFile(tbl_id, task->filename_, file_buffer);
             if (read_err != KvError::NoError)
             {
@@ -2969,9 +2960,9 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
 
 KvError CloudStoreMgr::ReadArchiveFileAndDelete(const TableIdent &tbl_id,
                                                 const std::string &filename,
-                                                std::string &content)
+                                                DirectIoBuffer &content)
 {
-    KvError read_err = IouringMgr::ReadFile(tbl_id, filename, content);
+    KvError read_err = ReadFile(tbl_id, filename, content);
     if (read_err != KvError::NoError)
     {
         return read_err;
@@ -3252,77 +3243,6 @@ KvError MemStoreMgr::Manifest::Read(char *dst, size_t n)
     memcpy(dst, content_.data(), n);
     content_ = content_.substr(n);
     return KvError::NoError;
-}
-
-KvError IouringMgr::ReadFile(const TableIdent &tbl_id,
-                             std::string_view filename,
-                             std::string &content)
-{
-    auto [type, id_view] = ParseFileName(filename);
-    bool is_data_file = type == FileNameData;
-
-    std::string filename_str(filename);
-    fs::path rel_path = tbl_id.ToString();
-    rel_path /= filename_str;
-    std::string rel_path_str = rel_path.string();
-    FdIdx root_fd = GetRootFD(tbl_id);
-    int fd = OpenAt(root_fd, rel_path_str.c_str(), O_RDONLY);
-    if (fd < 0)
-    {
-        fs::path abs_path = tbl_id.StorePath(options_->store_path);
-        abs_path /= filename_str;
-        LOG(ERROR) << "failed to open file: " << abs_path
-                   << ", error=" << strerror(-fd);
-        return ToKvError(fd);
-    }
-
-    size_t file_size = 0;
-    if (!is_data_file)
-    {
-        struct statx stx = {};
-        if (int sres = Statx(fd, "", &stx); sres < 0)
-        {
-            if (int close_res = Close(fd); close_res < 0)
-            {
-                LOG(ERROR) << "failed to close file after stat failure: "
-                           << filename_str
-                           << ", error=" << strerror(-close_res);
-            }
-            return ToKvError(sres);
-        }
-        file_size = stx.stx_size;
-    }
-    else
-    {
-        file_size = options_->DataFileSize();
-    }
-
-    content.resize(file_size);
-    size_t off = 0;
-    FdIdx fd_idx = {fd, false};
-    KvError status = KvError::NoError;
-    while (off < file_size)
-    {
-        size_t to_read = file_size - off;
-        int rres = Read(fd_idx, content.data() + off, to_read, off);
-        if (rres < 0)
-        {
-            status = ToKvError(rres);
-            break;
-        }
-        if (rres == 0)
-        {
-            content.resize(off);
-            break;
-        }
-        off += static_cast<size_t>(rres);
-    }
-
-    if (int close_res = Close(fd); status == KvError::NoError && close_res < 0)
-    {
-        status = ToKvError(close_res);
-    }
-    return status;
 }
 
 KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
