@@ -354,7 +354,8 @@ KvError GetOrUpdateArchivedMaxFileId(
     }
 
     // 4. parse the archive file to get the maximum file ID.
-    least_not_archived_file_id = ParseArchiveForMaxFileId(archive_content.view()) + 1;
+    least_not_archived_file_id =
+        ParseArchiveForMaxFileId(archive_content.view()) + 1;
 
     // 5. cache the result.
     cached_max_ids[tbl_id] = least_not_archived_file_id;
