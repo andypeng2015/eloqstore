@@ -1239,6 +1239,17 @@ int IouringMgr::Fdatasync(FdIdx fd)
     return ThdTask()->WaitIoResult();
 }
 
+int IouringMgr::Ftruncate(FdIdx fd, off_t length)
+{
+    io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, ThdTask());
+    if (fd.second)
+    {
+        sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    io_uring_prep_ftruncate(sqe, fd.first, length);
+    return ThdTask()->WaitIoResult();
+}
+
 int IouringMgr::Statx(int fd, const char *path, struct statx *result)
 {
     io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, ThdTask());
@@ -1526,13 +1537,12 @@ int IouringMgr::WriteSnapshot(LruFD::Ref dir_fd,
     }
     if (!content.empty() && io_size != content.size())
     {
-        res = ftruncate(tmp_fd, content.size());
+        res = Ftruncate({tmp_fd, false}, static_cast<off_t>(content.size()));
         if (res < 0)
         {
-            int err = errno;
             Close(tmp_fd);
-            LOG(ERROR) << "truncate temporary file failed " << strerror(err);
-            return -err;
+            LOG(ERROR) << "truncate temporary file failed " << strerror(-res);
+            return res;
         }
     }
     TEST_KILL_POINT("AtomicWriteFile:Sync")
@@ -2707,7 +2717,11 @@ KvError CloudStoreMgr::DownloadFile(const TableIdent &tbl_id, FileId file_id)
     obj_store_.GetHttpManager()->SubmitRequest(&download_task);
     current_task->WaitIo();
 
-    CHECK_KV_ERR(download_task.error_);
+    if (download_task.error_ != KvError::NoError)
+    {
+        RecycleBuffer(std::move(download_task.response_data_));
+        return download_task.error_;
+    }
 
     KvError err = WriteFile(tbl_id, filename, download_task.response_data_);
     RecycleBuffer(std::move(download_task.response_data_));
@@ -2795,7 +2809,7 @@ KvError CloudStoreMgr::ReadFile(const TableIdent &tbl_id,
         file_size = static_cast<size_t>(stx.stx_size);
     }
 
-    local_buffer.resize(file_size, false);
+    local_buffer.resize(file_size);
     size_t remaining = local_buffer.padded_size();
     size_t read_offset = 0;
     FdIdx fd_idx{fd, false};
@@ -3375,13 +3389,12 @@ KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
 
     if (status == KvError::NoError && logical_size != padded_size)
     {
-        int res = ftruncate(fd, static_cast<off_t>(logical_size));
+        int res = Ftruncate({fd, false}, static_cast<off_t>(logical_size));
         if (res < 0)
         {
-            int err = errno;
             LOG(ERROR) << "failed to truncate file: " << path_str
-                       << ", error=" << strerror(err);
-            status = ToKvError(-err);
+                       << ", error=" << strerror(-res);
+            status = ToKvError(res);
         }
     }
 

@@ -310,6 +310,7 @@ public:
     int Read(FdIdx fd, char *dst, size_t n, uint64_t offset);
     int Write(FdIdx fd, const char *src, size_t n, uint64_t offset);
     int Fdatasync(FdIdx fd);
+    int Ftruncate(FdIdx fd, off_t length);
     int Statx(int fd, const char *path, struct statx *result);
     int Rename(FdIdx dir_fd, const char *old_path, const char *new_path);
     int Close(int fd);

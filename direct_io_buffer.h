@@ -48,23 +48,15 @@ public:
         EnsureCapacity(bytes);
     }
 
-    void resize(size_t new_size, bool zero_tail = true)
+    void resize(size_t new_size)
     {
         EnsureCapacity(new_size);
         size_ = new_size;
-        if (zero_tail)
-        {
-            ZeroTail();
-        }
     }
 
-    void clear(bool zero_tail = true)
+    void clear()
     {
         size_ = 0;
-        if (zero_tail)
-        {
-            ZeroTail();
-        }
     }
 
     void assign(std::string_view src)
@@ -77,7 +69,6 @@ public:
         EnsureCapacity(src.size());
         size_ = src.size();
         std::memcpy(data_, src.data(), src.size());
-        ZeroTail();
     }
 
     void append(const char *src, size_t len)
@@ -89,7 +80,6 @@ public:
         EnsureCapacity(size_ + len);
         std::memcpy(data_ + size_, src, len);
         size_ += len;
-        ZeroTail();
     }
 
     void append(std::string_view src)
@@ -181,24 +171,6 @@ protected:
         }
         data_ = new_data;
         capacity_ = new_capacity;
-    }
-
-    void ZeroTail()
-    {
-        if (data_ == nullptr)
-        {
-            return;
-        }
-        const size_t aligned = size_ == 0 ? 0 : AlignSize(size_);
-        if (aligned > capacity_)
-        {
-            return;
-        }
-        const size_t padding = aligned - size_;
-        if (padding > 0)
-        {
-            std::memset(data_ + size_, 0, padding);
-        }
     }
 
     char *data_{nullptr};
