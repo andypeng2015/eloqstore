@@ -793,7 +793,13 @@ void IouringMgr::Submit()
     {
         return;
     }
+    int64_t start = butil::cpuwide_time_ns();
     int ret = io_uring_submit(&ring_);
+    int64_t diff = butil::cpuwide_time_ns() - start;
+    if (diff > 200000)
+    {
+        LOG(INFO) << "io_uring_submit " << diff << " ns, sqe:" << prepared_sqe_;
+    }
     if (ret < 0)
     {
         LOG(ERROR) << "iouring submit failed " << ret;

@@ -862,7 +862,13 @@ void AsyncHttpManager::PerformRequests()
     {
         return;
     }
+    auto start = butil::cpuwide_time_ns();
     curl_multi_perform(multi_handle_, &running_handles_);
+    auto diff = butil::cpuwide_time_ns() - start;
+    if (diff > 500000)
+    {
+        LOG(WARNING) << "multi perform cost " << diff << " ns";
+    }
 }
 
 void AsyncHttpManager::SubmitRequest(ObjectStore::Task *task)

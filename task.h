@@ -1,5 +1,8 @@
 #pragma once
 
+#include <butil/atomicops.h>
+#include <butil/time.h>
+
 #include <boost/context/continuation.hpp>
 #include <cassert>
 #include <cstdint>
@@ -101,6 +104,12 @@ public:
     virtual void Abort() {};
     void Yield();
     void YieldToNextRound();
+    void Record(int64_t threshold)
+    {
+        record_ = true;
+        ts_ = butil::cpuwide_time_ns();
+        threshold_ = threshold;
+    }
     /**
      * @brief Re-schedules the task to run. Note: the resumed task does not run
      * in place.
@@ -120,6 +129,9 @@ public:
     KvRequest *req_{nullptr};
     continuation coro_;
     KvTask *next_{nullptr};
+    bool record_{false};
+    int64_t ts_{butil::cpuwide_time_ns()};
+    int64_t threshold_{0};
 };
 
 class WaitingZone

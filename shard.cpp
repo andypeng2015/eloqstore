@@ -69,6 +69,7 @@ void Shard::WorkLoop()
 
     while (true)
     {
+        auto start = butil::cpuwide_time_ns();
         io_mgr_->Submit();
         io_mgr_->PollComplete();
         ExecuteReadyTasks();
@@ -82,6 +83,11 @@ void Shard::WorkLoop()
         for (int i = 0; i < nreqs; i++)
         {
             OnReceivedReq(reqs[i]);
+        }
+        auto diff = butil::cpuwide_time_ns() - start;
+        if (diff > 1000000)
+        {
+            LOG(WARNING) << "WorkLoop cost " << diff << " ns";
         }
     }
 
@@ -350,25 +356,49 @@ void Shard::ProcessReq(KvRequest *req)
 
 bool Shard::ExecuteReadyTasks()
 {
+    auto start = butil::cpuwide_time_ns();
     bool busy = ready_tasks_.Size() > 0;
+    size_t size = ready_tasks_.Size();
+    int64_t t1 = 0;
     while (ready_tasks_.Size() > 0)
     {
         KvTask *task = ready_tasks_.Peek();
         ready_tasks_.Dequeue();
         assert(task->status_ == TaskStatus::Ongoing);
         running_ = task;
+        auto t = butil::cpuwide_time_ns();
         task->coro_ = task->coro_.resume();
+        auto d = butil::cpuwide_time_ns() - t;
+        if (d > 300000)
+        {
+            LOG(ERROR) << "resume " << butil::cpuwide_time_ns() - start << ", "
+                       << typeid(*task).name();
+        }
+        // task->coro_ = task->coro_.resume();
         if (task->status_ == TaskStatus::Finished)
         {
             OnTaskFinished(task);
         }
     }
+
+    auto diff = butil::cpuwide_time_ns() - start;
+    if (diff > 500000)
+    {
+        LOG(WARNING) << "1 cost " << diff << " ns, tasks " << size
+                     << ", t1=" << t1;
+    }
+    start = butil::cpuwide_time_ns();
     while (tasks_to_run_next_round_.Size() > 0)
     {
         KvTask *task = tasks_to_run_next_round_.Peek();
         tasks_to_run_next_round_.Dequeue();
         task->status_ = TaskStatus::Ongoing;
         ready_tasks_.Enqueue(task);
+    }
+    diff = butil::cpuwide_time_ns() - start;
+    if (diff > 500000)
+    {
+        LOG(WARNING) << "2 cost " << diff << " ns";
     }
     running_ = nullptr;
     return busy;

@@ -17,6 +17,7 @@ KvError ReadTask::Read(const TableIdent &tbl_id,
                        uint64_t &timestamp,
                        uint64_t &expire_ts)
 {
+    Record(200000);
     auto [meta, err] = shard->IndexManager()->FindRoot(tbl_id);
     CHECK_KV_ERR(err);
     if (meta->root_id_ == MaxPageId)
