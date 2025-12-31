@@ -80,7 +80,13 @@ bool CheckCloudPartitionExists(const eloqstore::KvOptions &opts,
     {
         LOG(INFO) << "CheckCloudPartitionExists, cloud_file: " << file;
     }
-    return !cloud_files.empty();
+    // return !cloud_files.empty();
+    // Exclude CURRENT_TERM file, because it never be deleted during GC.
+    if (cloud_files.size() == 1)
+    {
+        assert(cloud_files[0] == eloqstore::CurrentTermFileName);
+    }
+    return cloud_files.size() > 1;
 }
 
 // Helper function to wait for GC to complete
