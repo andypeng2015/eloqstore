@@ -108,6 +108,14 @@ struct KvOptions
      */
     uint16_t reserve_space_ratio = 100;
     /**
+     * @brief Max number of files uploaded concurrently in a batch.
+     */
+    uint32_t max_upload_batch = 1;
+    /**
+     * @brief Max cached DirectIO buffers per shard.
+     */
+    uint32_t direct_io_buffer_pool_size = 4;
+    /**
      * @brief Reuse files already present in the local cache directory when the
      * store starts.
      */

@@ -141,7 +141,7 @@ KvError ListCloudFiles(const TableIdent &tbl_id,
     }
 
     ObjectStore &object_store = cloud_mgr->GetObjectStore();
-    if (!object_store.ParseListObjectsResponse(list_task.response_data_,
+    if (!object_store.ParseListObjectsResponse(list_task.response_data_.view(),
                                                list_task.json_data_,
                                                &cloud_files,
                                                nullptr))
@@ -224,13 +224,13 @@ KvError DownloadArchiveFile(const TableIdent &tbl_id,
 
     KvError write_err = cloud_mgr->WriteFile(
         tbl_id, archive_file, download_task.response_data_);
+    cloud_mgr->RecycleBuffer(std::move(download_task.response_data_));
     if (write_err != KvError::NoError)
     {
         LOG(ERROR) << "Failed to persist archive file: " << local_path
                    << ", error: " << static_cast<int>(write_err);
         return write_err;
     }
-    download_task.response_data_.clear();
 
     KvError err =
         cloud_mgr->ReadArchiveFileAndDelete(tbl_id, archive_file, content);

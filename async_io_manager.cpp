@@ -1929,7 +1929,10 @@ KvError IouringMgr::DeleteFiles(const std::vector<std::string> &file_paths)
 }
 
 CloudStoreMgr::CloudStoreMgr(const KvOptions *opts, uint32_t fd_limit)
-    : IouringMgr(opts, fd_limit), file_cleaner_(this), obj_store_(opts)
+    : IouringMgr(opts, fd_limit),
+      file_cleaner_(this),
+      direct_io_buffer_pool_(opts->direct_io_buffer_pool_size),
+      obj_store_(opts, &direct_io_buffer_pool_)
 {
     lru_file_head_.next_ = &lru_file_tail_;
     lru_file_tail_.prev_ = &lru_file_head_;
@@ -2701,8 +2704,27 @@ KvError CloudStoreMgr::DownloadFile(const TableIdent &tbl_id, FileId file_id)
     CHECK_KV_ERR(download_task.error_);
 
     KvError err = WriteFile(tbl_id, filename, download_task.response_data_);
+    RecycleBuffer(std::move(download_task.response_data_));
     CHECK_KV_ERR(err);
     return KvError::NoError;
+}
+
+void CloudStoreMgr::RecycleBuffers(std::vector<DirectIoBuffer> &buffers)
+{
+    for (DirectIoBuffer &buffer : buffers)
+    {
+        RecycleBuffer(std::move(buffer));
+    }
+    buffers.clear();
+}
+
+void CloudStoreMgr::RecycleBuffer(DirectIoBuffer buffer)
+{
+    if (buffer.capacity() == 0)
+    {
+        return;
+    }
+    direct_io_buffer_pool_.Release(std::move(buffer));
 }
 
 KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
@@ -2775,7 +2797,7 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
         UploadFileCtx *ctx_;
     };
 
-    buffers.clear();
+    RecycleBuffers(buffers);
     buffers.resize(filenames.size());
 
     std::vector<UploadFileCtx> ctxs;
@@ -2786,6 +2808,7 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
         UploadFileCtx &ctx = ctxs.emplace_back();
         ctx.is_data_file_ = is_data_file;
         ctx.buffer_slot_ = &buffers[idx];
+        *ctx.buffer_slot_ = direct_io_buffer_pool_.Acquire();
         ctx.abs_path_ =
             (tbl_id.StorePath(options_->store_path) / filenames[idx]).string();
         if (ctx.is_data_file_)
@@ -2811,6 +2834,7 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
             if (conv.ec != std::errc{} ||
                 conv.ptr != id_view.data() + id_view.size())
             {
+                RecycleBuffers(buffers);
                 return KvError::InvalidArgs;
             }
             emplace_ctx(i, true);
@@ -3086,6 +3110,7 @@ KvError CloudStoreMgr::ReadFiles(const TableIdent &tbl_id,
                 ctx.fd_ = -1;
             }
         }
+        RecycleBuffers(buffers);
     }
 
     return status;
@@ -3115,18 +3140,21 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
     }
 
     size_t processed = 0;
+    const size_t max_upload_batch = options_->max_upload_batch;
     std::vector<std::string> batch_filenames;
     std::vector<DirectIoBuffer> batch_contents;
     while (processed < pending.size())
     {
-        while (inflight_upload_files_ >= kMaxUploadBatch)
+        RecycleBuffers(batch_contents);
+        while (inflight_upload_files_ >= max_upload_batch)
         {
             upload_slots_waiting_.Wait(current_task);
         }
 
-        size_t batch = std::min(kMaxUploadBatch, pending.size() - processed);
+        size_t batch =
+            std::min(max_upload_batch, pending.size() - processed);
         size_t span_size =
-            std::min(kMaxUploadBatch - inflight_upload_files_, batch);
+            std::min(max_upload_batch - inflight_upload_files_, batch);
         auto span = std::span<ObjectStore::UploadTask *>(
             pending.data() + processed, span_size);
         inflight_upload_files_ += span_size;
@@ -3145,6 +3173,7 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
         {
             inflight_upload_files_ -= span_size;
             upload_slots_waiting_.WakeAll();
+            RecycleBuffers(batch_contents);
             return read_err;
         }
 
@@ -3166,6 +3195,8 @@ KvError CloudStoreMgr::UploadFiles(const TableIdent &tbl_id,
 
         processed += span_size;
     }
+
+    RecycleBuffers(batch_contents);
 
     for (const auto &task : tasks)
     {
@@ -3623,9 +3654,11 @@ KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
                                  std::string_view filename,
                                  std::string_view data)
 {
-    DirectIoBuffer temp;
+    DirectIoBuffer temp = direct_io_buffer_pool_.Acquire();
     temp.assign(data);
-    return WriteFile(tbl_id, filename, temp);
+    KvError status = WriteFile(tbl_id, filename, temp);
+    direct_io_buffer_pool_.Release(std::move(temp));
+    return status;
 }
 
 }  // namespace eloqstore

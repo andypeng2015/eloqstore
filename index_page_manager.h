@@ -18,8 +18,7 @@ namespace eloqstore
 class KvTask;
 class PageMapper;
 
-class MappingArena;
-
+using MappingArena = Pool<MappingSnapshot::MappingTbl>;
 class IndexPageManager
 {
 public:

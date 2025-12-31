@@ -6,13 +6,13 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "pool.h"
 #include "task.h"
 #include "types.h"
 
 namespace eloqstore
 {
 class IndexPageManager;
-class MappingArena;
 class MemIndexPage;
 class ManifestBuilder;
 class ManifestBuffer;
@@ -30,8 +30,8 @@ struct MappingSnapshot
         MappingTbl(const MappingTbl &) = delete;
         MappingTbl &operator=(const MappingTbl &) = delete;
 
-        void Clear();
-        void Reserve(size_t n);
+        void clear();
+        void reserve(size_t n);
         size_t size() const;
         size_t capacity() const;
         void StartCopying();
@@ -56,11 +56,9 @@ struct MappingSnapshot
 
     MappingSnapshot(IndexPageManager *idx_mgr,
                     const TableIdent *tbl_id,
-                    MappingTbl tbl,
-                    MappingArena *arena = nullptr)
+                    MappingTbl tbl)
         : idx_mgr_(idx_mgr),
           tbl_ident_(tbl_id),
-          arena_(arena),
           mapping_tbl_(std::move(tbl))
     {
     }
@@ -105,7 +103,6 @@ struct MappingSnapshot
 
     IndexPageManager *idx_mgr_;
     const TableIdent *tbl_ident_;
-    MappingArena *arena_{nullptr};
 
     /**
      * @brief A list of file pages to be freed in this mapping snapshot.
@@ -121,22 +118,6 @@ struct MappingSnapshot
      */
     std::shared_ptr<MappingSnapshot> next_snapshot_{nullptr};
     MappingTbl mapping_tbl_;
-};
-
-class MappingArena
-{
-public:
-    explicit MappingArena(size_t max_cached = 32) : max_cached_(max_cached)
-    {
-        pool_.reserve(max_cached_);
-    }
-
-    MappingSnapshot::MappingTbl Get();
-    void Return(MappingSnapshot::MappingTbl tbl);
-
-private:
-    const size_t max_cached_;
-    std::vector<MappingSnapshot::MappingTbl> pool_;
 };
 
 /**

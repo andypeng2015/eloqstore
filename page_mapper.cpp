@@ -11,8 +11,9 @@
 #include <vector>
 
 #include "coding.h"
-#include "manifest_buffer.h"
 #include "index_page_manager.h"
+#include "manifest_buffer.h"
+#include "shard.h"
 #include "task.h"
 
 namespace eloqstore
@@ -22,7 +23,7 @@ MappingSnapshot::MappingTbl::MappingTbl(std::vector<uint64_t> tbl)
 {
 }
 
-void MappingSnapshot::MappingTbl::Clear()
+void MappingSnapshot::MappingTbl::clear()
 {
     base_.clear();
     changes_.clear();
@@ -30,7 +31,7 @@ void MappingSnapshot::MappingTbl::Clear()
     under_copying_ = false;
 }
 
-void MappingSnapshot::MappingTbl::Reserve(size_t n)
+void MappingSnapshot::MappingTbl::reserve(size_t n)
 {
     if (!under_copying_)
     {
@@ -161,38 +162,16 @@ void MappingSnapshot::MappingTbl::EnsureSize(PageId page_id)
     }
 }
 
-MappingSnapshot::MappingTbl MappingArena::Get()
-{
-    if (pool_.empty())
-    {
-        return {};
-    }
-    auto tbl = std::move(pool_.back());
-    pool_.pop_back();
-    tbl.Clear();
-    return tbl;
-}
-
-void MappingArena::Return(MappingSnapshot::MappingTbl tbl)
-{
-    if (tbl.capacity() == 0 || pool_.size() >= max_cached_)
-    {
-        return;
-    }
-    tbl.Clear();
-    pool_.push_back(std::move(tbl));
-}
-
 PageMapper::PageMapper(IndexPageManager *idx_mgr, const TableIdent *tbl_ident)
 {
     auto *arena = idx_mgr->MapperArena();
     MappingSnapshot::MappingTbl tbl =
-        arena == nullptr ? MappingSnapshot::MappingTbl() : arena->Get();
+        arena == nullptr ? MappingSnapshot::MappingTbl() : arena->Acquire();
     mapping_ = std::make_shared<MappingSnapshot>(
-        idx_mgr, tbl_ident, std::move(tbl), arena);
+        idx_mgr, tbl_ident, std::move(tbl));
 
     auto &mapping_tbl = mapping_->mapping_tbl_;
-    mapping_tbl.Reserve(idx_mgr->Options()->init_page_count);
+    mapping_tbl.reserve(idx_mgr->Options()->init_page_count);
     file_page_allocator_ = FilePageAllocator::Instance(idx_mgr->Options());
 }
 
@@ -201,13 +180,12 @@ PageMapper::PageMapper(const PageMapper &rhs)
       free_page_cnt_(rhs.free_page_cnt_),
       file_page_allocator_(rhs.file_page_allocator_->Clone())
 {
-    auto *arena = rhs.mapping_->arena_;
+    auto *arena = shard->IndexManager()->MapperArena();
     MappingSnapshot::MappingTbl tbl =
-        arena == nullptr ? MappingSnapshot::MappingTbl() : arena->Get();
+        arena == nullptr ? MappingSnapshot::MappingTbl() : arena->Acquire();
     mapping_ = std::make_shared<MappingSnapshot>(rhs.mapping_->idx_mgr_,
                                                  rhs.mapping_->tbl_ident_,
-                                                 std::move(tbl),
-                                                 arena);
+                                                 std::move(tbl));
 
     auto &src_tbl = rhs.mapping_->mapping_tbl_;
     src_tbl.StartCopying();
@@ -351,9 +329,9 @@ uint64_t MappingSnapshot::DecodeId(uint64_t val)
 MappingSnapshot::~MappingSnapshot()
 {
     idx_mgr_->FreeMappingSnapshot(this);
-    if (arena_ != nullptr)
+    if (shard != nullptr)
     {
-        arena_->Return(std::move(mapping_tbl_));
+        shard->IndexManager()->MapperArena()->Release(std::move(mapping_tbl_));
     }
 }
 

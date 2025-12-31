@@ -22,6 +22,7 @@
 // https://github.com/cameron314/concurrentqueue/issues/280
 #undef BLOCK_SIZE
 
+#include "direct_io_buffer_pool.h"
 #include "concurrentqueue/concurrentqueue.h"
 #include "direct_io_buffer.h"
 #include "error.h"
@@ -455,6 +456,8 @@ public:
     void MarkPrewarmListingComplete();
     bool IsPrewarmListingComplete() const;
     size_t GetPrewarmFilesPulled() const;
+    void RecycleBuffers(std::vector<DirectIoBuffer> &buffers);
+    void RecycleBuffer(DirectIoBuffer buffer);
     PrewarmStats &GetPrewarmStats()
     {
         return prewarm_stats_;
@@ -473,8 +476,6 @@ private:
     KvError SyncFiles(const TableIdent &tbl_id,
                       std::span<LruFD::Ref> fds) override;
     KvError CloseFile(LruFD::Ref fd) override;
-
-    static constexpr size_t kMaxUploadBatch = 10;
 
     KvError DownloadFile(const TableIdent &tbl_id, FileId file_id);
     KvError UploadFiles(const TableIdent &tbl_id,
@@ -571,6 +572,7 @@ private:
     // Prewarm statistics
     PrewarmStats prewarm_stats_;
 
+    DirectIoBufferPool direct_io_buffer_pool_;
     ObjectStore obj_store_;
 
     size_t inflight_upload_files_{0};

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "direct_io_buffer.h"
+#include "direct_io_buffer_pool.h"
 #include "error.h"
 #include "kv_options.h"
 #include "task.h"
@@ -37,7 +38,8 @@ class AsyncIoManager;
 class ObjectStore
 {
 public:
-    explicit ObjectStore(const KvOptions *options);
+    explicit ObjectStore(const KvOptions *options,
+                         DirectIoBufferPool *buffer_pool);
     ~ObjectStore();
 
     AsyncHttpManager *GetHttpManager()
@@ -46,7 +48,7 @@ public:
     }
 
     bool ParseListObjectsResponse(
-        const std::string &payload,
+        std::string_view payload,
         const std::string &strip_prefix,
         std::vector<std::string> *objects,
         std::vector<utils::CloudObjectInfo> *infos,
@@ -56,6 +58,10 @@ public:
     {
     public:
         Task() = default;
+        Task(Task &&) noexcept = default;
+        Task &operator=(Task &&) noexcept = default;
+        Task(const Task &) = delete;
+        Task &operator=(const Task &) = delete;
         virtual ~Task() = default;
         enum class Type : uint8_t
         {
@@ -67,7 +73,7 @@ public:
         virtual Type TaskType() = 0;
 
         KvError error_{KvError::NoError};
-        std::string response_data_{};
+        DirectIoBuffer response_data_;
         std::string json_data_{};
         curl_slist *headers_{nullptr};
         bool cloud_slot_acquired_{false};
@@ -82,7 +88,6 @@ public:
         {
             kv_task_ = task;
         }
-
     protected:
         friend class ObjectStore;
         friend class AsyncHttpManager;
@@ -167,6 +172,7 @@ public:
 
 private:
     std::unique_ptr<AsyncHttpManager> async_http_mgr_;
+    DirectIoBufferPool *buffer_pool_;
 };
 
 struct CloudPathInfo
@@ -200,7 +206,7 @@ public:
                                   const std::string &continuation,
                                   SignedRequestInfo *request) const = 0;
     virtual bool ParseListObjectsResponse(
-        const std::string &payload,
+        std::string_view payload,
         const std::string &strip_prefix,
         std::vector<std::string> *objects,
         std::vector<utils::CloudObjectInfo> *infos,
@@ -210,7 +216,8 @@ public:
 class AsyncHttpManager
 {
 public:
-    explicit AsyncHttpManager(const KvOptions *options);
+    AsyncHttpManager(const KvOptions *options,
+                     DirectIoBufferPool *buffer_pool);
     ~AsyncHttpManager();
 
     void SubmitRequest(ObjectStore::Task *task);
@@ -228,7 +235,7 @@ public:
     }
 
     bool ParseListObjectsResponse(
-        const std::string &payload,
+        std::string_view payload,
         const std::string &strip_prefix,
         std::vector<std::string> *objects,
         std::vector<utils::CloudObjectInfo> *infos,
@@ -252,7 +259,7 @@ private:
     static size_t WriteCallback(void *contents,
                                 size_t size,
                                 size_t nmemb,
-                                std::string *userp);
+                                void *userp);
 
     static constexpr uint32_t kInitialRetryDelayMs = 10'000;
     static constexpr uint32_t kMaxRetryDelayMs = 40'000;
@@ -263,6 +270,7 @@ private:
     std::multimap<std::chrono::steady_clock::time_point, ObjectStore::Task *>
         pending_retries_;
     const KvOptions *options_;
+    DirectIoBufferPool *buffer_pool_;
     int running_handles_{0};
 
     CloudPathInfo cloud_path_;
