@@ -2776,7 +2776,10 @@ KvError IouringMgr::ReadFile(const TableIdent &tbl_id,
     fs::path abs_path = tbl_id.StorePath(options_->store_path);
     abs_path /= filename;
 
-    int fd = OpenAt({AT_FDCWD, false}, abs_path.c_str(), O_RDONLY | O_DIRECT);
+    io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, ThdTask());
+    open_how how = {.flags = O_RDONLY | O_DIRECT, .mode = 0, .resolve = 0};
+    io_uring_prep_openat2(sqe, AT_FDCWD, abs_path.c_str(), &how);
+    int fd = ThdTask()->WaitIoResult();
     if (fd < 0)
     {
         LOG(ERROR) << "Failed to open file for upload: " << abs_path
@@ -2851,16 +2854,18 @@ KvError IouringMgr::ReadFile(const TableIdent &tbl_id,
         }
     }
 
-    if (int close_res = Close(fd); close_res < 0)
+    sqe = GetSQE(UserDataType::KvTask, ThdTask());
+    io_uring_prep_close(sqe, fd);
+    int res = ThdTask()->WaitIoResult();
+    if (res < 0)
     {
+        LOG(ERROR) << "close file/directory " << fd
+                   << " failed: " << strerror(-res);
         if (status == KvError::NoError)
         {
-            status = ToKvError(close_res);
+            status = ToKvError(res);
         }
-        LOG(ERROR) << "Failed to close file after read: " << abs_path
-                   << ", error=" << strerror(-close_res);
     }
-
     CHECK_KV_ERR(status);
     return KvError::NoError;
 }
@@ -3255,8 +3260,12 @@ KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
     fs::create_directories(path.parent_path(), ec);
 
     std::string path_str = path.string();
-    int flags = O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT;
-    int fd = OpenAt({AT_FDCWD, false}, path_str.c_str(), flags, 0644);
+    io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, ThdTask());
+    open_how how = {.flags = O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT,
+                    .mode = 0644,
+                    .resolve = 0};
+    io_uring_prep_openat2(sqe, AT_FDCWD, path_str.c_str(), &how);
+    int fd = ThdTask()->WaitIoResult();
     if (fd < 0)
     {
         LOG(ERROR) << "failed to open file for write: " << path_str
@@ -3318,7 +3327,18 @@ KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
         }
     }
 
-    int close_res = Close(fd);
+    sqe = GetSQE(UserDataType::KvTask, ThdTask());
+    io_uring_prep_close(sqe, fd);
+    int close_res = ThdTask()->WaitIoResult();
+    if (close_res < 0)
+    {
+        LOG(ERROR) << "close file/directory " << fd
+                   << " failed: " << strerror(-close_res);
+        if (status == KvError::NoError)
+        {
+            status = ToKvError(close_res);
+        }
+    }
     if (status == KvError::NoError && close_res < 0)
     {
         status = ToKvError(close_res);
