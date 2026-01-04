@@ -34,7 +34,7 @@ public:
     {
         if (max_cached_ == 0 || pool_.size() >= max_cached_)
         {
-            LOG(WARNING) << "Release pool";
+            LOG(WARNING) << "Release pool, pool size:" << pool_.size() << ", max_cached:" << max_cached_;
             return;
         }
         pool_.push_back(std::move(value));
