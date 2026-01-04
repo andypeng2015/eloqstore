@@ -90,10 +90,16 @@ private:
                                                      task->Abort();
                                                  }
 
+                                                 auto ts = butil::cpuwide_time_ns();
                                                  task->req_->SetDone(err);
                                                  task->req_ = nullptr;
                                                  task->status_ =
                                                      TaskStatus::Finished;
+                                                 ts = butil::cpuwide_time_ns() - ts;
+                                                 if (ts > 500000)
+                                                 {
+                                                     LOG(ERROR) << "StartTask finish " << ts;
+                                                 }
                                                  return std::move(shard->main_);
                                              });
         running_ = nullptr;
