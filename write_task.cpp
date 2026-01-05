@@ -264,7 +264,7 @@ KvError WriteTask::FlushManifest()
         return KvError::NoError;
     }
 
-    if (!dict_dirty && manifest_size > 0 &&
+    if (false && !dict_dirty && manifest_size > 0 &&
         manifest_size + wal_builder_.CurrentSize() <= opts->manifest_limit)
     {
         std::string_view blob =
