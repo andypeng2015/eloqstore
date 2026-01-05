@@ -28,6 +28,11 @@
 #include "eloqstore_module.h"
 #endif
 
+#ifdef ELOQSTORE_METRICS_ENABLED
+#include "meter.h"
+#include "metrics.h"
+#endif
+
 namespace eloqstore
 {
 
@@ -157,6 +162,32 @@ KvError EloqStore::Start()
         LOG(ERROR) << "EloqStore started , do not start again";
         return KvError::NoError;
     }
+    
+#ifdef ELOQSTORE_METRICS_ENABLED
+    // Test code to verify eloq_metrics headers and library are accessible
+    // This verifies that:
+    // 1. Headers can be included
+    // 2. Basic types are accessible
+    // 3. Library is properly linked
+    try {
+        metrics::Name test_name("eloqstore_test_metric");
+        metrics::Type test_type = metrics::Type::Gauge;
+        metrics::CommonLabels test_labels;
+        test_labels["test"] = "value";
+        
+        // Verify basic types compile and work
+        const std::string &name_str = test_name.GetName();
+        (void)test_type;  // Suppress unused variable warning
+        (void)test_labels;  // Suppress unused variable warning
+        
+        LOG(INFO) << "EloqStore metrics integration test: Successfully accessed eloq_metrics "
+                  << "headers and types. Test metric name: " << name_str;
+    } catch (const std::exception &e) {
+        LOG(ERROR) << "EloqStore metrics integration test failed: " << e.what();
+        // Don't fail startup, just log the error
+    }
+#endif
+    
     eloq_store = this;
     // Initialize
     if (!options_.store_path.empty())
