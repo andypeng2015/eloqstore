@@ -234,18 +234,15 @@ TEST_CASE("EloqStore handles requests when stopped", "[eloq_store]")
     CleanupTestDir(test_dir);
 }
 
-TEST_CASE("CircularQueue reset from zero capacity", "[cqueue]")
+TEST_CASE("CircularQueue rejects zero capacity", "[cqueue]")
 {
-    eloqstore::CircularQueue<int> q(0);
-    REQUIRE(q.Capacity() == 0);
+    REQUIRE_THROWS_AS(eloqstore::CircularQueue<int>(0), std::invalid_argument);
+}
 
-    q.Reset(0);
-    REQUIRE(q.Capacity() == 0);
-
-    q.Enqueue(42);  // triggers internal Reset(8)
-    REQUIRE(q.Size() == 1);
-    REQUIRE(q.Capacity() >= 8);
-    REQUIRE(q.Peek() == 42);
+TEST_CASE("CircularQueue reset rejects zero capacity", "[cqueue]")
+{
+    eloqstore::CircularQueue<int> q;
+    REQUIRE_THROWS_AS(q.Reset(0), std::invalid_argument);
 }
 
 TEST_CASE("CircularQueue reset assigns new capacity", "[cqueue]")
@@ -263,4 +260,22 @@ TEST_CASE("CircularQueue reset assigns new capacity", "[cqueue]")
     REQUIRE(q.Size() == 2);
     REQUIRE(q.Get(0) == 3);
     REQUIRE(q.Get(1) == 4);
+}
+
+TEST_CASE("CircularQueue EnqueueAsFirst prepends items", "[cqueue]")
+{
+    eloqstore::CircularQueue<int> q;
+    q.Enqueue(3);
+    q.Enqueue(4);
+    q.Enqueue(5);
+
+    q.EnqueueAsFirst(2);
+    q.EnqueueAsFirst(1);
+
+    REQUIRE(q.Size() == 5);
+    REQUIRE(q.Get(0) == 1);
+    REQUIRE(q.Get(1) == 2);
+    REQUIRE(q.Get(2) == 3);
+    REQUIRE(q.Get(3) == 4);
+    REQUIRE(q.Get(4) == 5);
 }
