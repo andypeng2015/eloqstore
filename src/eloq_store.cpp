@@ -29,6 +29,7 @@
 #endif
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
+#include "eloqstore_metrics.h"
 #include "meter.h"
 #include "metrics.h"
 #endif
@@ -162,31 +163,6 @@ KvError EloqStore::Start()
         LOG(ERROR) << "EloqStore started , do not start again";
         return KvError::NoError;
     }
-    
-#ifdef ELOQSTORE_WITH_TXSERVICE
-    // Test code to verify eloq_metrics headers and library are accessible
-    // This verifies that:
-    // 1. Headers can be included
-    // 2. Basic types are accessible
-    // 3. Library is properly linked
-    try {
-        metrics::Name test_name("eloqstore_test_metric");
-        metrics::Type test_type = metrics::Type::Gauge;
-        metrics::CommonLabels test_labels;
-        test_labels["test"] = "value";
-        
-        // Verify basic types compile and work
-        const std::string &name_str = test_name.GetName();
-        (void)test_type;  // Suppress unused variable warning
-        (void)test_labels;  // Suppress unused variable warning
-        
-        LOG(INFO) << "EloqStore metrics integration test: Successfully accessed eloq_metrics "
-                  << "headers and types. Test metric name: " << name_str;
-    } catch (const std::exception &e) {
-        LOG(ERROR) << "EloqStore metrics integration test failed: " << e.what();
-        // Don't fail startup, just log the error
-    }
-#endif
     
     eloq_store = this;
     // Initialize
@@ -520,21 +496,48 @@ void EloqStore::Stop()
 void EloqStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
                                   const metrics::CommonLabels &common_labels)
 {
+    // Resize meters array to match number of shards
+    metrics_meters_.resize(options_.num_threads);
+
     if (metrics_registry == nullptr)
     {
         return;
     }
-
-    LOG(INFO) << "yf: EloqStore::InitilizeMetrics: shard size = " << shards_.size();
-
-    // Initialize metrics for each shard
-    for (auto &shard : shards_)
+ 
+    // Create and initialize meter for each shard
+    for (size_t i = 0; i < options_.num_threads; ++i)
     {
-        if (shard != nullptr)
-        {
-            shard->InitializeMetrics(metrics_registry, common_labels);
-        }
+        // Add shard_id to common labels for this shard
+        metrics::CommonLabels shard_labels = common_labels;
+        shard_labels["shard_id"] = std::to_string(i);
+        
+        // Create meter for this shard
+        metrics_meters_[i] = std::make_unique<metrics::Meter>(metrics_registry, shard_labels);
+        
+        // Register metrics for this shard
+        metrics_meters_[i]->Register(metrics::NAME_ELOQSTORE_WORK_ONE_ROUND_DURATION,
+                                    metrics::Type::Histogram);
+        metrics_meters_[i]->Register(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
+                                    metrics::Type::Histogram);
+        metrics_meters_[i]->Register(metrics::NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS,
+                                    metrics::Type::Gauge);
+        
     }
+
+    LOG(INFO) << "yf: EloqStore::InitializeMetrics: num threads size = " << options_.num_threads << ", meter size = " << metrics_meters_.size();   
+}
+
+metrics::Meter *EloqStore::GetMetricsMeter(size_t shard_id) const
+{
+    /*
+    if (shard_id >= metrics_meters_.size())
+    {
+        return nullptr;
+    }
+    */
+
+    assert(shard_id < metrics_meters_.size());
+    return metrics_meters_[shard_id].get();
 }
 #endif
 

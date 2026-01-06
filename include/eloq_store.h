@@ -12,6 +12,10 @@
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
 #include "metrics.h"
+namespace metrics
+{
+class Meter;
+}  // namespace metrics
 #endif
 
 namespace utils
@@ -403,6 +407,13 @@ public:
 #ifdef ELOQSTORE_WITH_TXSERVICE
     void InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
                           const metrics::CommonLabels &common_labels);
+    
+    /**
+     * @brief Get the metrics meter for a specific shard.
+     * @param shard_id The shard ID.
+     * @return Pointer to the meter for the shard, or nullptr if metrics are not enabled or shard_id is invalid.
+     */
+    metrics::Meter *GetMetricsMeter(size_t shard_id) const;
 #endif
 
 private:
@@ -415,6 +426,9 @@ private:
     KvOptions options_;
     std::vector<int> root_fds_;
     std::vector<std::unique_ptr<Shard>> shards_;
+#ifdef ELOQSTORE_WITH_TXSERVICE
+    std::vector<std::unique_ptr<metrics::Meter>> metrics_meters_;
+#endif
     std::atomic<bool> stopped_{true};
 
     std::unique_ptr<ArchiveCrond> archive_crond_{nullptr};

@@ -47,11 +47,6 @@ public:
     TaskManager *TaskMgr();
     PagesPool *PagePool();
 
-#ifdef ELOQSTORE_WITH_TXSERVICE
-    void InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
-                          const metrics::CommonLabels &common_labels);
-#endif
-
     const EloqStore *store_;
     const size_t shard_id_{0};
     boost::context::continuation main_;
@@ -124,10 +119,6 @@ private:
     boost::context::protected_fixedsize_stack stack_allocator_;
 #else
     boost::context::pooled_fixedsize_stack stack_allocator_;
-#endif
-
-#ifdef ELOQSTORE_WITH_TXSERVICE
-    std::unique_ptr<metrics::Meter> metrics_meter_;
 #endif
 
     class PendingWriteQueue
