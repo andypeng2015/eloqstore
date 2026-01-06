@@ -28,7 +28,7 @@
 #include "eloqstore_module.h"
 #endif
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
 #include "meter.h"
 #include "metrics.h"
 #endif
@@ -163,7 +163,7 @@ KvError EloqStore::Start()
         return KvError::NoError;
     }
     
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
     // Test code to verify eloq_metrics headers and library are accessible
     // This verifies that:
     // 1. Headers can be included
@@ -516,7 +516,7 @@ void EloqStore::Stop()
     LOG(INFO) << "EloqStore is stopped.";
 }
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
 void EloqStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
                                   const metrics::CommonLabels &common_labels)
 {

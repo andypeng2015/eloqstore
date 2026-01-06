@@ -10,7 +10,7 @@
 #include "kv_options.h"
 #include "types.h"
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
 #include "metrics.h"
 #endif
 
@@ -400,7 +400,7 @@ public:
     bool ExecAsyn(KvRequest *req);
     void ExecSync(KvRequest *req);
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
     void InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
                           const metrics::CommonLabels &common_labels);
 #endif

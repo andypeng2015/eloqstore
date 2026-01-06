@@ -21,7 +21,7 @@
  */
 #pragma once
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -73,5 +73,5 @@ inline void register_eloqstore_metrics_for_shard(
     meter->Register(NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS, Type::Gauge);
 }
 }  // namespace metrics
-#endif  // ELOQSTORE_METRICS_ENABLED
+#endif  // ELOQSTORE_WITH_TXSERVICE
 

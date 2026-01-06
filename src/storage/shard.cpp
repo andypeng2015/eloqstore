@@ -13,7 +13,7 @@
 #include "tasks/list_object_task.h"
 #include "utils.h"
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
 #include "eloqstore_metrics.h"
 #endif
 
@@ -38,7 +38,7 @@ KvError Shard::Init()
     return res;
 }
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
 void Shard::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
                               const metrics::CommonLabels &common_labels)
 {
@@ -80,7 +80,7 @@ void Shard::WorkLoop()
         return nreqs;
     };
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection setup
     metrics::Meter *meter = metrics_meter_.get();
     bool collect_metrics = metrics::enable_metrics && meter != nullptr;
@@ -88,7 +88,7 @@ void Shard::WorkLoop()
 
     while (true)
     {
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
         // Metrics collection: start timing the round (one iteration = one round)
         metrics::TimePoint round_start;
         if (collect_metrics)
@@ -104,7 +104,7 @@ void Shard::WorkLoop()
         }
 #endif
         io_mgr_->Submit();
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
         if (collect_metrics)
         {
             meter->CollectDuration(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
@@ -125,7 +125,7 @@ void Shard::WorkLoop()
             OnReceivedReq(reqs[i]);
         }
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
         // Metrics collection: end of round
         if (collect_metrics)
         {
@@ -474,7 +474,7 @@ void Shard::OnTaskFinished(KvTask *task)
 #ifdef ELOQ_MODULE_ENABLED
 void Shard::WorkOneRound()
 {
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection: start timing the round
     metrics::TimePoint round_start;
     metrics::Meter *meter = metrics_meter_.get();
@@ -503,7 +503,7 @@ void Shard::WorkOneRound()
             io_mgr_->RunPrewarm();
         else
         {
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
             // Still collect metrics even on early return
             if (collect_metrics)
             {
@@ -519,7 +519,7 @@ void Shard::WorkOneRound()
 
     req_queue_size_.fetch_sub(nreqs, std::memory_order_relaxed);
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection: time io_mgr_->Submit()
     metrics::TimePoint submit_start;
     if (collect_metrics)
@@ -528,7 +528,7 @@ void Shard::WorkOneRound()
     }
 #endif
     io_mgr_->Submit();
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
     if (collect_metrics)
     {
         meter->CollectDuration(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
@@ -539,7 +539,7 @@ void Shard::WorkOneRound()
 
     ExecuteReadyTasks();
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection: end of round
     if (collect_metrics)
     {
