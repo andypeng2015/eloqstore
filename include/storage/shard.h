@@ -11,6 +11,11 @@
 #include "storage/page_mapper.h"
 #include "tasks/task_manager.h"
 
+#ifdef ELOQSTORE_METRICS_ENABLED
+#include "meter.h"
+#include "metrics.h"
+#endif
+
 // https://github.com/cameron314/concurrentqueue/issues/280
 #undef BLOCK_SIZE
 #include "concurrentqueue/blockingconcurrentqueue.h"
@@ -41,6 +46,11 @@ public:
     IndexPageManager *IndexManager();
     TaskManager *TaskMgr();
     PagesPool *PagePool();
+
+#ifdef ELOQSTORE_METRICS_ENABLED
+    void InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
+                          const metrics::CommonLabels &common_labels);
+#endif
 
     const EloqStore *store_;
     const size_t shard_id_{0};
@@ -114,6 +124,10 @@ private:
     boost::context::protected_fixedsize_stack stack_allocator_;
 #else
     boost::context::pooled_fixedsize_stack stack_allocator_;
+#endif
+
+#ifdef ELOQSTORE_METRICS_ENABLED
+    std::unique_ptr<metrics::Meter> metrics_meter_;
 #endif
 
     class PendingWriteQueue

@@ -10,6 +10,10 @@
 #include "kv_options.h"
 #include "types.h"
 
+#ifdef ELOQSTORE_METRICS_ENABLED
+#include "metrics.h"
+#endif
+
 namespace utils
 {
 struct CloudObjectInfo;
@@ -395,6 +399,11 @@ public:
     }
     bool ExecAsyn(KvRequest *req);
     void ExecSync(KvRequest *req);
+
+#ifdef ELOQSTORE_METRICS_ENABLED
+    void InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
+                          const metrics::CommonLabels &common_labels);
+#endif
 
 private:
     bool SendRequest(KvRequest *req);

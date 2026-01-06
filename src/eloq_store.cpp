@@ -516,6 +516,26 @@ void EloqStore::Stop()
     LOG(INFO) << "EloqStore is stopped.";
 }
 
+#ifdef ELOQSTORE_METRICS_ENABLED
+void EloqStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
+                                  const metrics::CommonLabels &common_labels)
+{
+    if (metrics_registry == nullptr)
+    {
+        return;
+    }
+
+    // Initialize metrics for each shard
+    for (auto &shard : shards_)
+    {
+        if (shard != nullptr)
+        {
+            shard->InitializeMetrics(metrics_registry, common_labels);
+        }
+    }
+}
+#endif
+
 const KvOptions &EloqStore::Options() const
 {
     return options_;
