@@ -525,6 +525,8 @@ void EloqStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
         return;
     }
 
+    LOG(INFO) << "yf: EloqStore::InitilizeMetrics: shard size = " << shards_.size();
+
     // Initialize metrics for each shard
     for (auto &shard : shards_)
     {
