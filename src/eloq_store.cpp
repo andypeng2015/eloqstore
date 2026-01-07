@@ -521,6 +521,11 @@ void EloqStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
                                     metrics::Type::Histogram);
         metrics_meters_[i]->Register(metrics::NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS,
                                     metrics::Type::Gauge);
+        metrics_meters_[i]->Register(metrics::NAME_ELOQSTORE_REQUEST_LATENCY,
+                                    metrics::Type::Histogram,
+                                    {{"request_type",
+                                      {"read", "floor", "scan", "list_object", "batch_write",
+                                       "truncate", "drop_table", "archive", "compact", "clean_expired"}}});
         
     }
 

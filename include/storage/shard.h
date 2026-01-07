@@ -12,6 +12,7 @@
 #include "tasks/task_manager.h"
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
+#include "eloqstore_metrics.h"
 #include "meter.h"
 #include "metrics.h"
 #endif
@@ -25,6 +26,27 @@ namespace eloqstore
 #ifdef ELOQ_MODULE_ENABLED
 class EloqStoreModule;
 #endif
+
+
+namespace {
+inline const char *RequestTypeToString(RequestType type)
+{
+    switch (type)
+    {
+    case RequestType::Read: return "read";
+    case RequestType::Floor: return "floor";
+    case RequestType::Scan: return "scan";
+    case RequestType::ListObject: return "list_object";
+    case RequestType::BatchWrite: return "batch_write";
+    case RequestType::Truncate: return "truncate";
+    case RequestType::DropTable: return "drop_table";
+    case RequestType::Archive: return "archive";
+    case RequestType::Compact: return "compact";
+    case RequestType::CleanExpired: return "clean_expired";
+    default: return "unknown";
+    }
+}
+}  // anonymous namespace
 
 class Shard
 {
@@ -84,9 +106,19 @@ private:
         task->req_ = req;
         task->status_ = TaskStatus::Ongoing;
         running_ = task;
+#ifdef ELOQSTORE_WITH_TXSERVICE
+        // Metrics collection: record start time for latency measurement
+        metrics::TimePoint request_start;
+        metrics::Meter *meter = store_->GetMetricsMeter(shard_id_);
+        bool collect_metrics = metrics::enable_metrics && meter != nullptr;
+        if (collect_metrics)
+        {
+            request_start = metrics::Clock::now();
+        }
+#endif
         task->coro_ = boost::context::callcc(std::allocator_arg,
                                              stack_allocator_,
-                                             [lbd](continuation &&sink)
+                                             [lbd, request_start, collect_metrics, meter](continuation &&sink)
                                              {
                                                  shard->main_ = std::move(sink);
                                                  KvError err = lbd();
@@ -96,7 +128,23 @@ private:
                                                      task->Abort();
                                                  }
 
+#ifdef ELOQSTORE_WITH_TXSERVICE
+                                                 // Save request type before SetDone
+                                                 RequestType request_type = task->req_->Type();                         
+#endif
+
                                                  task->req_->SetDone(err);
+
+#ifdef ELOQSTORE_WITH_TXSERVICE
+                                                 // Collect latency metric when request completes
+                                                 if (collect_metrics && meter != nullptr)
+                                                 {
+                                                     const char *request_type_str = RequestTypeToString(request_type);
+                                                     meter->CollectDuration(metrics::NAME_ELOQSTORE_REQUEST_LATENCY,
+                                                                            request_start,
+                                                                            request_type_str);
+                                                 }
+#endif
                                                  task->req_ = nullptr;
                                                  task->status_ =
                                                      TaskStatus::Finished;

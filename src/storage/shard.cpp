@@ -100,7 +100,7 @@ void Shard::WorkLoop()
 #ifdef ELOQSTORE_WITH_TXSERVICE
         if (collect_metrics)
         {
-            LOG(INFO) << "yf: collect async io submit duration";
+            //LOG(INFO) << "yf: collect async io submit duration";
             meter->CollectDuration(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
                                  round_start);
         }
@@ -123,7 +123,7 @@ void Shard::WorkLoop()
         // Metrics collection: end of round
         if (collect_metrics)
         {
-            LOG(INFO) << "yf: collect work one round duration";
+            // LOG(INFO) << "yf: collect work one round duration";
             meter->CollectDuration(metrics::NAME_ELOQSTORE_WORK_ONE_ROUND_DURATION,
                                  round_start);
             meter->Collect(metrics::NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS,
@@ -474,7 +474,7 @@ void Shard::WorkOneRound()
     metrics::TimePoint round_start;
     metrics::Meter *meter = store_->GetMetricsMeter(shard_id_);
     bool collect_metrics = metrics::enable_metrics && meter != nullptr;
-    LOG(INFO) << "yf: enable metrics = " << metrics::enable_metrics << ", meter = " << meter;
+    // LOG(INFO) << "yf: enable metrics = " << metrics::enable_metrics << ", meter = " << meter;
     if (collect_metrics)
     {
         round_start = metrics::Clock::now();
@@ -499,18 +499,6 @@ void Shard::WorkOneRound()
             io_mgr_->RunPrewarm();
         else
         {
-            // TODO(lokax): optimize empty round ?
-#ifdef ELOQSTORE_WITH_TXSERVICE
-            // Still collect metrics even on early return
-            if (collect_metrics)
-            {
-                LOG(INFO) << "yf: collect empty round latency";
-                meter->CollectDuration(metrics::NAME_ELOQSTORE_WORK_ONE_ROUND_DURATION,
-                                     round_start);
-                meter->Collect(metrics::NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS,
-                              static_cast<double>(task_mgr_.NumActive()));
-            }
-#endif
             return;
         }
     }
@@ -525,15 +513,18 @@ void Shard::WorkOneRound()
         submit_start = metrics::Clock::now();
     }
 #endif
+
     io_mgr_->Submit();
+    
 #ifdef ELOQSTORE_WITH_TXSERVICE
     if (collect_metrics)
     {
-        LOG(INFO) << "yf: collect async io submit latency";
+        // LOG(INFO) << "yf: collect async io submit latency";
         meter->CollectDuration(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
                              submit_start);
     }
 #endif
+
     io_mgr_->PollComplete();
 
     ExecuteReadyTasks();
@@ -542,7 +533,7 @@ void Shard::WorkOneRound()
     // Metrics collection: end of round
     if (collect_metrics)
     {
-        LOG(INFO) << "yf: collect work one round latency";
+        // LOG(INFO) << "yf: collect work one round latency";
         meter->CollectDuration(metrics::NAME_ELOQSTORE_WORK_ONE_ROUND_DURATION,
                              round_start);
         meter->Collect(metrics::NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS,
