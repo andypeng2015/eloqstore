@@ -109,16 +109,17 @@ private:
 #ifdef ELOQSTORE_WITH_TXSERVICE
         // Metrics collection: record start time for latency measurement
         metrics::TimePoint request_start;
-        metrics::Meter *meter = store_->GetMetricsMeter(shard_id_);
-        bool collect_metrics = metrics::enable_metrics && meter != nullptr;
-        if (collect_metrics)
+        metrics::Meter *meter = nullptr;
+        if (metrics::enable_metrics)
         {
             request_start = metrics::Clock::now();
+            meter = store_->GetMetricsMeter(shard_id_);
+            assert(meter != nullptr);
         }
 #endif
         task->coro_ = boost::context::callcc(std::allocator_arg,
                                              stack_allocator_,
-                                             [lbd, request_start, collect_metrics, meter](continuation &&sink)
+                                             [lbd, request_start, meter](continuation &&sink)
                                              {
                                                  shard->main_ = std::move(sink);
                                                  KvError err = lbd();
@@ -137,7 +138,7 @@ private:
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
                                                  // Collect latency metric when request completes
-                                                 if (collect_metrics && meter != nullptr)
+                                                 if (metrics::enable_metrics)
                                                  {
                                                     auto debug_end = metrics::Clock::now();
                                                     LOG(INFO) << "yf: request time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - request_start).count();
