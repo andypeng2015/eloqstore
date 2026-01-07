@@ -88,15 +88,10 @@ void Shard::WorkLoop()
         }
 
         // Metrics collection: time io_mgr_->Submit()
-        /*
-        metrics::TimePoint submit_start;
-        if (collect_metrics)
-        {
-            submit_start = metrics::Clock::now();
-        }
-        */
 #endif
+
         io_mgr_->Submit();
+        
 #ifdef ELOQSTORE_WITH_TXSERVICE
         if (collect_metrics)
         {

@@ -539,12 +539,10 @@ void EloqStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
 
 metrics::Meter *EloqStore::GetMetricsMeter(size_t shard_id) const
 {
-    /*
     if (shard_id >= metrics_meters_.size())
     {
         return nullptr;
     }
-    */
 
     assert(shard_id < metrics_meters_.size());
     return metrics_meters_[shard_id].get();
