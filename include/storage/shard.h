@@ -139,8 +139,10 @@ private:
                                                  // Collect latency metric when request completes
                                                  if (collect_metrics && meter != nullptr)
                                                  {
-                                                     const char *request_type_str = RequestTypeToString(request_type);
-                                                     meter->CollectDuration(metrics::NAME_ELOQSTORE_REQUEST_LATENCY,
+                                                    auto debug_end = metrics::Clock::now();
+                                                    LOG(INFO) << "yf: request time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - request_start).count();
+                                                    const char *request_type_str = RequestTypeToString(request_type);
+                                                    meter->CollectDuration(metrics::NAME_ELOQSTORE_REQUEST_LATENCY,
                                                                             request_start,
                                                                             request_type_str);
                                                  }

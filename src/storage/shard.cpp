@@ -520,6 +520,8 @@ void Shard::WorkOneRound()
     if (collect_metrics)
     {
         // LOG(INFO) << "yf: collect async io submit latency";
+        auto debug_end = metrics::Clock::now();
+        LOG(INFO) << "yf: async io submit time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - submit_start).count();
         meter->CollectDuration(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
                              submit_start);
     }
