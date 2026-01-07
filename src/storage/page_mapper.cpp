@@ -158,6 +158,7 @@ void MappingSnapshot::MappingTbl::EnsureSize(PageId page_id)
     if (page_id >= base_.size())
     {
         // TODO(chenzhao): change mapping to std::vector<std::array>
+        LOG(WARNING) << "EnsureSize to " << page_id + 1;
         base_.resize(page_id + 1, InvalidValue);
     }
 }
