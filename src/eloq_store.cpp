@@ -526,6 +526,11 @@ void EloqStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
                                     {{"request_type",
                                       {"read", "floor", "scan", "list_object", "batch_write",
                                        "truncate", "drop_table", "archive", "compact", "clean_expired"}}});
+        metrics_meters_[i]->Register(metrics::NAME_ELOQSTORE_REQUESTS_COMPLETED,
+                                    metrics::Type::Counter,
+                                    {{"request_type",
+                                      {"read", "floor", "scan", "list_object", "batch_write",
+                                       "truncate", "drop_table", "archive", "compact", "clean_expired"}}});
         
     }
 

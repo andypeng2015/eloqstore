@@ -521,7 +521,7 @@ void Shard::WorkOneRound()
     {
         // LOG(INFO) << "yf: collect async io submit latency";
         auto debug_end = metrics::Clock::now();
-        LOG(INFO) << "yf: async io submit time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - submit_start).count();
+        // LOG(INFO) << "yf: async io submit time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - submit_start).count();
         meter->CollectDuration(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
                              submit_start);
     }
@@ -535,11 +535,14 @@ void Shard::WorkOneRound()
     // Metrics collection: end of round
     if (collect_metrics)
     {
+        auto debug_end = metrics::Clock::now();
+        // LOG(INFO) << "yf: work one round time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - round_start).count();
         // LOG(INFO) << "yf: collect work one round latency";
         meter->CollectDuration(metrics::NAME_ELOQSTORE_WORK_ONE_ROUND_DURATION,
                              round_start);
         meter->Collect(metrics::NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS,
                       static_cast<double>(task_mgr_.NumActive()));
+        LOG(INFO) << "yf: work one round time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - round_start).count();
     }
 #endif
 }

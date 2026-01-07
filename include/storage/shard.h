@@ -145,6 +145,10 @@ private:
                                                     meter->CollectDuration(metrics::NAME_ELOQSTORE_REQUEST_LATENCY,
                                                                             request_start,
                                                                             request_type_str);
+                                                    // Increment request completion counter
+                                                    meter->Collect(metrics::NAME_ELOQSTORE_REQUESTS_COMPLETED,
+                                                                   1.0,
+                                                                   request_type_str);
                                                  }
 #endif
                                                  task->req_ = nullptr;
