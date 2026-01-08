@@ -74,7 +74,7 @@ void Shard::WorkLoop()
 #ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection setup
     metrics::Meter *meter = nullptr;
-    if (metrics::enable_eloqstore_metrics)
+    if (store_->EnableMetrics())
     {
         meter = store_->GetMetricsMeter(shard_id_);
         assert(meter != nullptr);
@@ -87,7 +87,7 @@ void Shard::WorkLoop()
         // Metrics collection: start timing the round (one iteration = one
         // round)
         metrics::TimePoint round_start{};
-        if (metrics::enable_eloqstore_metrics)
+        if (store_->EnableMetrics())
         {
             round_start = metrics::Clock::now();
         }
@@ -98,7 +98,7 @@ void Shard::WorkLoop()
         io_mgr_->Submit();
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
-        if (metrics::enable_eloqstore_metrics)
+        if (store_->EnableMetrics())
         {
             // LOG(INFO) << "yf: collect async io submit duration";
             meter->CollectDuration(
@@ -121,7 +121,7 @@ void Shard::WorkLoop()
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
         // Metrics collection: end of round
-        if (metrics::enable_eloqstore_metrics)
+        if (store_->EnableMetrics())
         {
             // LOG(INFO) << "yf: collect work one round duration";
             meter->CollectDuration(
@@ -473,13 +473,13 @@ void Shard::WorkOneRound()
     // Metrics collection: start timing the round
     metrics::TimePoint round_start{};
     metrics::Meter *meter = nullptr;
-    if (metrics::enable_eloqstore_metrics)
+    if (store_->EnableMetrics())
     {
         meter = store_->GetMetricsMeter(shard_id_);
         assert(meter != nullptr);
         round_start = metrics::Clock::now();
     }
-    // LOG(INFO) << "yf: enable metrics = " << metrics::enable_eloqstore_metrics
+    // LOG(INFO) << "yf: enable metrics = " << store_->EnableMetrics()
     // << ", meter = " << meter;
 #endif
 
@@ -510,7 +510,7 @@ void Shard::WorkOneRound()
 #ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection: time io_mgr_->Submit()
     metrics::TimePoint submit_start{};
-    if (metrics::enable_eloqstore_metrics)
+    if (store_->EnableMetrics())
     {
         submit_start = metrics::Clock::now();
         assert(meter != nullptr);
@@ -520,7 +520,7 @@ void Shard::WorkOneRound()
     io_mgr_->Submit();
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
-    if (metrics::enable_eloqstore_metrics)
+    if (store_->EnableMetrics())
     {
         // LOG(INFO) << "yf: collect async io submit latency";
         auto debug_end = metrics::Clock::now();
@@ -538,7 +538,7 @@ void Shard::WorkOneRound()
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection: end of round
-    if (metrics::enable_eloqstore_metrics)
+    if (store_->EnableMetrics())
     {
         auto debug_end = metrics::Clock::now();
         // LOG(INFO) << "yf: work one round time = " <<

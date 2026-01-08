@@ -93,7 +93,7 @@ private:
                 // Metrics collection: record start time for latency measurement
                 metrics::TimePoint request_start;
                 metrics::Meter *meter = nullptr;
-                if (metrics::enable_eloqstore_metrics)
+                if (this->store_->EnableMetrics())
                 {
                     request_start = metrics::Clock::now();
                     meter = this->store_->GetMetricsMeter(shard_id_);
@@ -121,7 +121,7 @@ private:
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
                 // Collect latency metric when request completes
-                if (metrics::enable_eloqstore_metrics)
+                if (this->store_->EnableMetrics())
                 {
                     auto debug_end = metrics::Clock::now();
                     LOG(INFO) << "yf: request time = "

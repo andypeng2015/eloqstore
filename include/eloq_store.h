@@ -446,6 +446,11 @@ public:
     metrics::Meter *GetMetricsMeter(size_t shard_id) const;
 #endif
 
+    bool EnableMetrics() const
+    {
+        return enable_eloqstore_metrics_;
+    }
+
 private:
     bool SendRequest(KvRequest *req);
     void HandleDropTableRequest(DropTableRequest *req);
@@ -466,6 +471,8 @@ private:
 #ifdef ELOQ_MODULE_ENABLED
     std::unique_ptr<EloqStoreModule> module_{nullptr};
 #endif
+
+    bool enable_eloqstore_metrics_{false};
 
     friend class Shard;
     friend class AsyncIoManager;
