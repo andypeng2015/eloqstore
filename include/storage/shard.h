@@ -117,22 +117,27 @@ private:
         task->req_ = req;
         task->status_ = TaskStatus::Ongoing;
         running_ = task;
-#ifdef ELOQSTORE_WITH_TXSERVICE
-        // Metrics collection: record start time for latency measurement
-        metrics::TimePoint request_start;
-        metrics::Meter *meter = nullptr;
-        if (metrics::enable_metrics)
-        {
-            request_start = metrics::Clock::now();
-            meter = store_->GetMetricsMeter(shard_id_);
-            assert(meter != nullptr);
-        }
-#endif
+
         task->coro_ = boost::context::callcc(
             std::allocator_arg,
             stack_allocator_,
-            [lbd, request_start, meter](continuation &&sink)
+            [lbd, this](continuation &&sink)
             {
+#ifdef ELOQSTORE_WITH_TXSERVICE
+                // Metrics collection: record start time for latency measurement
+                metrics::TimePoint request_start;
+                metrics::Meter *meter = nullptr;
+                if (metrics::enable_metrics)
+                {
+                    request_start = metrics::Clock::now();
+                    meter = this->store_->GetMetricsMeter(shard_id_);
+                    assert(meter != nullptr);
+                }
+                else
+                {
+                    LOG(INFO) << "===yf: disable metrics";
+                }
+#endif
                 shard->main_ = std::move(sink);
                 KvError err = lbd();
                 KvTask *task = ThdTask();
@@ -168,6 +173,10 @@ private:
                     meter->Collect(metrics::NAME_ELOQSTORE_REQUESTS_COMPLETED,
                                    1.0,
                                    request_type_str);
+                }
+                else
+                {
+                    LOG(INFO) << "===yf: disable metrics";
                 }
 #endif
                 task->req_ = nullptr;
