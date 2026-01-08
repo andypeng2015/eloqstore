@@ -406,12 +406,13 @@ public:
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
     void InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
-                          const metrics::CommonLabels &common_labels);
-    
+                           const metrics::CommonLabels &common_labels);
+
     /**
      * @brief Get the metrics meter for a specific shard.
      * @param shard_id The shard ID.
-     * @return Pointer to the meter for the shard, or nullptr if metrics are not enabled or shard_id is invalid.
+     * @return Pointer to the meter for the shard, or nullptr if metrics are not
+     * enabled or shard_id is invalid.
      */
     metrics::Meter *GetMetricsMeter(size_t shard_id) const;
 #endif

@@ -37,10 +37,8 @@ inline const Name NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION{
     "eloqstore_async_io_submit_duration"};
 inline const Name NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS{
     "eloqstore_task_manager_active_tasks"};
-inline const Name NAME_ELOQSTORE_REQUEST_LATENCY{
-    "eloqstore_request_latency"};
+inline const Name NAME_ELOQSTORE_REQUEST_LATENCY{"eloqstore_request_latency"};
 inline const Name NAME_ELOQSTORE_REQUESTS_COMPLETED{
     "eloqstore_requests_completed"};
 }  // namespace metrics
 #endif  // ELOQSTORE_WITH_TXSERVICE
-

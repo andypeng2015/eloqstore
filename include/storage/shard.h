@@ -27,23 +27,34 @@ namespace eloqstore
 class EloqStoreModule;
 #endif
 
-
-namespace {
+namespace
+{
 inline const char *RequestTypeToString(RequestType type)
 {
     switch (type)
     {
-    case RequestType::Read: return "read";
-    case RequestType::Floor: return "floor";
-    case RequestType::Scan: return "scan";
-    case RequestType::ListObject: return "list_object";
-    case RequestType::BatchWrite: return "batch_write";
-    case RequestType::Truncate: return "truncate";
-    case RequestType::DropTable: return "drop_table";
-    case RequestType::Archive: return "archive";
-    case RequestType::Compact: return "compact";
-    case RequestType::CleanExpired: return "clean_expired";
-    default: return "unknown";
+    case RequestType::Read:
+        return "read";
+    case RequestType::Floor:
+        return "floor";
+    case RequestType::Scan:
+        return "scan";
+    case RequestType::ListObject:
+        return "list_object";
+    case RequestType::BatchWrite:
+        return "batch_write";
+    case RequestType::Truncate:
+        return "truncate";
+    case RequestType::DropTable:
+        return "drop_table";
+    case RequestType::Archive:
+        return "archive";
+    case RequestType::Compact:
+        return "compact";
+    case RequestType::CleanExpired:
+        return "clean_expired";
+    default:
+        return "unknown";
     }
 }
 }  // anonymous namespace
@@ -117,46 +128,52 @@ private:
             assert(meter != nullptr);
         }
 #endif
-        task->coro_ = boost::context::callcc(std::allocator_arg,
-                                             stack_allocator_,
-                                             [lbd, request_start, meter](continuation &&sink)
-                                             {
-                                                 shard->main_ = std::move(sink);
-                                                 KvError err = lbd();
-                                                 KvTask *task = ThdTask();
-                                                 if (err != KvError::NoError)
-                                                 {
-                                                     task->Abort();
-                                                 }
+        task->coro_ = boost::context::callcc(
+            std::allocator_arg,
+            stack_allocator_,
+            [lbd, request_start, meter](continuation &&sink)
+            {
+                shard->main_ = std::move(sink);
+                KvError err = lbd();
+                KvTask *task = ThdTask();
+                if (err != KvError::NoError)
+                {
+                    task->Abort();
+                }
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
-                                                 // Save request type before SetDone
-                                                 RequestType request_type = task->req_->Type();                         
+                // Save request type before SetDone
+                RequestType request_type = task->req_->Type();
 #endif
 
-                                                 task->req_->SetDone(err);
+                task->req_->SetDone(err);
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
-                                                 // Collect latency metric when request completes
-                                                 if (metrics::enable_metrics)
-                                                 {
-                                                    auto debug_end = metrics::Clock::now();
-                                                    LOG(INFO) << "yf: request time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - request_start).count();
-                                                    const char *request_type_str = RequestTypeToString(request_type);
-                                                    meter->CollectDuration(metrics::NAME_ELOQSTORE_REQUEST_LATENCY,
-                                                                            request_start,
-                                                                            request_type_str);
-                                                    // Increment request completion counter
-                                                    meter->Collect(metrics::NAME_ELOQSTORE_REQUESTS_COMPLETED,
-                                                                   1.0,
-                                                                   request_type_str);
-                                                 }
+                // Collect latency metric when request completes
+                if (metrics::enable_metrics)
+                {
+                    auto debug_end = metrics::Clock::now();
+                    LOG(INFO) << "yf: request time = "
+                              << std::chrono::duration_cast<
+                                     std::chrono::microseconds>(debug_end -
+                                                                request_start)
+                                     .count();
+                    const char *request_type_str =
+                        RequestTypeToString(request_type);
+                    meter->CollectDuration(
+                        metrics::NAME_ELOQSTORE_REQUEST_LATENCY,
+                        request_start,
+                        request_type_str);
+                    // Increment request completion counter
+                    meter->Collect(metrics::NAME_ELOQSTORE_REQUESTS_COMPLETED,
+                                   1.0,
+                                   request_type_str);
+                }
 #endif
-                                                 task->req_ = nullptr;
-                                                 task->status_ =
-                                                     TaskStatus::Finished;
-                                                 return std::move(shard->main_);
-                                             });
+                task->req_ = nullptr;
+                task->status_ = TaskStatus::Finished;
+                return std::move(shard->main_);
+            });
         running_ = nullptr;
         if (task->status_ == TaskStatus::Finished)
         {

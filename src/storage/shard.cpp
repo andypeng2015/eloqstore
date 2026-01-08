@@ -84,7 +84,8 @@ void Shard::WorkLoop()
     while (true)
     {
 #ifdef ELOQSTORE_WITH_TXSERVICE
-        // Metrics collection: start timing the round (one iteration = one round)
+        // Metrics collection: start timing the round (one iteration = one
+        // round)
         metrics::TimePoint round_start;
         if (metrics::enable_metrics)
         {
@@ -99,9 +100,9 @@ void Shard::WorkLoop()
 #ifdef ELOQSTORE_WITH_TXSERVICE
         if (metrics::enable_metrics)
         {
-            //LOG(INFO) << "yf: collect async io submit duration";
-            meter->CollectDuration(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
-                                 round_start);
+            // LOG(INFO) << "yf: collect async io submit duration";
+            meter->CollectDuration(
+                metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION, round_start);
         }
 #endif
         io_mgr_->PollComplete();
@@ -123,10 +124,10 @@ void Shard::WorkLoop()
         if (metrics::enable_metrics)
         {
             // LOG(INFO) << "yf: collect work one round duration";
-            meter->CollectDuration(metrics::NAME_ELOQSTORE_WORK_ONE_ROUND_DURATION,
-                                 round_start);
+            meter->CollectDuration(
+                metrics::NAME_ELOQSTORE_WORK_ONE_ROUND_DURATION, round_start);
             meter->Collect(metrics::NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS,
-                          static_cast<double>(task_mgr_.NumActive()));
+                           static_cast<double>(task_mgr_.NumActive()));
         }
 #endif
     }
@@ -478,7 +479,8 @@ void Shard::WorkOneRound()
         assert(meter != nullptr);
         round_start = metrics::Clock::now();
     }
-    // LOG(INFO) << "yf: enable metrics = " << metrics::enable_metrics << ", meter = " << meter;
+    // LOG(INFO) << "yf: enable metrics = " << metrics::enable_metrics << ",
+    // meter = " << meter;
 #endif
 
     if (__builtin_expect(!io_mgr_->BackgroundJobInited(), false))
@@ -516,15 +518,17 @@ void Shard::WorkOneRound()
 #endif
 
     io_mgr_->Submit();
-    
+
 #ifdef ELOQSTORE_WITH_TXSERVICE
     if (metrics::enable_metrics)
     {
         // LOG(INFO) << "yf: collect async io submit latency";
         auto debug_end = metrics::Clock::now();
-        // LOG(INFO) << "yf: async io submit time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - submit_start).count();
+        // LOG(INFO) << "yf: async io submit time = " <<
+        // std::chrono::duration_cast<std::chrono::microseconds>(debug_end -
+        // submit_start).count();
         meter->CollectDuration(metrics::NAME_ELOQSTORE_ASYNC_IO_SUBMIT_DURATION,
-                             submit_start);
+                               submit_start);
     }
 #endif
 
@@ -537,13 +541,18 @@ void Shard::WorkOneRound()
     if (metrics::enable_metrics)
     {
         auto debug_end = metrics::Clock::now();
-        // LOG(INFO) << "yf: work one round time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - round_start).count();
-        // LOG(INFO) << "yf: collect work one round latency";
+        // LOG(INFO) << "yf: work one round time = " <<
+        // std::chrono::duration_cast<std::chrono::microseconds>(debug_end -
+        // round_start).count(); LOG(INFO) << "yf: collect work one round
+        // latency";
         meter->CollectDuration(metrics::NAME_ELOQSTORE_WORK_ONE_ROUND_DURATION,
-                             round_start);
+                               round_start);
         meter->Collect(metrics::NAME_ELOQSTORE_TASK_MANAGER_ACTIVE_TASKS,
-                      static_cast<double>(task_mgr_.NumActive()));
-        LOG(INFO) << "yf: work one round time = " << std::chrono::duration_cast<std::chrono::microseconds>(debug_end - round_start).count();
+                       static_cast<double>(task_mgr_.NumActive()));
+        LOG(INFO) << "yf: work one round time = "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         debug_end - round_start)
+                         .count();
     }
 #endif
 }
