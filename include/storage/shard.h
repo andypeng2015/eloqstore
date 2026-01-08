@@ -99,10 +99,6 @@ private:
                     meter = this->store_->GetMetricsMeter(shard_id_);
                     assert(meter != nullptr);
                 }
-                else
-                {
-                    LOG(INFO) << "===yf: disable metrics";
-                }
 #endif
                 shard->main_ = std::move(sink);
                 KvError err = lbd();
@@ -123,12 +119,6 @@ private:
                 // Collect latency metric when request completes
                 if (this->store_->EnableMetrics())
                 {
-                    auto debug_end = metrics::Clock::now();
-                    LOG(INFO) << "yf: request time = "
-                              << std::chrono::duration_cast<
-                                     std::chrono::microseconds>(debug_end -
-                                                                request_start)
-                                     .count();
                     const char *request_type_str =
                         RequestTypeToString(request_type);
                     meter->CollectDuration(
@@ -139,10 +129,6 @@ private:
                     meter->Collect(metrics::NAME_ELOQSTORE_REQUESTS_COMPLETED,
                                    1.0,
                                    request_type_str);
-                }
-                else
-                {
-                    LOG(INFO) << "===yf: disable metrics";
                 }
 #endif
                 task->req_ = nullptr;

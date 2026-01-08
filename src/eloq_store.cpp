@@ -552,10 +552,6 @@ void EloqStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
     }
 
     enable_eloqstore_metrics_ = true;
-
-    LOG(INFO) << "yf: EloqStore::InitializeMetrics: num threads size = "
-              << options_.num_threads
-              << ", meter size = " << metrics_meters_.size();
 }
 
 metrics::Meter *EloqStore::GetMetricsMeter(size_t shard_id) const
