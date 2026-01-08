@@ -13,8 +13,6 @@
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
 #include "eloqstore_metrics.h"
-#include "meter.h"
-#include "metrics.h"
 #endif
 
 // https://github.com/cameron314/concurrentqueue/issues/280
@@ -26,38 +24,6 @@ namespace eloqstore
 #ifdef ELOQ_MODULE_ENABLED
 class EloqStoreModule;
 #endif
-
-namespace
-{
-inline const char *RequestTypeToString(RequestType type)
-{
-    switch (type)
-    {
-    case RequestType::Read:
-        return "read";
-    case RequestType::Floor:
-        return "floor";
-    case RequestType::Scan:
-        return "scan";
-    case RequestType::ListObject:
-        return "list_object";
-    case RequestType::BatchWrite:
-        return "batch_write";
-    case RequestType::Truncate:
-        return "truncate";
-    case RequestType::DropTable:
-        return "drop_table";
-    case RequestType::Archive:
-        return "archive";
-    case RequestType::Compact:
-        return "compact";
-    case RequestType::CleanExpired:
-        return "clean_expired";
-    default:
-        return "unknown";
-    }
-}
-}  // anonymous namespace
 
 class Shard
 {
@@ -187,6 +153,35 @@ private:
         if (task->status_ == TaskStatus::Finished)
         {
             OnTaskFinished(task);
+        }
+    }
+
+    static const char *RequestTypeToString(RequestType type)
+    {
+        switch (type)
+        {
+        case RequestType::Read:
+            return "read";
+        case RequestType::Floor:
+            return "floor";
+        case RequestType::Scan:
+            return "scan";
+        case RequestType::ListObject:
+            return "list_object";
+        case RequestType::BatchWrite:
+            return "batch_write";
+        case RequestType::Truncate:
+            return "truncate";
+        case RequestType::DropTable:
+            return "drop_table";
+        case RequestType::Archive:
+            return "archive";
+        case RequestType::Compact:
+            return "compact";
+        case RequestType::CleanExpired:
+            return "clean_expired";
+        default:
+            return "unknown";
         }
     }
 

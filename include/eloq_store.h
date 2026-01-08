@@ -41,6 +41,35 @@ enum class RequestType : uint8_t
     CleanExpired
 };
 
+inline const char *RequestTypeToString(RequestType type)
+{
+    switch (type)
+    {
+    case RequestType::Read:
+        return "read";
+    case RequestType::Floor:
+        return "floor";
+    case RequestType::Scan:
+        return "scan";
+    case RequestType::ListObject:
+        return "list_object";
+    case RequestType::BatchWrite:
+        return "batch_write";
+    case RequestType::Truncate:
+        return "truncate";
+    case RequestType::DropTable:
+        return "drop_table";
+    case RequestType::Archive:
+        return "archive";
+    case RequestType::Compact:
+        return "compact";
+    case RequestType::CleanExpired:
+        return "clean_expired";
+    default:
+        return "unknown";
+    }
+}
+
 class KvRequest
 {
 public:

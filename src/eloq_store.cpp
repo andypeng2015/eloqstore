@@ -30,8 +30,6 @@
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
 #include "eloqstore_metrics.h"
-#include "meter.h"
-#include "metrics.h"
 #endif
 
 namespace eloqstore

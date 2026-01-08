@@ -86,7 +86,7 @@ void Shard::WorkLoop()
 #ifdef ELOQSTORE_WITH_TXSERVICE
         // Metrics collection: start timing the round (one iteration = one
         // round)
-        metrics::TimePoint round_start;
+        metrics::TimePoint round_start{};
         if (metrics::enable_metrics)
         {
             round_start = metrics::Clock::now();
@@ -471,7 +471,7 @@ void Shard::WorkOneRound()
 {
 #ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection: start timing the round
-    metrics::TimePoint round_start;
+    metrics::TimePoint round_start{};
     metrics::Meter *meter = nullptr;
     if (metrics::enable_metrics)
     {
@@ -509,7 +509,7 @@ void Shard::WorkOneRound()
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
     // Metrics collection: time io_mgr_->Submit()
-    metrics::TimePoint submit_start;
+    metrics::TimePoint submit_start{};
     if (metrics::enable_metrics)
     {
         submit_start = metrics::Clock::now();
