@@ -374,7 +374,7 @@ TEST_CASE("batch write task pool cleaned after abort", "[batch_write]")
     REQUIRE(saw_abort);
 }
 
-TEST_CASE("truncate big data", "[batch_write]")
+TEST_CASE("batch delete large dataset with compaction", "[batch_write]")
 {
     auto opts = append_opts;
     eloqstore::EloqStore *store = InitStore(opts);
