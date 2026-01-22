@@ -38,6 +38,7 @@ KvError Replayer::Replay(ManifestFile *file)
     CHECK_KV_ERR(err);
     assert(!payload_.empty());
     DeserializeSnapshot(payload_);
+    bool corrupted_log_found = false;
 
     while (true)
     {
@@ -48,9 +49,24 @@ KvError Replayer::Replay(ManifestFile *file)
             {
                 break;
             }
+            if (err == KvError::Corrupted)
+            {
+                LOG(ERROR) << "Ignoring the corrupted log, continuing.";
+                corrupted_log_found = true;
+                continue;
+            }
             return err;
         }
+        if (corrupted_log_found)
+        {
+            LOG(ERROR) << "Found corruption log between normal log";
+            return KvError::Corrupted;
+        }
         ReplayLog();
+    }
+    if (corrupted_log_found_)
+    {
+        file_size_ = file_size_before_corrupted_log_;
     }
     return KvError::NoError;
 }
@@ -76,6 +92,23 @@ KvError Replayer::ParseNextRecord(ManifestFile *file)
     if (!ManifestBuilder::ValidateChecksum(content))
     {
         LOG(ERROR) << "Manifest file corrupted, checksum mismatch.";
+        LOG(ERROR) << "Corruption found at offset " << file_size_;
+        if (!corrupted_log_found_)
+        {
+            file_size_before_corrupted_log_ = file_size_;
+        }
+        corrupted_log_found_ = true;
+        // Advance file_size_ and skip padding to position at next record
+        const size_t record_bytes = header_len + payload_len;
+        file_size_ += record_bytes;
+        const size_t alignment = page_align;
+        const size_t remainder = record_bytes & (alignment - 1);
+        if (remainder > 0)
+        {
+            const size_t padding = alignment - remainder;
+            (void) file->SkipPadding(padding);
+            file_size_ += padding;
+        }
         return KvError::Corrupted;
     }
     content = content.substr(checksum_bytes);
@@ -93,7 +126,13 @@ KvError Replayer::ParseNextRecord(ManifestFile *file)
     {
         const size_t padding = alignment - remainder;
         err = file->SkipPadding(padding);
-        CHECK(err == KvError::NoError) << "Manifest is corrupted";
+        if (err != KvError::NoError)
+        {
+            // This is the last log and checksum is correct. Can be accepted.
+            LOG(WARNING) << "Manifest is truncated. Ignore the missed padding";
+            file_size_ += padding;
+            return KvError::EndOfFile;
+        }
         file_size_ += padding;
     }
 
