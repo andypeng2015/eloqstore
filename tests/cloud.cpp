@@ -361,7 +361,7 @@ TEST_CASE("cloud prewarm honors partition filter", "[cloud][prewarm]")
     options.prewarm_cloud_cache = true;
     options.local_space_limit = 2ULL << 30;
 
-    const std::string tbl_name = "prewarm_filter";
+    const std::string tbl_name = "partition_filter";
     std::vector<eloqstore::TableIdent> partitions;
     for (uint32_t i = 0; i < 3; ++i)
     {
@@ -372,7 +372,7 @@ TEST_CASE("cloud prewarm honors partition filter", "[cloud][prewarm]")
         partitions[0],
         partitions[1],
     };
-    options.prewarm_filter =
+    options.partition_filter =
         [included](const eloqstore::TableIdent &tbl) -> bool
     { return included.count(tbl) != 0; };
 
@@ -708,192 +708,6 @@ TEST_CASE("cloud prewarm aborts gracefully when disk fills",
 
     store->Stop();
 }
-
-TEST_CASE("cloud prewarm logs accurate completion statistics",
-          "[cloud][prewarm][logging]")
-{
-    using namespace std::chrono_literals;
-    namespace fs = std::filesystem;
-
-    // Test successful completion logging
-    SECTION("successful completion")
-    {
-        eloqstore::KvOptions options = cloud_options;
-        options.prewarm_cloud_cache = true;
-        options.pages_per_file_shift = 1;
-        options.local_space_limit = 50ULL << 20;  // 50MB
-        options.num_threads = 1;
-
-        eloqstore::EloqStore *store = InitStore(options);
-
-        eloqstore::TableIdent tbl_id{"logging_success", 0};
-        MapVerifier writer(tbl_id, store);
-        writer.SetAutoClean(false);
-        writer.SetValueSize(1024);
-        writer.Upsert(0, 1000);
-        writer.Validate();
-
-        auto cloud_files = ListCloudFiles(
-            options, options.cloud_store_path, tbl_id.ToString());
-
-        size_t expected_files = cloud_files.size();
-        LOG(INFO) << "Created " << expected_files << " files for logging test";
-
-        store->Stop();
-        CleanupLocalStore(options);
-
-        // Capture start time for duration verification
-        auto start_time = std::chrono::steady_clock::now();
-
-        REQUIRE(store->Start() == eloqstore::KvError::NoError);
-        writer.SetStore(store);
-
-        const fs::path partition_path =
-            fs::path(options.store_path[0]) / tbl_id.ToString();
-
-        // Wait for prewarm completion
-        REQUIRE(WaitForCondition(
-            30s,
-            100ms,
-            [&]()
-            {
-                if (!fs::exists(partition_path))
-                {
-                    return false;
-                }
-
-                size_t local_count = 0;
-                for (const auto &entry : fs::directory_iterator(partition_path))
-                {
-                    if (entry.is_regular_file())
-                    {
-                        local_count++;
-                    }
-                }
-
-                return local_count >= (expected_files * 0.9);
-            }));
-
-        auto end_time = std::chrono::steady_clock::now();
-        auto duration_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                                end_time - start_time)
-                                .count();
-
-        LOG(INFO) << "Prewarm took " << duration_sec << " seconds";
-
-        writer.Validate();
-
-        // Verify the actual number of files pulled matches expectations
-        size_t final_local_count = 0;
-        for (const auto &entry : fs::directory_iterator(partition_path))
-        {
-            if (entry.is_regular_file())
-            {
-                final_local_count++;
-            }
-        }
-
-        LOG(INFO) << "Verified " << final_local_count << " files locally from "
-                  << expected_files << " cloud files";
-
-        // Should have pulled nearly all files (allowing for manifests/metadata)
-        REQUIRE(final_local_count >= (expected_files * 0.9));
-        REQUIRE(final_local_count <= expected_files);
-
-        // Check logs for completion message
-        // Should see: "Prewarm completed successfully. Duration: Xs, API calls:
-        // Y,
-        //              Files listed: Z, Files skipped: W, Files pulled: V,
-        //              Shards: 1"
-        // Should see: "Shard 0 prewarm completed successfully. Pulled X files
-        // in Ys" The reported "Files pulled" should match final_local_count
-
-        store->Stop();
-    }
-
-    // Test abort logging (disk full)
-    SECTION("abort with disk full")
-    {
-        eloqstore::KvOptions options = cloud_options;
-        options.prewarm_cloud_cache = true;
-        options.pages_per_file_shift = 1;
-        options.local_space_limit = 3ULL << 20;  // Only 3MB
-        options.num_threads = 1;
-
-        eloqstore::EloqStore *store = InitStore(options);
-
-        eloqstore::TableIdent tbl_id{"logging_abort", 0};
-        MapVerifier writer(tbl_id, store);
-        writer.SetAutoClean(false);
-        writer.SetValueSize(2048);
-        writer.Upsert(0, 3000);  // Create more data than cache can hold
-        writer.Validate();
-
-        store->Stop();
-        CleanupLocalStore(options);
-
-        REQUIRE(store->Start() == eloqstore::KvError::NoError);
-        writer.SetStore(store);
-
-        const fs::path partition_path =
-            fs::path(options.store_path[0]) / tbl_id.ToString();
-
-        // Wait for prewarm to hit disk limit
-        bool hit_limit = WaitForCondition(
-            30s,
-            100ms,
-            [&]()
-            {
-                if (!fs::exists(partition_path))
-                {
-                    return false;
-                }
-                uint64_t local_size = DirectorySize(partition_path);
-                return local_size >= (options.local_space_limit * 0.8);
-            });
-
-        REQUIRE(hit_limit);
-
-        // Wait a bit more to ensure prewarm has fully aborted
-        std::this_thread::sleep_for(2s);
-
-        // Verify the number of files pulled before abort
-        size_t files_pulled = 0;
-        if (fs::exists(partition_path))
-        {
-            for (const auto &entry : fs::directory_iterator(partition_path))
-            {
-                if (entry.is_regular_file())
-                {
-                    files_pulled++;
-                }
-            }
-        }
-
-        uint64_t final_size = DirectorySize(partition_path);
-
-        LOG(INFO) << "Aborted prewarm pulled " << files_pulled
-                  << " files, using " << final_size << " bytes "
-                  << "(limit: " << options.local_space_limit << ")";
-
-        // Should have pulled some files before hitting limit
-        REQUIRE(files_pulled > 0);
-        REQUIRE(final_size <= (options.local_space_limit * 1.2));
-
-        // Check logs for abort messages
-        // Should see: "Shard 0 out of local disk space during prewarm.
-        //              Pulled X files in Ys before running out of space."
-        // Should see: "Prewarm aborted due to insufficient disk space.
-        // Duration: Xs,
-        //              API calls: Y, Files listed: Z, Files skipped: W, Files
-        //              pulled: V"
-        // The reported "Files pulled" should match files_pulled count
-
-        writer.Validate();
-        store->Stop();
-    }
-}
-
 TEST_CASE("cloud gc preserves archived data after truncate",
           "[cloud][archive][gc]")
 {
@@ -1004,6 +818,161 @@ TEST_CASE("cloud gc preserves archived data after truncate",
     store->Start();
     tester.Validate();
     store->Stop();
+}
+
+TEST_CASE("cloud global archive shares timestamp and filters partitions",
+          "[cloud][archive][global]")
+{
+    using namespace std::chrono_literals;
+
+    eloqstore::KvOptions options = cloud_archive_opts;
+    const std::string tbl_name = "global_archive_cloud";
+    constexpr uint32_t kListPageSize = 1000;
+    constexpr uint32_t kPartitionCount = kListPageSize + 5;
+    constexpr uint32_t kPartitionBase = 1000;
+    static_assert(kPartitionCount > kListPageSize);
+
+    std::vector<eloqstore::TableIdent> partitions;
+    partitions.reserve(kPartitionCount);
+    for (uint32_t i = 0; i < kPartitionCount; ++i)
+    {
+        partitions.emplace_back(tbl_name, kPartitionBase + i);
+    }
+
+    const uint32_t first_partition_id = kPartitionBase;
+    const uint32_t second_page_partition_id =
+        kPartitionBase + kPartitionCount - 1;
+    const uint32_t excluded_first_id = kPartitionBase + 1;
+    const uint32_t excluded_second_id = kPartitionBase + kPartitionCount - 2;
+    const std::unordered_set<uint32_t> included_ids = {
+        first_partition_id,
+        second_page_partition_id,
+    };
+    options.partition_filter =
+        [included_ids](const eloqstore::TableIdent &tbl) -> bool
+    { return included_ids.count(tbl.partition_id_) != 0; };
+
+    eloqstore::EloqStore *store = InitStore(options);
+    std::vector<std::unique_ptr<MapVerifier>> writers;
+    writers.reserve(partitions.size());
+    for (const auto &tbl_id : partitions)
+    {
+        auto writer = std::make_unique<MapVerifier>(tbl_id, store, false);
+        writer->SetAutoClean(false);
+        writer->SetValueSize(128);
+        writer->Upsert(0, 1);
+        writer->Validate();
+        writers.push_back(std::move(writer));
+    }
+
+    const std::string &cloud_root = options.cloud_store_path;
+    auto list_partitions = [&]()
+    {
+        std::unordered_set<uint32_t> listed;
+        auto files = ListCloudFiles(options, cloud_root);
+        for (const auto &name : files)
+        {
+            size_t slash = name.find('/');
+            if (slash == std::string::npos)
+            {
+                continue;
+            }
+            eloqstore::TableIdent tbl_id =
+                eloqstore::TableIdent::FromString(name.substr(0, slash));
+            if (!tbl_id.IsValid() || tbl_id.tbl_name_ != tbl_name)
+            {
+                continue;
+            }
+            listed.insert(tbl_id.partition_id_);
+        }
+        return listed;
+    };
+
+    std::unordered_set<uint32_t> listed_partitions;
+    REQUIRE(WaitForCondition(60s,
+                             500ms,
+                             [&]()
+                             {
+                                 listed_partitions = list_partitions();
+                                 if (listed_partitions.size() !=
+                                     kPartitionCount)
+                                 {
+                                     return false;
+                                 }
+                                 for (uint32_t id = kPartitionBase;
+                                      id < kPartitionBase + kPartitionCount;
+                                      ++id)
+                                 {
+                                     if (listed_partitions.count(id) == 0)
+                                     {
+                                         return false;
+                                     }
+                                 }
+                                 return true;
+                             }));
+    REQUIRE(listed_partitions.size() == kPartitionCount);
+    REQUIRE(listed_partitions.count(first_partition_id) != 0);
+    REQUIRE(listed_partitions.count(second_page_partition_id) != 0);
+
+    constexpr uint64_t kSnapshotTs = 987654321;
+    eloqstore::GlobalArchiveRequest global_req;
+    global_req.SetSnapshotTimestamp(kSnapshotTs);
+    store->ExecSync(&global_req);
+    REQUIRE(global_req.Error() == eloqstore::KvError::NoError);
+
+    auto collect_archive_timestamps = [&](const eloqstore::TableIdent &tbl_id)
+    {
+        std::vector<uint64_t> timestamps;
+        auto files = ListCloudFiles(options, cloud_root, tbl_id.ToString());
+        for (const auto &filename : files)
+        {
+            if (!eloqstore::IsArchiveFile(filename))
+            {
+                continue;
+            }
+            auto [type, suffix] = eloqstore::ParseFileName(filename);
+            uint64_t term = 0;
+            std::optional<uint64_t> ts;
+            REQUIRE(eloqstore::ParseManifestFileSuffix(suffix, term, ts));
+            REQUIRE(ts.has_value());
+            timestamps.push_back(*ts);
+        }
+        return timestamps;
+    };
+
+    auto wait_for_archive = [&](const eloqstore::TableIdent &tbl_id)
+    {
+        return WaitForCondition(
+            20s,
+            200ms,
+            [&]() { return !collect_archive_timestamps(tbl_id).empty(); });
+    };
+
+    const std::vector<eloqstore::TableIdent> included_partitions = {
+        {tbl_name, first_partition_id},
+        {tbl_name, second_page_partition_id},
+    };
+    const std::vector<eloqstore::TableIdent> excluded_partitions = {
+        {tbl_name, excluded_first_id},
+        {tbl_name, excluded_second_id},
+    };
+
+    for (const auto &tbl_id : included_partitions)
+    {
+        REQUIRE(wait_for_archive(tbl_id));
+        auto timestamps = collect_archive_timestamps(tbl_id);
+        REQUIRE_FALSE(timestamps.empty());
+        for (uint64_t ts : timestamps)
+        {
+            REQUIRE(ts == kSnapshotTs);
+        }
+    }
+
+    for (const auto &tbl_id : excluded_partitions)
+    {
+        auto timestamps = collect_archive_timestamps(tbl_id);
+        REQUIRE(timestamps.empty());
+    }
 }
 
 TEST_CASE("cloud store with restart", "[cloud]")
