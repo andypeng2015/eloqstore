@@ -27,6 +27,7 @@
 #include "concurrentqueue/concurrentqueue.h"
 #include "direct_io_buffer.h"
 #include "error.h"
+#include "storage/mem_index_page.h"
 #include "storage/object_store.h"
 #include "tasks/prewarm_task.h"
 #include "tasks/task.h"
@@ -51,7 +52,8 @@ public:
 using ManifestFilePtr = std::unique_ptr<ManifestFile>;
 
 // TODO(zhanghao): consider using inheritance instead of variant
-using VarPage = std::variant<MemIndexPage *, DataPage, OverflowPage, Page>;
+using VarPage =
+    std::variant<MemIndexPage::Handle, DataPage, OverflowPage, Page>;
 char *VarPagePtr(const VarPage &page);
 enum class VarPageType : uint8_t
 {

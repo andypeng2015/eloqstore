@@ -9,6 +9,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "pool.h"
+#include "storage/mem_index_page.h"
 #include "tasks/task.h"
 #include "types.h"
 
@@ -138,7 +139,7 @@ struct MappingSnapshot
      * @param page
      */
     void Unswizzling(MemIndexPage *page);
-    MemIndexPage *GetSwizzlingPointer(PageId page_id) const;
+    MemIndexPage::Handle GetSwizzlingHandle(PageId page_id) const;
     void AddSwizzling(PageId page_id, MemIndexPage *idx_page);
 
     static bool IsSwizzlingPointer(uint64_t val);

@@ -110,13 +110,22 @@ KvError WriteTask::WritePage(OverflowPage &&page)
     return WritePage(std::move(page), fp_id);
 }
 
-KvError WriteTask::WritePage(MemIndexPage *page)
+KvError WriteTask::WritePage(MemIndexPage::Handle &page)
 {
     SetChecksum({page->PagePtr(), Options()->data_page_size});
     auto [page_id, file_page_id] = AllocatePage(page->GetPageId());
     page->SetPageId(page_id);
     page->SetFilePageId(file_page_id);
     return WritePage(page, file_page_id);
+}
+
+KvError WriteTask::WritePage(MemIndexPage::Handle &page,
+                             FilePageId file_page_id)
+{
+    SetChecksum({page->PagePtr(), Options()->data_page_size});
+    // Create a temporary handle for VarPage to keep pinning during IO.
+    MemIndexPage::Handle io_handle(page.Get());
+    return WritePage(VarPage(std::move(io_handle)), file_page_id);
 }
 
 KvError WriteTask::WritePage(VarPage page, FilePageId file_page_id)
@@ -269,7 +278,8 @@ void WriteTask::WritePageCallback(VarPage page, KvError err)
     {
     case VarPageType::MemIndexPage:
     {
-        MemIndexPage *idx_page = std::get<MemIndexPage *>(page);
+        MemIndexPage::Handle &handle = std::get<MemIndexPage::Handle>(page);
+        MemIndexPage *idx_page = handle.Get();
         if (err == KvError::NoError)
         {
             shard->IndexManager()->FinishIo(cow_meta_.mapper_->GetMapping(),
@@ -277,7 +287,13 @@ void WriteTask::WritePageCallback(VarPage page, KvError err)
         }
         else
         {
-            shard->IndexManager()->FreeIndexPage(idx_page);
+            // Only free if it's still detached (i.e., not in active list).
+            if (idx_page->IsDetached())
+            {
+                handle.Reset();
+                CHECK(!idx_page->IsPinned());
+                shard->IndexManager()->FreeIndexPage(idx_page);
+            }
         }
         break;
     }
