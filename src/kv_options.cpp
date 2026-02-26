@@ -8,6 +8,7 @@
 #include <cctype>
 #include <charconv>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -382,4 +383,5 @@ bool KvOptions::operator==(const KvOptions &other) const
            overflow_pointers == other.overflow_pointers &&
            data_append_mode == other.data_append_mode;
 }
+
 }  // namespace eloqstore

@@ -993,8 +993,10 @@ void IouringMgr::EncodeUserData(io_uring_sqe *sqe,
 IouringMgr::FdIdx IouringMgr::GetRootFD(const TableIdent &tbl_id)
 {
     assert(!eloq_store->root_fds_.empty());
-    const uint16_t n_disks = eloq_store->root_fds_.size();
-    int root_fd = eloq_store->root_fds_[tbl_id.DiskIndex(n_disks)];
+    const size_t num_roots = eloq_store->root_fds_.size();
+    size_t disk_idx =
+        tbl_id.StorePathIndex(num_roots, eloq_store->options_.store_path_lut);
+    int root_fd = eloq_store->root_fds_[disk_idx];
     return {root_fd, false};
 }
 
@@ -1874,7 +1876,8 @@ void IouringMgr::FreeRegisterIndex(uint32_t idx)
 
 bool IouringMgr::HasOtherFile(const TableIdent &tbl_id) const
 {
-    fs::path dir_path = tbl_id.StorePath(options_->store_path);
+    fs::path dir_path =
+        tbl_id.StorePath(options_->store_path, options_->store_path_lut);
     std::error_code ec;
     if (!fs::exists(dir_path, ec) || !fs::is_directory(dir_path, ec))
     {
@@ -2725,7 +2728,8 @@ KvError CloudStoreMgr::ReadFilePrefix(const TableIdent &tbl_id,
     }
 
     // Construct absolute path to file
-    fs::path abs_path = tbl_id.StorePath(options_->store_path);
+    fs::path abs_path =
+        tbl_id.StorePath(options_->store_path, options_->store_path_lut);
     abs_path /= filename;
 
     // Open file for reading using io_uring
@@ -3001,7 +3005,8 @@ std::pair<size_t, size_t> CloudStoreMgr::TrimRestoredCacheUsage()
         }
 
         FileKey key_copy = *victim->key_;
-        fs::path file_path = key_copy.tbl_id_.StorePath(options_->store_path);
+        fs::path file_path = key_copy.tbl_id_.StorePath(
+            options_->store_path, options_->store_path_lut);
         file_path /= key_copy.filename_;
 
         std::error_code ec;
@@ -3048,6 +3053,9 @@ void CloudStoreMgr::Stop()
     {
         WaitForCloudTasksToDrain();
     }
+    // AsyncHttpManager containers can be touched by cloud worker threads via
+    // ObjectStore::RunHttpWork(). Drain all cloud tasks first so Shutdown()
+    // runs after workers finish in-flight work on this object store.
     obj_store_.Shutdown();
 }
 
@@ -4392,7 +4400,8 @@ KvError IouringMgr::ReadFile(const TableIdent &tbl_id,
         }
     }
 
-    fs::path abs_path = tbl_id.StorePath(options_->store_path);
+    fs::path abs_path =
+        tbl_id.StorePath(options_->store_path, options_->store_path_lut);
     abs_path /= filename;
 
     io_uring_sqe *sqe = GetSQE(UserDataType::KvTask, ThdTask());
@@ -4682,7 +4691,8 @@ KvError CloudStoreMgr::ReadArchiveFileAndDelete(const TableIdent &tbl_id,
         return read_err;
     }
 
-    fs::path local_path = tbl_id.StorePath(options_->store_path);
+    fs::path local_path =
+        tbl_id.StorePath(options_->store_path, options_->store_path_lut);
     local_path /= filename;
     KvError delete_err = DeleteFiles({local_path.string()});
     if (delete_err != KvError::NoError)
@@ -4965,7 +4975,8 @@ KvError CloudStoreMgr::WriteFile(const TableIdent &tbl_id,
                                  std::string_view filename,
                                  const DirectIoBuffer &buffer)
 {
-    fs::path path = tbl_id.StorePath(options_->store_path);
+    fs::path path =
+        tbl_id.StorePath(options_->store_path, options_->store_path_lut);
     path /= filename;
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
