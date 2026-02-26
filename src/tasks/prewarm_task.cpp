@@ -285,9 +285,9 @@ void PrewarmService::Stop()
     }
 }
 
-void PrewarmService::Prewarm(const std::vector<TableIdent> &tables)
+void PrewarmService::Prewarm(const TableIdent &table)
 {
-    prewarm_tables_.enqueue_bulk(tables.data(), tables.size());
+    prewarm_tables_.enqueue(table);
 }
 
 bool PrewarmService::ListCloudObjects(
@@ -378,6 +378,9 @@ void PrewarmService::PrewarmCloudCache(const std::string &remote_path)
     size_t api_call_count = 0;
     PrewarmStats::CompletionReason completion_reason =
         PrewarmStats::CompletionReason::Success;
+    const TableIdent scoped_tbl_id = TableIdent::FromString(remote_path);
+    const bool scoped_to_single_partition =
+        !remote_path.empty() && scoped_tbl_id.IsValid();
     auto should_abort = [&]()
     {
         if (stop_requested_.load(std::memory_order_acquire))
@@ -452,7 +455,22 @@ void PrewarmService::PrewarmCloudCache(const std::string &remote_path)
             }
             TableIdent tbl_id;
             std::string filename;
-            if (!ExtractPartition(path, tbl_id, filename))
+            if (scoped_to_single_partition)
+            {
+                // Listing with a specific partition prefix may return relative
+                // object names (for example "data_7_0"), so we should reuse
+                // the scoped table id and only parse the trailing filename.
+                tbl_id = scoped_tbl_id;
+                size_t slash = path.find_last_of('/');
+                filename =
+                    slash == std::string::npos ? path : path.substr(slash + 1);
+                if (filename.empty())
+                {
+                    total_files_skipped++;
+                    continue;
+                }
+            }
+            else if (!ExtractPartition(path, tbl_id, filename))
             {
                 total_files_skipped++;
                 continue;
