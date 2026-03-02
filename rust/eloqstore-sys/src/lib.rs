@@ -160,6 +160,10 @@ mod ffi {
             access_key: *const c_char,
             secret_key: *const c_char,
         );
+        pub fn CEloqStore_Options_SetCloudAutoCredentials(
+            opts: CEloqStoreHandle,
+            enable: bool,
+        );
         pub fn CEloqStore_Options_SetCloudVerifySsl(opts: CEloqStoreHandle, verify: bool);
         pub fn CEloqStore_Options_Validate(opts: CEloqStoreHandle) -> bool;
 
@@ -294,6 +298,7 @@ pub use self::ffi::CEloqStore_Options_Create;
 pub use self::ffi::CEloqStore_Options_Destroy;
 pub use self::ffi::CEloqStore_Options_SetBufferPoolSize;
 pub use self::ffi::CEloqStore_Options_SetCloudCredentials;
+pub use self::ffi::CEloqStore_Options_SetCloudAutoCredentials;
 pub use self::ffi::CEloqStore_Options_SetCloudProvider;
 pub use self::ffi::CEloqStore_Options_SetCloudRegion;
 pub use self::ffi::CEloqStore_Options_SetCloudStorePath;

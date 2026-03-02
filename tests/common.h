@@ -2,6 +2,7 @@
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentials.h>
+#include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/http/Scheme.h>
 #include <aws/s3/S3Client.h>
@@ -226,13 +227,32 @@ public:
         bool verify_ssl =
             opts.cloud_endpoint.empty() ? false : opts.cloud_verify_ssl;
         config.verifySSL = verify_ssl;
-        Aws::Auth::AWSCredentials credentials(opts.cloud_access_key.c_str(),
-                                              opts.cloud_secret_key.c_str());
-        client_ = std::make_unique<Aws::S3::S3Client>(
-            credentials,
-            config,
-            Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
-            false);
+        if (opts.cloud_auto_credentials && opts.cloud_secret_key.empty())
+        {
+            credentials_provider_ =
+                Aws::MakeShared<Aws::Auth::DefaultAWSCredentialsProviderChain>(
+                    "eloqstore");
+            client_ = std::make_unique<Aws::S3::S3Client>(
+                credentials_provider_,
+                config,
+                Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+                false);
+        }
+        else
+        {
+            if (opts.cloud_auto_credentials && !opts.cloud_secret_key.empty())
+            {
+                LOG(INFO)
+                    << "cloud_secret_key is set; disabling auto credentials";
+            }
+            Aws::Auth::AWSCredentials credentials(
+                opts.cloud_access_key.c_str(), opts.cloud_secret_key.c_str());
+            client_ = std::make_unique<Aws::S3::S3Client>(
+                credentials,
+                config,
+                Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+                false);
+        }
     }
 
     ~S3TestClient() = default;
@@ -243,6 +263,7 @@ public:
     }
 
 private:
+    std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider_;
     std::unique_ptr<Aws::S3::S3Client> client_;
 };
 
