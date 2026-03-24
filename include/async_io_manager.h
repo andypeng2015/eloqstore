@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <span>
@@ -16,6 +17,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -306,6 +308,24 @@ public:
     }
 
     virtual void CleanManifest(const TableIdent &tbl_id) = 0;
+    virtual void RegisterDirBusy(const TableIdent &tbl_id)
+    {
+        (void) tbl_id;
+    }
+    virtual void UnregisterDirBusy(const TableIdent &tbl_id)
+    {
+        (void) tbl_id;
+    }
+    virtual bool HasDirBusy(const TableIdent &tbl_id) const
+    {
+        (void) tbl_id;
+        return false;
+    }
+    virtual bool IsDirEvicting(const TableIdent &tbl_id) const
+    {
+        (void) tbl_id;
+        return false;
+    }
 
     // Get or create FileIdTermMapping for a table (default: nullptr, concrete
     // implementations can override).
@@ -481,6 +501,7 @@ public:
         return 0;  // IouringMgr doesn't use local file caching
     }
 
+    virtual KvError TryCleanupLocalPartitionDir(const TableIdent &tbl_id);
     void CleanManifest(const TableIdent &tbl_id) override;
 
     static constexpr uint64_t oflags_dir = O_DIRECTORY | O_RDONLY;
@@ -656,6 +677,22 @@ public:
                          uint64_t mode,
                          uint64_t term = 0,
                          bool skip_cloud_lookup = false);
+    virtual void WaitForEvictingPath(const TableIdent &tbl_id,
+                                     FileId file_id,
+                                     uint64_t term)
+    {
+    }
+    virtual bool StartEvictingPath(const TableIdent &tbl_id,
+                                   FileId file_id,
+                                   uint64_t term)
+    {
+        return true;
+    }
+    virtual void FinishEvictingPath(const TableIdent &tbl_id,
+                                    FileId file_id,
+                                    uint64_t term)
+    {
+    }
     virtual KvError SyncFile(LruFD::Ref fd);
     virtual KvError SyncFiles(const TableIdent &tbl_id,
                               std::span<LruFD::Ref> fds);
@@ -902,15 +939,26 @@ public:
     // Called when append-mode writing switches away from a data file.
     // Upload success marks that file clean; failure aborts the write task.
     KvError OnDataFileSealed(const TableIdent &tbl_id, FileId file_id) override;
+    KvError AppendManifest(const TableIdent &tbl_id,
+                           std::string_view log,
+                           uint64_t offset) override;
 
     std::pair<ManifestFilePtr, KvError> GetManifest(
         const TableIdent &tbl_id) override;
     std::pair<ManifestFilePtr, KvError> RefreshManifest(
         const TableIdent &tbl_id, std::string_view archive_tag);
+    KvError TryCleanupLocalPartitionDir(const TableIdent &tbl_id) override;
+    void RequestGcLocalCleanup(const TableIdent &tbl_id,
+                               const std::vector<std::string> &filenames);
+    void RegisterDirBusy(const TableIdent &tbl_id) override;
+    void UnregisterDirBusy(const TableIdent &tbl_id) override;
+    bool HasDirBusy(const TableIdent &tbl_id) const override;
+    bool IsDirEvicting(const TableIdent &tbl_id) const override;
     KvError DownloadFile(const TableIdent &tbl_id,
                          FileId file_id,
                          uint64_t term,
                          bool download_to_exist = false);
+    KvError CloseFile(LruFD::Ref fd) override;
 
     // Read partition-group CURRENT_TERM file from cloud, returns
     // {term_value, etag, error}. If file doesn't exist (404), returns
@@ -943,10 +991,18 @@ private:
                  uint64_t mode,
                  uint64_t term = 0,
                  bool skip_cloud_lookup = false) override;
+    void WaitForEvictingPath(const TableIdent &tbl_id,
+                             FileId file_id,
+                             uint64_t term) override;
+    bool StartEvictingPath(const TableIdent &tbl_id,
+                           FileId file_id,
+                           uint64_t term) override;
+    void FinishEvictingPath(const TableIdent &tbl_id,
+                            FileId file_id,
+                            uint64_t term) override;
     KvError SyncFile(LruFD::Ref fd) override;
     KvError SyncFiles(const TableIdent &tbl_id,
                       std::span<LruFD::Ref> fds) override;
-    KvError CloseFile(LruFD::Ref fd) override;
 
     KvError UploadFile(const TableIdent &tbl_id,
                        std::string filename,
@@ -976,6 +1032,9 @@ private:
                            DirectIoBuffer &buffer,
                            size_t dst_offset);
 
+    void IncrementClosedFileCount(const TableIdent &tbl_id);
+    void DecrementClosedFileCount(const TableIdent &tbl_id);
+    bool HasTrackedLocalFiles(const TableIdent &tbl_id) const;
     bool DequeClosedFile(const FileKey &key);
     void EnqueClosedFile(FileKey key);
     bool HasEvictableFile() const;
@@ -989,13 +1048,18 @@ private:
                                  size_t &restored_files,
                                  size_t &restored_bytes);
     std::pair<size_t, size_t> TrimRestoredCacheUsage();
+    FileKey EvictingPathKey(const TableIdent &tbl_id,
+                            FileId file_id,
+                            uint64_t term) const;
+    void WaitForEvictingKey(const FileKey &key);
+    bool StartEvictingKey(FileKey key);
+    void FinishEvictingKey(const FileKey &key);
+    bool IsEvictingKey(const FileKey &key) const;
 
     struct CachedFile
     {
         CachedFile() = default;
         const FileKey *key_;
-        bool evicting_{false};
-        WaitingSeat waiting_;
 
         void Deque()
         {
@@ -1019,6 +1083,15 @@ private:
      * @brief Locally cached files that are not currently opened.
      */
     std::unordered_map<FileKey, CachedFile> closed_files_;
+    struct EvictingPath
+    {
+        WaitingZone waiting_;
+    };
+    std::unordered_map<FileKey, EvictingPath> evicting_paths_;
+    std::unordered_set<FileKey> pending_gc_cleanup_;
+    std::unordered_map<TableIdent, size_t> closed_file_counts_;
+    std::deque<TableIdent> pending_dir_cleanup_;
+    std::unordered_map<TableIdent, uint32_t> dir_busy_counts_;
     CachedFile lru_file_head_;
     CachedFile lru_file_tail_;
     size_t used_local_space_{0};

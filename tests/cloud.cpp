@@ -11,13 +11,17 @@
 #include <unordered_set>
 #include <vector>
 
+#include "async_io_manager.h"
 #include "common.h"
 #include "kv_options.h"
+#include "storage/shard.h"
 #include "test_utils.h"
 #include "utils.h"
 
 using namespace test_util;
 namespace chrono = std::chrono;
+using std::chrono_literals::operator""ms;
+using std::chrono_literals::operator""s;
 
 TEST_CASE("simple cloud store", "[cloud]")
 {
@@ -66,11 +70,103 @@ void WriteBatches(MapVerifier &writer,
         next_key += entries_per_batch;
     }
 }
+
+std::vector<std::string> ListLocalPartitionFiles(
+    const std::filesystem::path &partition_path)
+{
+    std::vector<std::string> files;
+    if (!std::filesystem::exists(partition_path))
+    {
+        return files;
+    }
+    for (const auto &entry :
+         std::filesystem::directory_iterator(partition_path))
+    {
+        if (entry.is_regular_file())
+        {
+            files.push_back(entry.path().filename().string());
+        }
+    }
+    return files;
+}
+
+void WriteTestFile(const std::filesystem::path &path,
+                   std::string_view content = {})
+{
+    std::ofstream file(path, std::ios::binary);
+    file << content;
+}
+
+bool ContainsFileWithPrefix(const std::vector<std::string> &files,
+                            std::string_view prefix)
+{
+    return std::any_of(files.begin(),
+                       files.end(),
+                       [prefix](const std::string &name)
+                       { return name.rfind(prefix, 0) == 0; });
+}
+
+std::optional<std::string> FindLowestDataFile(
+    const std::vector<std::string> &files)
+{
+    bool found = false;
+    eloqstore::FileId best_file_id = 0;
+    uint64_t best_term = 0;
+    std::string best_name;
+
+    for (const std::string &name : files)
+    {
+        auto [type, suffix] = eloqstore::ParseFileName(name);
+        if (type != eloqstore::FileNameData)
+        {
+            continue;
+        }
+
+        eloqstore::FileId file_id = 0;
+        uint64_t term = 0;
+        if (!eloqstore::ParseDataFileSuffix(suffix, file_id, term))
+        {
+            continue;
+        }
+
+        if (!found || file_id < best_file_id ||
+            (file_id == best_file_id && term < best_term))
+        {
+            found = true;
+            best_file_id = file_id;
+            best_term = term;
+            best_name = name;
+        }
+    }
+
+    if (!found)
+    {
+        return std::nullopt;
+    }
+    return best_name;
+}
+
+struct EloqStoreAccessor
+{
+    eloqstore::KvOptions options_;
+    std::vector<int> root_fds_;
+    std::unique_ptr<eloqstore::CloudStorageService> cloud_service_;
+    std::vector<std::unique_ptr<eloqstore::Shard>> shards_;
+};
+
+eloqstore::Shard *PrimaryShard(eloqstore::EloqStore *store)
+{
+    auto *access = reinterpret_cast<EloqStoreAccessor *>(store);
+    if (access->shards_.empty())
+    {
+        return nullptr;
+    }
+    return access->shards_.front().get();
+}
 }  // namespace
 
 TEST_CASE("cloud prewarm downloads while shards idle", "[cloud][prewarm]")
 {
-    using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
     eloqstore::KvOptions options = cloud_options;
@@ -127,7 +223,6 @@ TEST_CASE("cloud prewarm downloads while shards idle", "[cloud][prewarm]")
 
 TEST_CASE("cloud prewarm supports writes after restart", "[cloud][prewarm]")
 {
-    using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
     eloqstore::KvOptions options = cloud_options;
@@ -164,8 +259,6 @@ TEST_CASE("cloud prewarm supports writes after restart", "[cloud][prewarm]")
 
 TEST_CASE("cloud reopen waits on evicting cached file", "[cloud][gc]")
 {
-    using namespace std::chrono_literals;
-
     eloqstore::KvOptions options = cloud_options;
     // Force frequent eviction: allow only ~3 data files worth of cache.
     options.local_space_limit = options.DataFileSize() * 10;
@@ -211,9 +304,63 @@ TEST_CASE("cloud reopen waits on evicting cached file", "[cloud][gc]")
     writer.Validate();
 }
 
+TEST_CASE("cloud gc removes local cached files after remote truncate",
+          "[cloud][gc][targeted]")
+{
+    namespace fs = std::filesystem;
+
+    eloqstore::KvOptions options = cloud_options;
+    options.num_threads = 1;
+    options.pages_per_file_shift = 1;
+    options.local_space_limit = 256ULL << 20;
+
+    CleanupStore(options);
+
+    eloqstore::EloqStore *store = InitStore(options);
+    eloqstore::TableIdent tbl_id{"cloud-gc-truncate", 0};
+    MapVerifier writer(tbl_id, store, false);
+    writer.SetAutoClean(false);
+    writer.SetValueSize(10024);
+
+    writer.Upsert(0, 600);
+    writer.Validate();
+
+    const fs::path partition_path =
+        fs::path(options.store_path[0]) / tbl_id.ToString();
+    REQUIRE(WaitForCondition(10s,
+                             50ms,
+                             [&]()
+                             {
+                                 return ContainsFileWithPrefix(
+                                     ListLocalPartitionFiles(partition_path),
+                                     "data_");
+                             }));
+
+    const std::vector<std::string> local_before =
+        ListLocalPartitionFiles(partition_path);
+    REQUIRE(ContainsFileWithPrefix(local_before, "data_"));
+    const auto deleted_local_it = std::find_if(
+        local_before.begin(),
+        local_before.end(),
+        [](const std::string &name) { return name.rfind("data_", 0) == 0; });
+    REQUIRE(deleted_local_it != local_before.end());
+    const std::string deleted_local_file = *deleted_local_it;
+
+    writer.Truncate(0, true);
+
+    REQUIRE(WaitForCondition(
+        20s,
+        100ms,
+        [&]() { return !fs::exists(partition_path / deleted_local_file); }));
+    REQUIRE(WaitForCondition(
+        20s, 100ms, [&]() { return !fs::exists(partition_path); }));
+
+    store->Stop();
+    CleanupStore(options);
+}
+
 TEST_CASE("cloud prewarm respects cache budget", "[cloud][prewarm]")
 {
-    using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
     eloqstore::KvOptions options = cloud_options;
@@ -404,9 +551,89 @@ TEST_CASE("cloud restore removes largest file id across all terms", "[cloud]")
     CleanupStore(options);
 }
 
+TEST_CASE("cloud startup restore removes empty idle partition directories",
+          "[cloud][cache]")
+{
+    namespace fs = std::filesystem;
+
+    eloqstore::KvOptions options = cloud_options;
+
+    options.allow_reuse_local_caches = true;
+    options.num_threads = 1;
+
+    const std::string suffix = "reuse-empty-idle";
+    const std::string local_base = options.store_path[0];
+    options.store_path = {local_base + std::string("/") + suffix};
+    options.cloud_store_path.push_back('/');
+    options.cloud_store_path += suffix;
+
+    CleanupStore(options);
+
+    auto store = std::make_unique<eloqstore::EloqStore>(options);
+    REQUIRE(store->Start() == eloqstore::KvError::NoError);
+    store->Stop();
+
+    const eloqstore::TableIdent tbl_id{"reuse_empty_idle", 0};
+    const fs::path partition_path =
+        fs::path(options.store_path.front()) / tbl_id.ToString();
+    fs::create_directories(partition_path);
+    REQUIRE(fs::exists(partition_path));
+    REQUIRE(fs::is_empty(partition_path));
+
+    REQUIRE(store->Start() == eloqstore::KvError::NoError);
+    REQUIRE(WaitForCondition(chrono::seconds(5),
+                             chrono::milliseconds(20),
+                             [&]() { return !fs::exists(partition_path); }));
+
+    store->Stop();
+    CleanupStore(options);
+}
+
+TEST_CASE("cloud startup restore removes partitions cleaned to empty",
+          "[cloud][cache]")
+{
+    namespace fs = std::filesystem;
+
+    eloqstore::KvOptions options = cloud_options;
+    options.allow_reuse_local_caches = true;
+    options.num_threads = 1;
+
+    const std::string suffix = "reuse-cleanup-idle";
+    const std::string local_base = options.store_path[0];
+    options.store_path = {local_base + std::string("/") + suffix};
+    options.cloud_store_path.push_back('/');
+    options.cloud_store_path += suffix;
+
+    CleanupStore(options);
+
+    auto store = std::make_unique<eloqstore::EloqStore>(options);
+    REQUIRE(store->Start() == eloqstore::KvError::NoError);
+    store->Stop();
+
+    const eloqstore::TableIdent tbl_id{"reuse_cleanup_idle", 0};
+    const fs::path partition_path =
+        fs::path(options.store_path.front()) / tbl_id.ToString();
+    fs::create_directories(partition_path);
+
+    const fs::path manifest_path =
+        partition_path / eloqstore::ManifestFileName(0);
+    const fs::path tmp_path = partition_path / "stale_download.tmp";
+    WriteTestFile(manifest_path, "stale-manifest");
+    WriteTestFile(tmp_path, "stale-cache");
+    REQUIRE(fs::exists(manifest_path));
+    REQUIRE(fs::exists(tmp_path));
+
+    REQUIRE(store->Start() == eloqstore::KvError::NoError);
+    REQUIRE(WaitForCondition(chrono::seconds(5),
+                             chrono::milliseconds(20),
+                             [&]() { return !fs::exists(partition_path); }));
+
+    store->Stop();
+    CleanupStore(options);
+}
+
 TEST_CASE("cloud prewarm honors partition filter", "[cloud][prewarm]")
 {
-    using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
     eloqstore::KvOptions options = cloud_options;
@@ -478,7 +705,6 @@ TEST_CASE("cloud prewarm honors partition filter", "[cloud][prewarm]")
 TEST_CASE("cloud prewarm handles pagination with 2000+ files",
           "[cloud][prewarm][pagination]")
 {
-    using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
     eloqstore::KvOptions options = cloud_options;
@@ -573,7 +799,6 @@ TEST_CASE("cloud prewarm handles pagination with 2000+ files",
 TEST_CASE("cloud prewarm queue management with producer blocking",
           "[cloud][prewarm][queue]")
 {
-    using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
     eloqstore::KvOptions options = cloud_options;
@@ -669,7 +894,6 @@ TEST_CASE("cloud prewarm queue management with producer blocking",
 TEST_CASE("cloud prewarm aborts gracefully when disk fills",
           "[cloud][prewarm][disk]")
 {
-    using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
     eloqstore::KvOptions options = cloud_options;
@@ -910,8 +1134,6 @@ TEST_CASE("cloud archive create is idempotent for an existing tag",
 TEST_CASE("cloud global archive shares timestamp and filters partitions",
           "[cloud][archive][global]")
 {
-    using namespace std::chrono_literals;
-
     eloqstore::KvOptions options = cloud_archive_opts;
     const std::string tbl_name = "global_archive_cloud";
     constexpr uint32_t kListPageSize = 1000;
@@ -1319,7 +1541,6 @@ TEST_CASE("cloud reopen refreshes local manifest from remote",
 TEST_CASE("cloud reopen triggers prewarm to download newer remote data files",
           "[cloud][reopen][prewarm]")
 {
-    using namespace std::chrono_literals;
     namespace fs = std::filesystem;
 
     std::atomic<bool> enable_partition_filter{false};
@@ -1442,6 +1663,8 @@ TEST_CASE("cloud global reopen refreshes local manifests", "[cloud][reopen]")
     options.cloud_store_path += "/reopen-global";
     options.prewarm_cloud_cache = false;
     options.allow_reuse_local_caches = true;
+    options.pages_per_file_shift =
+        1;  // Keep at least one data file after cache restore.
 
     CleanupStore(options);
 
@@ -1458,7 +1681,21 @@ TEST_CASE("cloud global reopen refreshes local manifests", "[cloud][reopen]")
     {
         verifiers.emplace_back(
             std::make_unique<MapVerifier>(tbl_id, store, false));
+        verifiers.back()->SetValueSize(10024);
     }
+
+    auto count_data_files = [&](const eloqstore::TableIdent &tbl_id)
+    {
+        const std::filesystem::path partition_path =
+            std::filesystem::path(options.store_path.front()) /
+            tbl_id.ToString();
+        const std::vector<std::string> files =
+            ListLocalPartitionFiles(partition_path);
+        return std::count_if(files.begin(),
+                             files.end(),
+                             [](const std::string &name)
+                             { return name.rfind("data_", 0) == 0; });
+    };
 
     // Version 1 data, keep a local backup.
     std::vector<std::map<std::string, eloqstore::KvEntry>> v1_datasets;
@@ -1474,6 +1711,10 @@ TEST_CASE("cloud global reopen refreshes local manifests", "[cloud][reopen]")
 
     // Stop to ensure local files are durable before backup.
     store->Stop();
+    for (const auto &tbl_id : tbl_ids)
+    {
+        REQUIRE(count_data_files(tbl_id) > 1);
+    }
 
     const std::string backup_root = "/tmp/test-data-reopen-global-backup";
     const std::string manifest_name = eloqstore::ManifestFileName(0);
@@ -1538,36 +1779,6 @@ TEST_CASE("cloud global reopen refreshes local manifests", "[cloud][reopen]")
             std::filesystem::copy_options::recursive |
                 std::filesystem::copy_options::overwrite_existing);
     }
-    auto clear_partition_data_files = [&](const eloqstore::TableIdent &table_id)
-    {
-        for (const auto &path : options.store_path)
-        {
-            std::filesystem::path part_path =
-                std::filesystem::path(path) / table_id.ToString();
-            if (!std::filesystem::exists(part_path))
-            {
-                continue;
-            }
-            for (const auto &ent :
-                 std::filesystem::directory_iterator(part_path))
-            {
-                if (!ent.is_regular_file())
-                {
-                    continue;
-                }
-                auto [type, suffix] =
-                    eloqstore::ParseFileName(ent.path().filename().string());
-                if (type == eloqstore::FileNameData)
-                {
-                    std::filesystem::remove(ent.path());
-                }
-            }
-        }
-    };
-    for (const auto &tbl_id : tbl_ids)
-    {
-        clear_partition_data_files(tbl_id);
-    }
 
     REQUIRE(store->Start() == eloqstore::KvError::NoError);
     REQUIRE(WaitForCondition(std::chrono::seconds(5),
@@ -1575,6 +1786,7 @@ TEST_CASE("cloud global reopen refreshes local manifests", "[cloud][reopen]")
                              [&]() { return store->Inited(); }));
     for (size_t i = 0; i < tbl_ids.size(); ++i)
     {
+        REQUIRE(count_data_files(tbl_ids[i]) > 0);
         std::filesystem::path restored_manifest =
             std::filesystem::path(options.store_path.front()) /
             tbl_ids[i].ToString() / manifest_name;
@@ -1896,7 +2108,6 @@ TEST_CASE("enhanced cloud rollback with mix operations", "[cloud][archive]")
 
 TEST_CASE("archive triggers with cloud-only partitions", "[cloud][archive]")
 {
-    using namespace std::chrono_literals;
     constexpr uint32_t kPartitionCount = 10;
     const std::string tbl_name = "remote_archive";
 

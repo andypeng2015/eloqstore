@@ -32,11 +32,13 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "error.h"
 #include "replayer.h"
+#include "tasks/write_task.h"
 #include "utils.h"
 
 #ifdef ELOQ_MODULE_ENABLED
@@ -67,6 +69,7 @@ namespace fs = std::filesystem;
 namespace
 {
 constexpr std::string_view kManifestTmp = "manifest.tmp";
+constexpr std::string_view kDirectoryEvictingPath = "<directory>";
 
 WriteTask *CurrentWriteTask()
 {
@@ -84,6 +87,7 @@ WriteTask *CurrentWriteTask()
         return nullptr;
     }
 }
+
 }  // namespace
 
 char *VarPagePtr(const VarPage &page)
@@ -899,6 +903,85 @@ size_t IouringMgr::GetOpenFileLimit() const
     return fd_limit_;
 }
 
+KvError IouringMgr::TryCleanupLocalPartitionDir(const TableIdent &tbl_id)
+{
+    const std::string partition_name = tbl_id.ToString();
+
+    LruFD::Ref dir_fd = GetOpenedFD(tbl_id, LruFD::kDirectory);
+    const bool directory_active =
+        dir_fd != nullptr && dir_fd.Get()->ref_count_ > 1;
+    if (directory_active)
+    {
+        DLOG(INFO) << "Skip cleaning partition directory " << partition_name
+                   << " because directory handle is still active";
+        return KvError::NoError;
+    }
+
+    if (!StartEvictingPath(tbl_id, LruFD::kDirectory, 0))
+    {
+        DLOG(INFO) << "Skip cleaning partition directory " << partition_name
+                   << " because directory cleanup is already in progress";
+        return KvError::NoError;
+    }
+
+    auto close_idle_fd = [&](LruFD::Ref &fd_ref,
+                             std::string_view fd_name) -> KvError
+    {
+        if (fd_ref == nullptr || fd_ref.Get()->ref_count_ != 1)
+        {
+            return KvError::NoError;
+        }
+
+        KvError close_err = CloseFile(std::move(fd_ref));
+        if (close_err != KvError::NoError)
+        {
+            LOG(WARNING) << "Failed to close cached-idle " << fd_name
+                         << " handle for table " << tbl_id << ": "
+                         << ErrorString(close_err);
+        }
+        return close_err;
+    };
+
+    KvError close_err = close_idle_fd(dir_fd, "directory");
+    if (close_err != KvError::NoError)
+    {
+        FinishEvictingPath(tbl_id, LruFD::kDirectory, 0);
+        return close_err;
+    }
+
+    FdIdx root_fd = GetRootFD(tbl_id);
+    int dir_res = UnlinkAt(root_fd, partition_name.c_str(), true);
+    FinishEvictingPath(tbl_id, LruFD::kDirectory, 0);
+    if (dir_res == 0 || dir_res == -ENOENT || dir_res == -ENOTEMPTY)
+    {
+        return KvError::NoError;
+    }
+
+    LOG(WARNING) << "Failed to delete partition directory " << partition_name
+                 << " for table " << tbl_id << ": " << strerror(-dir_res);
+    return ToKvError(dir_res);
+}
+
+KvError CloudStoreMgr::TryCleanupLocalPartitionDir(const TableIdent &tbl_id)
+{
+    const std::string partition_name = tbl_id.ToString();
+    if (HasDirBusy(tbl_id))
+    {
+        DLOG(INFO) << "Skip cleaning partition directory " << partition_name
+                   << " because directory is busy";
+        return KvError::NoError;
+    }
+
+    if (HasTrackedLocalFiles(tbl_id))
+    {
+        DLOG(INFO) << "Skip cleaning partition directory " << partition_name
+                   << " because local files are still tracked";
+        return KvError::NoError;
+    }
+
+    return IouringMgr::TryCleanupLocalPartitionDir(tbl_id);
+}
+
 void IouringMgr::CleanManifest(const TableIdent &tbl_id)
 {
     if (HasOtherFile(tbl_id))
@@ -940,31 +1023,11 @@ void IouringMgr::CleanManifest(const TableIdent &tbl_id)
         LOG(ERROR) << "Failed to open directory for table " << tbl_id
                    << " during cleanup: " << ErrorString(dir_err);
     }
-
-    FdIdx root_fd = GetRootFD(tbl_id);
-    std::string dir_name = tbl_id.ToString();
-    int dir_res = UnlinkAt(root_fd, dir_name.c_str(), true);
-    if (dir_res < 0)
+    KvError cleanup_err = TryCleanupLocalPartitionDir(tbl_id);
+    if (cleanup_err != KvError::NoError)
     {
-        if (dir_res == -ENOENT)
-        {
-            DLOG(INFO) << "Directory " << dir_name
-                       << " already removed while cleaning manifest";
-        }
-        else if (dir_res == -ENOTEMPTY)
-        {
-            DLOG(INFO) << "Directory " << dir_name
-                       << " is not empty, skip removing";
-        }
-        else
-        {
-            LOG(WARNING) << "Failed to delete directory " << dir_name << " : "
-                         << strerror(-dir_res);
-        }
-    }
-    else
-    {
-        DLOG(INFO) << "Successfully deleted directory " << dir_name;
+        LOG(WARNING) << "Failed to clean partition directory for table "
+                     << tbl_id << ": " << ErrorString(cleanup_err);
     }
 }
 
@@ -1061,6 +1124,17 @@ std::pair<IouringMgr::LruFD::Ref, KvError> IouringMgr::OpenOrCreateFD(
     uint64_t term,
     bool skip_cloud_lookup)
 {
+    KvTask *current_task = ThdTask();
+    if (current_task != nullptr && !current_task->ReadOnly())
+    {
+        auto *write_task = static_cast<WriteTask *>(current_task);
+        if (write_task->NeedWaitDirEviction())
+        {
+            WaitForEvictingPath(tbl_id, LruFD::kDirectory, 0);
+            write_task->ClearNeedWaitDirEviction();
+        }
+    }
+    WaitForEvictingPath(tbl_id, file_id, term);
     auto [it_tbl, inserted] = tables_.try_emplace(tbl_id);
     if (inserted)
     {
@@ -2058,6 +2132,21 @@ KvError IouringMgr::AppendManifest(const TableIdent &tbl_id,
     return SyncFile(std::move(fd_ref));
 }
 
+KvError CloudStoreMgr::AppendManifest(const TableIdent &tbl_id,
+                                      std::string_view log,
+                                      uint64_t offset)
+{
+    auto [dir_fd, dir_err] =
+        OpenOrCreateFD(tbl_id, LruFD::kDirectory, false, true, 0);
+    if (dir_err != KvError::NoError)
+    {
+        LOG(ERROR) << "Cloud AppendManifest ensure dir failed for " << tbl_id
+                   << ": " << ErrorString(dir_err);
+        return dir_err;
+    }
+    return IouringMgr::AppendManifest(tbl_id, log, offset);
+}
+
 int IouringMgr::WriteSnapshot(LruFD::Ref dir_fd,
                               std::string_view name,
                               std::string_view content)
@@ -2150,13 +2239,20 @@ KvError IouringMgr::SwitchManifest(const TableIdent &tbl_id,
     }
 
     auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory, false, 0);
-    CHECK_KV_ERR(err);
+    if (err != KvError::NoError)
+    {
+        LOG(ERROR) << "SwitchManifest open dir failed for " << tbl_id << ": "
+                   << ErrorString(err);
+        return err;
+    }
     uint64_t manifest_term = ProcessTerm();
     SetFileIdTerm(tbl_id, LruFD::kManifest, manifest_term);
     const std::string manifest_name = ManifestFileName(manifest_term);
     int res = WriteSnapshot(std::move(dir_fd), manifest_name, snapshot);
     if (res < 0)
     {
+        LOG(ERROR) << "SwitchManifest WriteSnapshot failed for " << tbl_id
+                   << " manifest=" << manifest_name << " : " << strerror(-res);
         return ToKvError(res);
     }
     CloseDirect(res);
@@ -3112,6 +3208,8 @@ KvError CloudStoreMgr::RestoreFilesForTable(const TableIdent &tbl_id,
         }
     }
 
+    const size_t retained_files =
+        cached_files.size() - max_data_file_indices.size();
     for (size_t i = 0; i < cached_files.size(); ++i)
     {
         if (has_max_data_file && std::find(max_data_file_indices.begin(),
@@ -3126,6 +3224,28 @@ KvError CloudStoreMgr::RestoreFilesForTable(const TableIdent &tbl_id,
         used_local_space_ += file_info.expected_size;
         ++restored_files;
         restored_bytes += file_info.expected_size;
+    }
+
+    if (retained_files == 0)
+    {
+        std::error_code remove_ec;
+        bool removed_dir = fs::remove(table_path, remove_ec);
+        if (remove_ec)
+        {
+            if (remove_ec.value() != ENOENT && remove_ec.value() != ENOTEMPTY &&
+                remove_ec.value() != EEXIST)
+            {
+                LOG(ERROR) << "Failed to remove idle partition directory "
+                           << table_path << " for table " << tbl_id << ": "
+                           << remove_ec.message();
+                return ToKvError(-remove_ec.value());
+            }
+        }
+        else if (removed_dir)
+        {
+            LOG(INFO) << "Removed idle partition directory " << table_path
+                      << " during cache restore";
+        }
     }
 
     return KvError::NoError;
@@ -3175,6 +3295,7 @@ std::pair<size_t, size_t> CloudStoreMgr::TrimRestoredCacheUsage()
 
         size_t file_size = EstimateFileSize(key_copy.filename_);
         victim->Deque();
+        DecrementClosedFileCount(key_copy.tbl_id_);
         closed_files_.erase(key_copy);
         used_local_space_ =
             used_local_space_ > file_size ? used_local_space_ - file_size : 0;
@@ -3195,8 +3316,8 @@ std::pair<size_t, size_t> CloudStoreMgr::TrimRestoredCacheUsage()
 bool CloudStoreMgr::IsIdle()
 {
     return file_cleaner_.status_ == TaskStatus::Idle &&
-           active_prewarm_tasks_ == 0 && inflight_cloud_slots_ == 0 &&
-           !obj_store_.HasPendingWork();
+           pending_gc_cleanup_.empty() && active_prewarm_tasks_ == 0 &&
+           inflight_cloud_slots_ == 0 && !obj_store_.HasPendingWork();
 }
 
 void CloudStoreMgr::Stop()
@@ -3973,6 +4094,69 @@ std::tuple<uint64_t, std::string, KvError> CloudStoreMgr::ReadTermFile()
     return {term, download_task.etag_, KvError::NoError};
 }
 
+void CloudStoreMgr::RequestGcLocalCleanup(
+    const TableIdent &tbl_id, const std::vector<std::string> &filenames)
+{
+    bool queued = false;
+    for (const std::string &filename : filenames)
+    {
+        FileKey key(tbl_id, filename);
+        if (!closed_files_.contains(key) || IsEvictingKey(key))
+        {
+            continue;
+        }
+        auto [_, inserted] = pending_gc_cleanup_.insert(key);
+        if (!inserted)
+        {
+            continue;
+        }
+        queued = true;
+    }
+
+    if (queued && file_cleaner_.status_ == TaskStatus::Idle)
+    {
+        file_cleaner_.Resume();
+    }
+}
+
+void CloudStoreMgr::RegisterDirBusy(const TableIdent &tbl_id)
+{
+    dir_busy_counts_[tbl_id]++;
+}
+
+void CloudStoreMgr::UnregisterDirBusy(const TableIdent &tbl_id)
+{
+    auto it = dir_busy_counts_.find(tbl_id);
+    if (it == dir_busy_counts_.end())
+    {
+        return;
+    }
+    if (--it->second == 0)
+    {
+        dir_busy_counts_.erase(it);
+        if (!HasTrackedLocalFiles(tbl_id))
+        {
+            pending_dir_cleanup_.push_back(tbl_id);
+            if (file_cleaner_.status_ == TaskStatus::Idle)
+            {
+                file_cleaner_.Resume();
+            }
+        }
+    }
+}
+
+bool CloudStoreMgr::HasDirBusy(const TableIdent &tbl_id) const
+{
+    auto it = dir_busy_counts_.find(tbl_id);
+    return it != dir_busy_counts_.end() && it->second > 0;
+}
+
+bool CloudStoreMgr::IsDirEvicting(const TableIdent &tbl_id) const
+{
+    return evicting_paths_.contains(
+        EvictingPathKey(tbl_id, LruFD::kDirectory, 0));
+}
+
 KvError CloudStoreMgr::UpsertTermFile(uint64_t process_term)
 {
     constexpr uint64_t kMaxAttempts = 10;
@@ -4163,12 +4347,25 @@ KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
         }
     }
 
-    auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory, false, 0);
-    CHECK_KV_ERR(err);
+    auto [dir_fd, err] =
+        OpenOrCreateFD(tbl_id, LruFD::kDirectory, false, true, 0);
+    if (err != KvError::NoError)
+    {
+        if (dequed)
+        {
+            EnqueClosedFile(fkey);
+        }
+        LOG(ERROR) << "Cloud SwitchManifest open dir failed for " << tbl_id
+                   << " manifest_term=" << manifest_term.value() << ": "
+                   << ErrorString(err);
+        return err;
+    }
     const std::string manifest_name = ManifestFileName(manifest_term.value());
     int res = WriteSnapshot(std::move(dir_fd), manifest_name, snapshot);
     if (res < 0)
     {
+        LOG(ERROR) << "Cloud SwitchManifest WriteSnapshot failed for " << tbl_id
+                   << " manifest=" << manifest_name << " : " << strerror(-res);
         if (dequed)
         {
             EnqueClosedFile(fkey);
@@ -4186,7 +4383,6 @@ KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
     {
         LOG(FATAL) << "can not upload manifest: " << ErrorString(err);
     }
-
     IouringMgr::CloseDirect(res);
     EnqueClosedFile(std::move(fkey));
     return KvError::NoError;
@@ -4194,6 +4390,17 @@ KvError CloudStoreMgr::SwitchManifest(const TableIdent &tbl_id,
 
 void CloudStoreMgr::CleanManifest(const TableIdent &tbl_id)
 {
+    IouringMgr::CleanManifest(tbl_id);
+    (void) DequeClosedFile(FileKey(tbl_id, ManifestFileName(ProcessTerm())));
+    if (!HasTrackedLocalFiles(tbl_id))
+    {
+        KvError cleanup_err = TryCleanupLocalPartitionDir(tbl_id);
+        if (cleanup_err != KvError::NoError)
+        {
+            LOG(WARNING) << "Failed to clean partition directory for table "
+                         << tbl_id << ": " << ErrorString(cleanup_err);
+        }
+    }
 }
 
 KvError CloudStoreMgr::CreateArchive(const TableIdent &tbl_id,
@@ -4218,8 +4425,16 @@ KvError CloudStoreMgr::CreateArchive(const TableIdent &tbl_id,
         }
     }
 
-    auto [dir_fd, err] = OpenFD(tbl_id, LruFD::kDirectory, false, 0);
-    CHECK_KV_ERR(err);
+    auto [dir_fd, err] =
+        OpenOrCreateFD(tbl_id, LruFD::kDirectory, false, true, 0);
+    if (err != KvError::NoError)
+    {
+        if (dequed)
+        {
+            EnqueClosedFile(key);
+        }
+        return err;
+    }
     int res = WriteSnapshot(std::move(dir_fd), key.filename_, snapshot);
     if (res < 0)
     {
@@ -4302,6 +4517,7 @@ int CloudStoreMgr::OpenFile(const TableIdent &tbl_id,
                             bool skip_cloud_lookup)
 {
     FileKey key = FileKey(tbl_id, ToFilename(file_id, term));
+    pending_gc_cleanup_.erase(key);
     if (DequeClosedFile(key))
     {
         // Try to open the file cached locally.
@@ -4434,14 +4650,23 @@ KvError CloudStoreMgr::SyncFiles(const TableIdent &tbl_id,
 
 KvError CloudStoreMgr::CloseFile(LruFD::Ref fd)
 {
-    KvError err = IouringMgr::CloseFile(fd);
-    CHECK_KV_ERR(err);
     FileId file_id = fd.Get()->file_id_;
+    uint64_t term = fd.Get()->term_;
+    std::optional<FileKey> file_key;
     if (file_id != LruFD::kDirectory)
     {
-        const TableIdent *tbl_id = fd.Get()->tbl_->tbl_id_;
-        uint64_t term = fd.Get()->term_;
-        EnqueClosedFile(FileKey(*tbl_id, ToFilename(file_id, term)));
+        file_key.emplace(*fd.Get()->tbl_->tbl_id_, ToFilename(file_id, term));
+    }
+    KvError err = IouringMgr::CloseFile(fd);
+    CHECK_KV_ERR(err);
+    if (file_key.has_value())
+    {
+        EnqueClosedFile(*file_key);
+        if (pending_gc_cleanup_.contains(*file_key) &&
+            file_cleaner_.status_ == TaskStatus::Idle)
+        {
+            file_cleaner_.Resume();
+        }
     }
     return KvError::NoError;
 }
@@ -4473,6 +4698,70 @@ size_t CloudStoreMgr::EstimateFileSize(std::string_view filename) const
     __builtin_unreachable();
 }
 
+FileKey CloudStoreMgr::EvictingPathKey(const TableIdent &tbl_id,
+                                       FileId file_id,
+                                       uint64_t term) const
+{
+    if (file_id == LruFD::kDirectory)
+    {
+        return FileKey(tbl_id, std::string(kDirectoryEvictingPath));
+    }
+    return FileKey(tbl_id, ToFilename(file_id, term));
+}
+
+void CloudStoreMgr::WaitForEvictingPath(const TableIdent &tbl_id,
+                                        FileId file_id,
+                                        uint64_t term)
+{
+    WaitForEvictingKey(EvictingPathKey(tbl_id, file_id, term));
+}
+
+bool CloudStoreMgr::StartEvictingPath(const TableIdent &tbl_id,
+                                      FileId file_id,
+                                      uint64_t term)
+{
+    return StartEvictingKey(EvictingPathKey(tbl_id, file_id, term));
+}
+
+void CloudStoreMgr::FinishEvictingPath(const TableIdent &tbl_id,
+                                       FileId file_id,
+                                       uint64_t term)
+{
+    FinishEvictingKey(EvictingPathKey(tbl_id, file_id, term));
+}
+
+void CloudStoreMgr::WaitForEvictingKey(const FileKey &key)
+{
+    auto it = evicting_paths_.find(key);
+    while (it != evicting_paths_.end())
+    {
+        it->second.waiting_.Wait(ThdTask());
+        it = evicting_paths_.find(key);
+    }
+}
+
+bool CloudStoreMgr::StartEvictingKey(FileKey key)
+{
+    auto [it, inserted] = evicting_paths_.try_emplace(std::move(key));
+    return inserted;
+}
+
+void CloudStoreMgr::FinishEvictingKey(const FileKey &key)
+{
+    auto it = evicting_paths_.find(key);
+    if (it == evicting_paths_.end())
+    {
+        return;
+    }
+    it->second.waiting_.WakeAll();
+    evicting_paths_.erase(it);
+}
+
+bool CloudStoreMgr::IsEvictingKey(const FileKey &key) const
+{
+    return evicting_paths_.contains(key);
+}
+
 void CloudStoreMgr::InitBackgroundJob()
 {
     IouringMgr::InitBackgroundJob();
@@ -4502,19 +4791,16 @@ void CloudStoreMgr::InitBackgroundJob()
 
 bool CloudStoreMgr::DequeClosedFile(const FileKey &key)
 {
+    WaitForEvictingKey(key);
+    pending_gc_cleanup_.erase(key);
     auto it = closed_files_.find(key);
-    while (it != closed_files_.end() && it->second.evicting_)
-    {
-        // At most one task can try to open a closed file.
-        it->second.waiting_.Wait(ThdTask());
-        it = closed_files_.find(key);
-    }
     if (it == closed_files_.end())
     {
         return false;
     }
     CachedFile *local_file = &it->second;
     local_file->Deque();
+    DecrementClosedFileCount(key.tbl_id_);
     closed_files_.erase(it);
     return true;
 }
@@ -4525,7 +4811,48 @@ void CloudStoreMgr::EnqueClosedFile(FileKey key)
     auto [it, ok] = closed_files_.try_emplace(std::move(key));
     assert(ok);
     it->second.key_ = &it->first;
+    IncrementClosedFileCount(it->first.tbl_id_);
     lru_file_head_.EnqueNext(&it->second);
+}
+
+void CloudStoreMgr::IncrementClosedFileCount(const TableIdent &tbl_id)
+{
+    closed_file_counts_[tbl_id]++;
+}
+
+void CloudStoreMgr::DecrementClosedFileCount(const TableIdent &tbl_id)
+{
+    auto it = closed_file_counts_.find(tbl_id);
+    CHECK(it != closed_file_counts_.end());
+    CHECK_GT(it->second, 0U);
+    if (--it->second == 0)
+    {
+        closed_file_counts_.erase(it);
+    }
+}
+
+bool CloudStoreMgr::HasTrackedLocalFiles(const TableIdent &tbl_id) const
+{
+    if (closed_file_counts_.contains(tbl_id))
+    {
+        return true;
+    }
+
+    auto it = tables_.find(tbl_id);
+    if (it == tables_.end())
+    {
+        return false;
+    }
+
+    const auto &fds = it->second.fds_;
+    CHECK(!fds.empty()) << "tables_ contains empty PartitionFiles for table "
+                        << tbl_id;
+    if (fds.size() > 1)
+    {
+        return true;
+    }
+
+    return fds.begin()->first != LruFD::kDirectory;
 }
 
 bool CloudStoreMgr::HasEvictableFile() const
@@ -4535,6 +4862,7 @@ bool CloudStoreMgr::HasEvictableFile() const
 
 int CloudStoreMgr::ReserveCacheSpace(size_t size)
 {
+    KvTask *current_task = ThdTask();
     while (used_local_space_ + size > shard_local_space_limit_)
     {
         if (!HasEvictableFile())
@@ -4542,7 +4870,8 @@ int CloudStoreMgr::ReserveCacheSpace(size_t size)
             LOG(WARNING) << "Cannot reserve " << size
                          << " bytes: used=" << used_local_space_
                          << " limit=" << shard_local_space_limit_
-                         << " no evictable files";
+                         << " no evictable files"
+                         << " task=" << current_task;
             return -ENOSPC;
         }
 
@@ -5276,8 +5605,14 @@ void CloudStoreMgr::FileCleaner::Run()
     status_ = TaskStatus::Ongoing;
     while (true)
     {
-        if (!io_mgr_->HasEvictableFile() ||
-            (io_mgr_->used_local_space_ <= threshold && requesting_.Empty()))
+        const bool has_pending_gc = !io_mgr_->pending_gc_cleanup_.empty();
+        const bool has_pending_dir_cleanup =
+            !io_mgr_->pending_dir_cleanup_.empty();
+        const bool needs_pressure_eviction =
+            io_mgr_->HasEvictableFile() &&
+            (io_mgr_->used_local_space_ > threshold || !requesting_.Empty());
+        if (!has_pending_gc && !has_pending_dir_cleanup &&
+            !needs_pressure_eviction)
         {
             // No file to evict, or used space is below threshold.
             requesting_.WakeAll();
@@ -5293,27 +5628,125 @@ void CloudStoreMgr::FileCleaner::Run()
         }
 
         uint16_t req_count = 0;
-        for (CachedFile *file = io_mgr_->lru_file_tail_.prev_;
-             file != &io_mgr_->lru_file_head_;
-             file = file->prev_)
+        bool made_progress = false;
+        std::unordered_set<TableIdent> touched_partitions;
+
+        if (has_pending_dir_cleanup)
         {
-            if (req_count == batch_size)
+            while (!io_mgr_->pending_dir_cleanup_.empty())
             {
-                // For pointer stability, we can not reallocate this vector.
-                break;
+                TableIdent tbl_id =
+                    std::move(io_mgr_->pending_dir_cleanup_.front());
+                io_mgr_->pending_dir_cleanup_.pop_front();
+                made_progress = true;
+                KvError cleanup_err =
+                    io_mgr_->TryCleanupLocalPartitionDir(tbl_id);
+                if (cleanup_err != KvError::NoError)
+                {
+                    LOG(WARNING)
+                        << "Failed to clean local partition directory for "
+                        << "table " << tbl_id
+                        << " after dir busy count reached zero: "
+                        << ErrorString(cleanup_err);
+                }
             }
+        }
 
-            // Set evicting to block task that try to open it.
-            file->evicting_ = true;
+        if (has_pending_gc)
+        {
+            for (auto it = io_mgr_->pending_gc_cleanup_.begin();
+                 it != io_mgr_->pending_gc_cleanup_.end() &&
+                 req_count < batch_size;)
+            {
+                const FileKey &key = *it;
 
-            UnlinkReq &req = unlink_reqs[req_count++];
-            req.file_ = file;
-            req.path_ = file->key_->tbl_id_.ToString();
-            req.path_ /= file->key_->filename_;
+                auto file_it = io_mgr_->closed_files_.find(key);
+                if (file_it == io_mgr_->closed_files_.end())
+                {
+                    ++it;
+                    continue;
+                }
 
-            io_uring_sqe *sqe = io_mgr_->GetSQE(UserDataType::BaseReq, &req);
-            int root_fd = io_mgr_->GetRootFD(req.file_->key_->tbl_id_).first;
-            io_uring_prep_unlinkat(sqe, root_fd, req.path_.c_str(), 0);
+                CachedFile *file = &file_it->second;
+                if (io_mgr_->IsEvictingKey(*file->key_))
+                {
+                    ++it;
+                    continue;
+                }
+
+                FileKey key_copy = *file->key_;
+                if (!io_mgr_->StartEvictingKey(key_copy))
+                {
+                    ++it;
+                    continue;
+                }
+                it = io_mgr_->pending_gc_cleanup_.erase(it);
+                made_progress = true;
+
+                UnlinkReq &req = unlink_reqs[req_count++];
+                req.file_ = file;
+                req.path_ = file->key_->tbl_id_.ToString();
+                req.path_ /= file->key_->filename_;
+
+                io_uring_sqe *sqe =
+                    io_mgr_->GetSQE(UserDataType::BaseReq, &req);
+                int root_fd = io_mgr_->GetRootFD(file->key_->tbl_id_).first;
+                DLOG(INFO) << "FileCleaner GC:" << req.path_;
+                io_uring_prep_unlinkat(sqe, root_fd, req.path_.c_str(), 0);
+            }
+        }
+
+        if (req_count < batch_size && needs_pressure_eviction)
+        {
+            for (CachedFile *file = io_mgr_->lru_file_tail_.prev_;
+                 file != &io_mgr_->lru_file_head_;
+                 file = file->prev_)
+            {
+                if (req_count == batch_size)
+                {
+                    // For pointer stability, we can not reallocate this vector.
+                    break;
+                }
+                if (io_mgr_->pending_gc_cleanup_.contains(*file->key_) ||
+                    io_mgr_->IsEvictingKey(*file->key_))
+                {
+                    continue;
+                }
+
+                // Set evicting to block task that try to open it.
+                FileKey key_copy = *file->key_;
+                if (!io_mgr_->StartEvictingKey(key_copy))
+                {
+                    continue;
+                }
+
+                UnlinkReq &req = unlink_reqs[req_count++];
+                req.file_ = file;
+                req.path_ = file->key_->tbl_id_.ToString();
+                req.path_ /= file->key_->filename_;
+
+                io_uring_sqe *sqe =
+                    io_mgr_->GetSQE(UserDataType::BaseReq, &req);
+                int root_fd =
+                    io_mgr_->GetRootFD(req.file_->key_->tbl_id_).first;
+                DLOG(INFO) << "FileCleaner eviction:" << req.path_;
+                io_uring_prep_unlinkat(sqe, root_fd, req.path_.c_str(), 0);
+            }
+        }
+
+        if (req_count == 0)
+        {
+            if (!made_progress)
+            {
+                status_ = TaskStatus::Idle;
+                Yield();
+                if (killed_)
+                {
+                    break;
+                }
+                status_ = TaskStatus::Ongoing;
+            }
+            continue;
         }
 
         WaitIo();
@@ -5322,22 +5755,43 @@ void CloudStoreMgr::FileCleaner::Run()
         {
             const UnlinkReq &req = unlink_reqs[i];
             CachedFile *file = req.file_;
-            if (req.res_ < 0)
+            const FileKey key_copy = *file->key_;
+            if (req.res_ < 0 && req.res_ != -ENOENT)
             {
                 LOG(ERROR) << "unlink file failed: " << req.path_ << " : "
                            << strerror(-req.res_);
-                file->evicting_ = false;
-                file->waiting_.Wake();
+                io_mgr_->FinishEvictingKey(key_copy);
                 continue;
             }
 
             size_t file_size = io_mgr_->EstimateFileSize(file->key_->filename_);
-            io_mgr_->used_local_space_ -= file_size;
+            if (file_size <= io_mgr_->used_local_space_)
+            {
+                io_mgr_->used_local_space_ -= file_size;
+            }
+            else
+            {
+                io_mgr_->used_local_space_ = 0;
+            }
+            touched_partitions.insert(file->key_->tbl_id_);
             file->Deque();
-            file->waiting_.Wake();
-            io_mgr_->closed_files_.erase(*file->key_);
+            io_mgr_->DecrementClosedFileCount(file->key_->tbl_id_);
+            io_mgr_->closed_files_.erase(key_copy);
+            io_mgr_->FinishEvictingKey(key_copy);
 
             requesting_.WakeOne();
+        }
+
+        for (const TableIdent &tbl_id : touched_partitions)
+        {
+            KvError cleanup_err = io_mgr_->TryCleanupLocalPartitionDir(tbl_id);
+            if (cleanup_err != KvError::NoError)
+            {
+                LOG(WARNING)
+                    << "Failed to clean local partition directory for table "
+                    << tbl_id
+                    << " after file cleanup: " << ErrorString(cleanup_err);
+            }
         }
         DLOG(INFO) << "file cleaner send " << req_count << " unlink requests";
     }
