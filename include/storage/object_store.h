@@ -1,6 +1,7 @@
 #pragma once
 
 #include <curl/curl.h>
+#include <glog/logging.h>
 #include <jsoncpp/json/json.h>
 
 #include <atomic>
@@ -232,9 +233,7 @@ public:
     {
     public:
         explicit DeleteTask(std::string remote_path)
-            : remote_path_(std::move(remote_path))
-        {
-        }
+            : remote_path_(std::move(remote_path)) {};
         Type TaskType() override
         {
             return Type::AsyncDelete;

@@ -57,6 +57,7 @@ const eloqstore::KvOptions cloud_options = {
     .local_space_limit = 200 << 20,  // 100MB
     .store_path = {"/tmp/test-data"},
     .cloud_store_path = "eloqstore/unit-test",
+    .cloud_endpoint = "http://127.0.0.1:9900",
     .pages_per_file_shift = 8,  // 1MB per datafile
     .data_append_mode = true,
 };
@@ -70,6 +71,7 @@ const eloqstore::KvOptions cloud_archive_opts = {
     .local_space_limit = 200 << 20,  // 200MB
     .store_path = {"/tmp/test-data"},
     .cloud_store_path = "eloqstore/unit-test",
+    .cloud_endpoint = "http://127.0.0.1:9900",
     .pages_per_file_shift = 8,
     .data_append_mode = true,
 };
